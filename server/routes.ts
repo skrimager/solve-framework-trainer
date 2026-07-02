@@ -1,0 +1,222 @@
+import type { Express } from "express";
+import { createServer } from 'node:http';
+import type { Server } from 'node:http';
+import { storage } from "./storage";
+import { getCustomerReply, scoreTranscript } from "./llm";
+import { transcriptMessageSchema, type TranscriptMessage } from "@shared/schema";
+import { seed } from "./seed";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import fs from "node:fs/promises";
+import fsSync from "node:fs";
+
+const AUDIO_DIR = path.join(process.cwd(), "audio_cache");
+if (!fsSync.existsSync(AUDIO_DIR)) fsSync.mkdirSync(AUDIO_DIR, { recursive: true });
+
+export async function registerRoutes(
+  httpServer: Server,
+  app: Express
+): Promise<Server> {
+  await seed();
+
+  // --- Health check (verify environment is live) ---
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      service: "SOLVE Framework Discovery Training Platform",
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // --- Auth (simple demo-credential login, no sessions/passwords hashing needed for pilot) ---
+  app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body ?? {};
+    const user = await storage.getUserByUsername(username ?? "");
+    if (!user || user.password !== password) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName });
+  });
+
+  // --- Scenarios ---
+  app.get("/api/scenarios", async (_req, res) => {
+    const scenarios = await storage.listScenarios();
+    res.json(scenarios.filter((s) => s.active));
+  });
+
+  app.get("/api/scenarios/:id", async (req, res) => {
+    const scenario = await storage.getScenario(Number(req.params.id));
+    if (!scenario) return res.status(404).json({ message: "Not found" });
+    res.json(scenario);
+  });
+
+  // --- Sessions (role-play attempts) ---
+  app.post("/api/sessions", async (req, res) => {
+    const { userId, scenarioId } = req.body ?? {};
+    const session = await storage.createSession({
+      userId,
+      scenarioId,
+      status: "in_progress",
+      transcript: "[]",
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    });
+    res.json(session);
+  });
+
+  app.get("/api/sessions/:id", async (req, res) => {
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ message: "Not found" });
+    res.json(session);
+  });
+
+  app.get("/api/users/:userId/sessions", async (req, res) => {
+    const sessions = await storage.listSessionsByUser(Number(req.params.userId));
+    res.json(sessions);
+  });
+
+  // manager/QA: all sessions across consultants
+  app.get("/api/sessions", async (_req, res) => {
+    const sessions = await storage.listAllSessions();
+    res.json(sessions);
+  });
+
+  // Consultant sends a message; get back the simulated customer's reply (+ optional audio)
+  app.post("/api/sessions/:id/message", async (req, res) => {
+    try {
+      const session = await storage.getSession(Number(req.params.id));
+      if (!session) return res.status(404).json({ message: "Session not found" });
+
+      const scenario = await storage.getScenario(session.scenarioId);
+      if (!scenario) return res.status(404).json({ message: "Scenario not found" });
+
+      const { content, withAudio } = req.body ?? {};
+      const transcript = JSON.parse(session.transcript);
+
+      const consultantMsg = transcriptMessageSchema.parse({
+        role: "consultant",
+        content,
+        timestamp: new Date().toISOString(),
+      });
+      transcript.push(consultantMsg);
+
+      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript);
+
+      const msgId = randomUUID();
+      const customerMsg = transcriptMessageSchema.parse({
+        role: "customer",
+        content: customerReplyText,
+        audioStatus: withAudio ? "pending" : "none",
+        msgId,
+        timestamp: new Date().toISOString(),
+      });
+      transcript.push(customerMsg);
+
+      // Respond immediately with the text reply — never make the consultant wait on voice.
+      const updated = await storage.updateSession(session.id, {
+        transcript: JSON.stringify(transcript),
+      });
+      res.json(updated);
+
+      // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
+      if (withAudio) {
+        synthesizeAudio(customerReplyText)
+          .then(async (audioUrl) => {
+            const latestSession = await storage.getSession(session.id);
+            if (!latestSession) return;
+            const latestTranscript: TranscriptMessage[] = JSON.parse(latestSession.transcript);
+            const idx = latestTranscript.findIndex((m) => m.msgId === msgId);
+            if (idx !== -1) {
+              latestTranscript[idx] = { ...latestTranscript[idx], audioUrl, audioStatus: "ready" };
+              await storage.updateSession(session.id, { transcript: JSON.stringify(latestTranscript) });
+            }
+          })
+          .catch(async (err) => {
+            console.error("Background TTS generation failed:", err);
+            const latestSession = await storage.getSession(session.id);
+            if (!latestSession) return;
+            const latestTranscript: TranscriptMessage[] = JSON.parse(latestSession.transcript);
+            const idx = latestTranscript.findIndex((m) => m.msgId === msgId);
+            if (idx !== -1) {
+              latestTranscript[idx] = { ...latestTranscript[idx], audioStatus: "failed" };
+              await storage.updateSession(session.id, { transcript: JSON.stringify(latestTranscript) });
+            }
+          });
+      }
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to process message" });
+    }
+  });
+
+  // Complete a session and score it
+  app.post("/api/sessions/:id/complete", async (req, res) => {
+    try {
+      const session = await storage.getSession(Number(req.params.id));
+      if (!session) return res.status(404).json({ message: "Session not found" });
+
+      const transcript = JSON.parse(session.transcript);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript);
+
+      const updated = await storage.updateSession(session.id, {
+        status: "completed",
+        score: overall,
+        rubricScores: JSON.stringify(rubric),
+        feedback,
+        completedAt: new Date().toISOString(),
+      });
+
+      res.json(updated);
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to score session" });
+    }
+  });
+
+  // Serve generated audio files
+  app.get("/api/audio/:filename", (req, res) => {
+    const filePath = path.join(AUDIO_DIR, req.params.filename);
+    if (!fsSync.existsSync(filePath)) return res.status(404).end();
+    const contentType = req.params.filename.endsWith(".wav") ? "audio/wav" : "audio/mpeg";
+    res.setHeader("Content-Type", contentType);
+    res.sendFile(filePath);
+  });
+
+  return httpServer;
+}
+
+const TTS_TIMEOUT_MS = 20_000;
+
+async function synthesizeAudio(text: string): Promise<string> {
+  // The TTS model returns WAV-encoded audio regardless of the requested output format,
+  // so we save (and serve) it with a matching .wav extension.
+  const filename = `${randomUUID()}.wav`;
+  const outputPath = path.join(AUDIO_DIR, filename);
+  const scriptPath = path.join(process.cwd(), "server", "tts.py");
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn("python3", [scriptPath, text, "kore", outputPath]);
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.kill("SIGKILL");
+      reject(new Error("TTS generation timed out"));
+    }, TTS_TIMEOUT_MS);
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`TTS script exited with code ${code}: ${stderr}`));
+    });
+  });
+
+  return `/api/audio/${filename}`;
+}
