@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
+import { getAvatarUrl } from "@/lib/avatars";
 import type { Scenario } from "@shared/schema";
 
 const VERTICAL_LABELS: Record<string, string> = {
@@ -94,11 +95,29 @@ export default function Scenarios() {
           {orderedVerticals.map((vertical) => {
             const pool = verticalGroups.get(vertical) ?? [];
             const difficulties = Array.from(new Set(pool.map((s) => s.difficulty)));
+            const avatarUrls = pool
+              .map((s) => getAvatarUrl(s.slug))
+              .filter((url): url is string => !!url)
+              .slice(0, 4);
             return (
               <Card key={vertical} data-testid={`card-vertical-${vertical}`}>
                 <CardHeader>
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-3">
                     <CardTitle className="text-lg">{VERTICAL_LABELS[vertical] ?? vertical}</CardTitle>
+                    {avatarUrls.length > 0 && (
+                      <div className="flex -space-x-3 shrink-0" data-testid={`avatars-preview-${vertical}`}>
+                        {avatarUrls.map((url, i) => (
+                          <img
+                            key={url}
+                            src={url}
+                            alt=""
+                            aria-hidden="true"
+                            className="w-8 h-8 rounded-full object-cover border-2 border-card"
+                            style={{ zIndex: avatarUrls.length - i }}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <CardDescription className="flex flex-wrap gap-1.5 pt-1">
                     {difficulties.map((d) => (

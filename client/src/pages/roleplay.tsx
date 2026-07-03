@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,35 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { AppShell } from "@/components/app-shell";
 import { useViewportHeight } from "@/hooks/use-viewport-height";
 import { apiRequest } from "@/lib/queryClient";
-import { Volume2, Send, Loader2, AlertCircle, RotateCcw } from "lucide-react";
-import type { Session, TranscriptMessage } from "@shared/schema";
+import { getAvatarUrl } from "@/lib/avatars";
+import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User } from "lucide-react";
+import type { Session, Scenario, TranscriptMessage } from "@shared/schema";
+
+// Web Speech API isn't in TS's default lib — declare the minimal shape we use.
+interface SpeechRecognitionResultLike {
+  isFinal: boolean;
+  0: { transcript: string };
+}
+interface SpeechRecognitionEventLike extends Event {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+}
+interface SpeechRecognitionLike extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  onend: (() => void) | null;
+}
+declare global {
+  interface Window {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  }
+}
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
@@ -45,6 +72,74 @@ export default function RolePlay() {
     // automatically without the consultant waiting or needing to refresh.
     refetchInterval: () => (pendingAudioIds.size > 0 ? 1500 : false),
   });
+
+  const { data: scenario } = useQuery<Scenario>({
+    queryKey: ["/api/scenarios", session?.scenarioId],
+    enabled: !!session?.scenarioId,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/scenarios/${session!.scenarioId}`);
+      return res.json();
+    },
+  });
+  const avatarUrl = getAvatarUrl(scenario?.slug);
+
+  // --- Voice input (Web Speech API) ---
+  const [isListening, setIsListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const draftBeforeListening = useRef("");
+
+  useEffect(() => {
+    const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      setSpeechSupported(false);
+      return;
+    }
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEventLike) => {
+      let finalTranscript = "";
+      let interimTranscript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+      const base = draftBeforeListening.current;
+      const spoken = (finalTranscript + interimTranscript).trim();
+      setDraft(spoken ? `${base}${base ? " " : ""}${spoken}` : base);
+      if (finalTranscript) {
+        draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
+      }
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+
+    return () => {
+      recognition.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleListening = useCallback(() => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+    if (isListening) {
+      recognition.stop();
+      setIsListening(false);
+    } else {
+      draftBeforeListening.current = draft.trim();
+      recognition.start();
+      setIsListening(true);
+    }
+  }, [isListening, draft]);
 
   const sendMessage = useMutation({
     mutationFn: async (content: string) => {
@@ -121,8 +216,13 @@ export default function RolePlay() {
 
   function handleSend() {
     if (!draft.trim() || sendMessage.isPending) return;
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    }
     sendMessage.mutate(draft.trim());
     setDraft("");
+    draftBeforeListening.current = "";
   }
 
   if (isLoading || !session) {
@@ -141,15 +241,45 @@ export default function RolePlay() {
         style={availableHeight ? { height: `${availableHeight}px`, maxHeight: `${availableHeight}px` } : undefined}
       >
         <div className="flex items-center justify-between gap-4 px-4 py-3 border-b shrink-0">
-          <p className="text-sm text-muted-foreground" data-testid="text-session-hint">
-            Ask open questions before proposing anything. Uncover the real need.
-          </p>
+          <div className="flex items-center gap-3 min-w-0">
+            {avatarUrl ? (
+              <img
+                src={avatarUrl}
+                alt="Customer"
+                className="w-10 h-10 rounded-full object-cover border shrink-0"
+                data-testid="img-persona-avatar-header"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center border shrink-0" data-testid="img-persona-avatar-header-fallback">
+                <User className="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+              </div>
+            )}
+            <p className="text-sm text-muted-foreground truncate" data-testid="text-session-hint">
+              Ask open questions before proposing anything. Uncover the real need.
+            </p>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             <Volume2 className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
             <Label htmlFor="voice-toggle" className="text-xs text-muted-foreground">Voice</Label>
             <Switch id="voice-toggle" checked={voiceOn} onCheckedChange={setVoiceOn} data-testid="switch-voice" />
           </div>
         </div>
+
+        {avatarUrl && (
+          <div
+            className="relative shrink-0 flex items-center justify-center overflow-hidden border-b bg-muted/30"
+            style={{ height: "clamp(96px, 22vh, 220px)" }}
+            data-testid="container-persona-hero"
+          >
+            <img
+              src={avatarUrl}
+              alt="Customer you're speaking with"
+              className="h-full w-auto object-cover object-top mx-auto"
+              data-testid="img-persona-avatar-hero"
+            />
+            <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background/80 to-transparent" aria-hidden="true" />
+          </div>
+        )}
 
         <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3" data-testid="container-transcript">
           {transcript.length === 0 && (
@@ -225,10 +355,24 @@ export default function RolePlay() {
                   handleSend();
                 }
               }}
-              placeholder="Type what you'd say to the customer..."
+              placeholder={isListening ? "Listening..." : speechSupported ? "Type or tap the mic to speak..." : "Type what you'd say to the customer..."}
               className="min-h-[44px] max-h-32 resize-none"
               data-testid="input-message"
             />
+            {speechSupported && (
+              <Button
+                onClick={toggleListening}
+                disabled={sendMessage.isPending}
+                size="icon"
+                variant={isListening ? "default" : "outline"}
+                aria-label={isListening ? "Stop voice input" : "Start voice input"}
+                aria-pressed={isListening}
+                className={isListening ? "animate-pulse" : undefined}
+                data-testid="button-mic"
+              >
+                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              </Button>
+            )}
             <Button
               onClick={handleSend}
               disabled={!draft.trim() || sendMessage.isPending}
