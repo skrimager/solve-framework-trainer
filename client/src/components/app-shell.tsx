@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
-import { LogOut } from "lucide-react";
+import { LogOut, ArrowLeft } from "lucide-react";
 
 export function AppShell({
   title,
@@ -34,6 +34,15 @@ export function AppShell({
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            <a
+              href="https://solveframework.com"
+              className="text-xs font-medium hidden sm:inline-flex items-center gap-1 hover:underline"
+              style={{ color: "#E06D00" }}
+              data-testid="link-back-to-solveframework"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Back to SOLVE Framework
+            </a>
             <span className="text-xs text-muted-foreground hidden sm:inline" data-testid="text-current-user">
               {user?.displayName} · {user?.role}
             </span>

@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { ArrowLeft } from "lucide-react";
 import trainerPhoto from "@assets/trainer-photo-1.png";
 
 export default function Login() {
@@ -112,6 +113,17 @@ export default function Login() {
             </form>
           </CardContent>
         </Card>
+        <div className="text-center">
+          <a
+            href="https://solveframework.com"
+            className="inline-flex items-center gap-1.5 text-sm font-medium hover:underline"
+            style={{ color: "#E06D00" }}
+            data-testid="link-back-to-solveframework"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to SOLVE Framework
+          </a>
+        </div>
         <p className="text-center text-xs text-muted-foreground">
           Private pilot preview. Not for public distribution.
         </p>
