@@ -288,6 +288,12 @@ export default function RolePlay() {
       return res.json();
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey[0] === "/api/users" &&
+          query.queryKey[2] === "sessions",
+      });
       setShowIncompleteModal(false);
       navigate("/scenarios");
     },
