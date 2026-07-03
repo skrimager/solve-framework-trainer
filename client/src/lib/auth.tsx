@@ -1,10 +1,13 @@
 import { createContext, useContext, useState, ReactNode } from "react";
 
+export type Level = "beginner" | "intermediate" | "advanced" | "certified";
+
 export type AuthUser = {
   id: number;
   username: string;
   role: "manager" | "consultant" | "qa";
   displayName: string;
+  currentLevel: Level;
 };
 
 type AuthContextValue = {

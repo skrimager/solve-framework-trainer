@@ -6,11 +6,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { AppShell } from "@/components/app-shell";
 import { useViewportHeight } from "@/hooks/use-viewport-height";
 import { apiRequest } from "@/lib/queryClient";
 import { getAvatarUrl } from "@/lib/avatars";
-import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User } from "lucide-react";
+import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Info, Save, XCircle } from "lucide-react";
 import type { Session, Scenario, TranscriptMessage } from "@shared/schema";
 
 // Web Speech API isn't in TS's default lib — declare the minimal shape we use.
@@ -47,8 +55,11 @@ export default function RolePlay() {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
   const [voiceOn, setVoiceOn] = useState(true);
+  const [handsFreeOn, setHandsFreeOn] = useState(false);
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
+  const [briefingDismissed, setBriefingDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Guards against auto-send firing twice for the same recognized utterance.
 
   const [pendingAudioIds, setPendingAudioIds] = useState<Set<string>>(new Set());
   const playedAudioIds = useRef<Set<string>>(new Set());
@@ -88,6 +99,16 @@ export default function RolePlay() {
   const [speechSupported, setSpeechSupported] = useState(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftBeforeListening = useRef("");
+  // Hands-free: after the consultant stops talking for this long, auto-send.
+  const SILENCE_AUTOSEND_MS = 1600;
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handsFreeOnRef = useRef(handsFreeOn);
+  useEffect(() => {
+    handsFreeOnRef.current = handsFreeOn;
+  }, [handsFreeOn]);
+  // handleSend is defined later in the component; keep a ref so the recognition
+  // callback (created once on mount) always calls the latest version.
+  const handleSendRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
@@ -117,6 +138,17 @@ export default function RolePlay() {
       if (finalTranscript) {
         draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
       }
+
+      // Hands-free mode: restart a silence timer on every new result. If the
+      // consultant stops speaking for SILENCE_AUTOSEND_MS, auto-send what's drafted.
+      if (handsFreeOnRef.current) {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          if (draftBeforeListening.current.trim()) {
+            handleSendRef.current();
+          }
+        }, SILENCE_AUTOSEND_MS);
+      }
     };
     recognition.onerror = () => setIsListening(false);
     recognition.onend = () => setIsListening(false);
@@ -124,14 +156,29 @@ export default function RolePlay() {
 
     return () => {
       recognition.stop();
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const startListening = useCallback(() => {
+    const recognition = recognitionRef.current;
+    if (!recognition || isListening) return;
+    draftBeforeListening.current = "";
+    setDraft("");
+    try {
+      recognition.start();
+      setIsListening(true);
+    } catch {
+      // Ignore "already started" errors from rapid auto-restarts.
+    }
+  }, [isListening]);
 
   const toggleListening = useCallback(() => {
     const recognition = recognitionRef.current;
     if (!recognition) return;
     if (isListening) {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       recognition.stop();
       setIsListening(false);
     } else {
@@ -140,6 +187,22 @@ export default function RolePlay() {
       setIsListening(true);
     }
   }, [isListening, draft]);
+
+  // Plays a customer voice reply. In hands-free mode, automatically starts
+  // listening again once the audio finishes so the conversation can continue
+  // without the consultant touching anything.
+  const playAudioUrl = useCallback(
+    (url: string) => {
+      const audio = new Audio(`${API_BASE}${url}`);
+      if (handsFreeOnRef.current) {
+        audio.onended = () => {
+          startListening();
+        };
+      }
+      audio.play().catch(() => {});
+    },
+    [startListening]
+  );
 
   const sendMessage = useMutation({
     mutationFn: async (content: string) => {
@@ -157,8 +220,10 @@ export default function RolePlay() {
         setPendingAudioIds((prev) => new Set(prev).add(last.msgId!));
       } else if (voiceOn && last?.audioUrl && last.msgId && !playedAudioIds.current.has(last.msgId)) {
         playedAudioIds.current.add(last.msgId);
-        const audio = new Audio(`${API_BASE}${last.audioUrl}`);
-        audio.play().catch(() => {});
+        playAudioUrl(last.audioUrl);
+      } else if (!voiceOn && handsFreeOnRef.current) {
+        // No audio to wait for (voice off) — still resume listening immediately.
+        startListening();
       }
       setLastFailedMessage(null);
     },
@@ -181,15 +246,18 @@ export default function RolePlay() {
         changed = true;
         if (msg.audioStatus === "ready" && msg.audioUrl && !playedAudioIds.current.has(msg.msgId)) {
           playedAudioIds.current.add(msg.msgId);
-          const audio = new Audio(`${API_BASE}${msg.audioUrl}`);
-          audio.play().catch(() => {});
+          playAudioUrl(msg.audioUrl);
+        } else if (msg.audioStatus === "failed" && handsFreeOnRef.current) {
+          // TTS failed — don't strand hands-free mode waiting forever, resume listening.
+          startListening();
         }
       }
     }
     if (changed) setPendingAudioIds(next);
-  }, [session, pendingAudioIds]);
+  }, [session, pendingAudioIds, playAudioUrl, startListening]);
 
   const [scoringFailed, setScoringFailed] = useState(false);
+  const [showIncompleteModal, setShowIncompleteModal] = useState(false);
 
   const completeSession = useMutation({
     mutationFn: async () => {
@@ -202,9 +270,26 @@ export default function RolePlay() {
       setScoringFailed(false);
       navigate(`/results/${id}`);
     },
-    onError: () => {
-      // Scoring failures shouldn't strand the session — let the consultant retry from here.
+    onError: (err: any) => {
+      // A 409 means no recommendation/solution has been proposed yet — show the
+      // "incomplete consultation" choice instead of treating it as a real failure.
+      if (String(err?.message ?? "").startsWith("409")) {
+        setShowIncompleteModal(true);
+        return;
+      }
+      // Real scoring failures shouldn't strand the session — let the consultant retry from here.
       setScoringFailed(true);
+    },
+  });
+
+  const saveForLater = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/sessions/${id}/save-for-later`, {});
+      return res.json();
+    },
+    onSuccess: () => {
+      setShowIncompleteModal(false);
+      navigate("/scenarios");
     },
   });
 
@@ -216,6 +301,7 @@ export default function RolePlay() {
 
   function handleSend() {
     if (!draft.trim() || sendMessage.isPending) return;
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -224,6 +310,10 @@ export default function RolePlay() {
     setDraft("");
     draftBeforeListening.current = "";
   }
+
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  });
 
   if (isLoading || !session) {
     return (
@@ -258,35 +348,92 @@ export default function RolePlay() {
               Ask open questions before proposing anything. Uncover the real need.
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Volume2 className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
-            <Label htmlFor="voice-toggle" className="text-xs text-muted-foreground">Voice</Label>
-            <Switch id="voice-toggle" checked={voiceOn} onCheckedChange={setVoiceOn} data-testid="switch-voice" />
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center gap-2">
+              <Volume2 className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
+              <Label htmlFor="voice-toggle" className="text-xs text-muted-foreground">Voice</Label>
+              <Switch id="voice-toggle" checked={voiceOn} onCheckedChange={setVoiceOn} data-testid="switch-voice" />
+            </div>
+            {speechSupported && (
+              <div className="flex items-center gap-2">
+                <Mic className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
+                <Label htmlFor="handsfree-toggle" className="text-xs text-muted-foreground">Hands-free</Label>
+                <Switch
+                  id="handsfree-toggle"
+                  checked={handsFreeOn}
+                  onCheckedChange={(checked) => {
+                    setHandsFreeOn(checked);
+                    if (checked) {
+                      if (!voiceOn) setVoiceOn(true);
+                      startListening();
+                    } else if (isListening) {
+                      recognitionRef.current?.stop();
+                      setIsListening(false);
+                      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                    }
+                  }}
+                  data-testid="switch-handsfree"
+                />
+              </div>
+            )}
           </div>
         </div>
 
-        {avatarUrl && (
-          <div
-            className="relative shrink-0 flex items-center justify-center overflow-hidden border-b bg-muted/30"
-            style={{ height: "clamp(96px, 22vh, 220px)" }}
-            data-testid="container-persona-hero"
-          >
-            <img
-              src={avatarUrl}
-              alt="Customer you're speaking with"
-              className="h-full w-auto object-cover object-top mx-auto"
-              data-testid="img-persona-avatar-hero"
-            />
-            <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background/80 to-transparent" aria-hidden="true" />
+        {scenario?.briefing && transcript.length === 0 && !briefingDismissed ? (
+          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-6" data-testid="container-scenario-briefing">
+            <div className="max-w-lg mx-auto space-y-4">
+              {avatarUrl && (
+                <img
+                  src={avatarUrl}
+                  alt="Customer you're about to speak with"
+                  className="w-20 h-20 rounded-full object-cover border-2 mx-auto"
+                  style={{ borderColor: "#E06D00" }}
+                  data-testid="img-persona-avatar-briefing"
+                />
+              )}
+              <div className="rounded-lg border-2 p-4 space-y-2" style={{ borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.06)" }}>
+                <div className="flex items-center gap-2">
+                  <Info className="w-4 h-4 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
+                  <p className="text-sm font-semibold" style={{ color: "#E06D00" }}>What you're looking at</p>
+                </div>
+                <p className="text-sm text-foreground leading-relaxed" data-testid="text-scenario-briefing">
+                  {scenario.briefing}
+                </p>
+              </div>
+              <Button
+                className="w-full"
+                style={{ backgroundColor: "#E06D00", color: "white" }}
+                onClick={() => setBriefingDismissed(true)}
+                data-testid="button-start-conversation"
+              >
+                I understand — start the conversation
+              </Button>
+            </div>
           </div>
-        )}
+        ) : (
+          <>
+            {avatarUrl && (
+              <div
+                className="relative shrink-0 flex items-center justify-center overflow-hidden border-b bg-muted/30"
+                style={{ height: "clamp(96px, 22vh, 220px)" }}
+                data-testid="container-persona-hero"
+              >
+                <img
+                  src={avatarUrl}
+                  alt="Customer you're speaking with"
+                  className="h-full w-auto object-cover object-top mx-auto"
+                  data-testid="img-persona-avatar-hero"
+                />
+                <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background/80 to-transparent" aria-hidden="true" />
+              </div>
+            )}
 
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3" data-testid="container-transcript">
-          {transcript.length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-empty-transcript">
-              Greet the customer to begin the conversation.
-            </p>
-          )}
+            <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3" data-testid="container-transcript">
+              {transcript.length === 0 && (
+                <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-empty-transcript">
+                  Greet the customer to begin the conversation.
+                </p>
+              )}
           {transcript.map((m, i) => (
             <div key={i} className={`flex ${m.role === "consultant" ? "justify-end" : "justify-start"}`}>
               <div
@@ -399,7 +546,42 @@ export default function RolePlay() {
             </Button>
           </div>
         </div>
+          </>
+        )}
       </div>
+
+      <Dialog open={showIncompleteModal} onOpenChange={setShowIncompleteModal}>
+        <DialogContent data-testid="dialog-incomplete-consultation">
+          <DialogHeader>
+            <DialogTitle>Consultation is incomplete</DialogTitle>
+            <DialogDescription data-testid="text-incomplete-message">
+              This consultation is incomplete without a solution. You haven't proposed a
+              recommendation or close to the customer yet. Save it for later and pick up where
+              you left off, or cancel and start over.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowIncompleteModal(false);
+                navigate("/scenarios");
+              }}
+              data-testid="button-cancel-consultation"
+            >
+              <XCircle className="w-4 h-4 mr-1.5" /> Cancel and start over
+            </Button>
+            <Button
+              onClick={() => saveForLater.mutate()}
+              disabled={saveForLater.isPending}
+              style={{ backgroundColor: "#E06D00", color: "white" }}
+              data-testid="button-save-for-later"
+            >
+              <Save className="w-4 h-4 mr-1.5" /> {saveForLater.isPending ? "Saving..." : "Save for Later"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }

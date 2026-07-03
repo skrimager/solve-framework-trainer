@@ -10,6 +10,7 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
+  currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' | 'certified' — auto-advances at 85%+ average score
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
@@ -17,6 +18,7 @@ export const insertUserSchema = createInsertSchema(users).pick({
   password: true,
   role: true,
   displayName: true,
+  currentLevel: true,
 });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -31,6 +33,7 @@ export const scenarios = pgTable("scenarios", {
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // system prompt describing the simulated customer
   difficulty: text("difficulty").notNull(), // 'beginner' | 'intermediate' | 'advanced'
+  briefing: text("briefing").notNull().default(""), // consultant-facing setup: the setting + any technical terms shown before the role-play starts
   active: boolean("active").notNull().default(true),
 });
 
@@ -46,13 +49,14 @@ export const sessions = pgTable("sessions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed'
   transcript: text("transcript").notNull().default("[]"), // JSON array of {role, content, audioUrl?}
   score: integer("score"), // 0-100 overall, set on completion
   rubricScores: text("rubric_scores"), // JSON: per-dimension scores, set on completion
   feedback: text("feedback"), // narrative feedback, set on completion
   createdAt: text("created_at").notNull(),
   completedAt: text("completed_at"),
+  savedAt: text("saved_at"), // set when the consultant chooses "Save for Later" on an incomplete session
 });
 
 export const insertSessionSchema = createInsertSchema(sessions).omit({

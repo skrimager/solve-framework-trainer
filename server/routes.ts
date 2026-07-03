@@ -2,10 +2,10 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, scoreTranscript } from "./llm";
+import { getCustomerReply, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
+import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage } from "@shared/schema";
 import { seed } from "./seed";
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -36,7 +36,7 @@ export async function registerRoutes(
     if (!user || user.password !== password) {
       return res.status(401).json({ message: "Invalid username or password" });
     }
-    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName });
+    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName, currentLevel: user.currentLevel });
   });
 
   // --- Scenarios ---
@@ -124,7 +124,7 @@ export async function registerRoutes(
 
       // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
       if (withAudio) {
-        synthesizeAudio(customerReplyText)
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug))
           .then(async (audioUrl) => {
             const latestSession = await storage.getSession(session.id);
             if (!latestSession) return;
@@ -153,13 +153,24 @@ export async function registerRoutes(
     }
   });
 
-  // Complete a session and score it
+  // Complete a session and score it. Unless `force` is set, a session with no
+  // recommendation/solution/close proposed yet is blocked so the client can
+  // show the "consultation is incomplete" modal instead of scoring prematurely.
   app.post("/api/sessions/:id/complete", async (req, res) => {
     try {
       const session = await storage.getSession(Number(req.params.id));
       if (!session) return res.status(404).json({ message: "Session not found" });
 
       const transcript = JSON.parse(session.transcript);
+      const { force } = req.body ?? {};
+
+      if (!force) {
+        const proposed = await hasProposedRecommendation(transcript);
+        if (!proposed) {
+          return res.status(409).json({ message: "incomplete", incomplete: true });
+        }
+      }
+
       const { rubric, feedback, overall } = await scoreTranscript(transcript);
 
       const updated = await storage.updateSession(session.id, {
@@ -170,6 +181,24 @@ export async function registerRoutes(
         completedAt: new Date().toISOString(),
       });
 
+      // Auto-advance the consultant's level if their average score at their
+      // current level's difficulty has reached the threshold.
+      const user = await storage.getUser(session.userId);
+      if (user) {
+        const [allSessions, allScenarios] = await Promise.all([
+          storage.listSessionsByUser(user.id),
+          storage.listScenarios(),
+        ]);
+        const scenarioDifficulty = new Map(allScenarios.map((s) => [s.id, s.difficulty]));
+        const scoresAtLevel = allSessions
+          .filter((s) => s.status === "completed" && s.score !== null && scenarioDifficulty.get(s.scenarioId) === user.currentLevel)
+          .map((s) => s.score as number);
+        const nextLevel = computeLevelAdvancement(user.currentLevel, scoresAtLevel);
+        if (nextLevel) {
+          await storage.updateUser(user.id, { currentLevel: nextLevel });
+        }
+      }
+
       res.json(updated);
     } catch (err: any) {
       console.error(err);
@@ -177,46 +206,60 @@ export async function registerRoutes(
     }
   });
 
+  // Save an incomplete session for later instead of scoring it now.
+  app.post("/api/sessions/:id/save-for-later", async (req, res) => {
+    try {
+      const session = await storage.getSession(Number(req.params.id));
+      if (!session) return res.status(404).json({ message: "Session not found" });
+      const updated = await storage.updateSession(session.id, {
+        status: "saved",
+        savedAt: new Date().toISOString(),
+      });
+      res.json(updated);
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to save session" });
+    }
+  });
+
+  // Resume a previously-saved session so it can continue in the role-play view.
+  app.post("/api/sessions/:id/resume", async (req, res) => {
+    try {
+      const session = await storage.getSession(Number(req.params.id));
+      if (!session) return res.status(404).json({ message: "Session not found" });
+      const updated = await storage.updateSession(session.id, {
+        status: "in_progress",
+        savedAt: null,
+      });
+      res.json(updated);
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to resume session" });
+    }
+  });
+
+  // Get the current user's fresh level (used after a session completes to refresh the badge).
+  app.get("/api/users/:userId", async (req, res) => {
+    const user = await storage.getUser(Number(req.params.userId));
+    if (!user) return res.status(404).json({ message: "Not found" });
+    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName, currentLevel: user.currentLevel });
+  });
+
   // Serve generated audio files
   app.get("/api/audio/:filename", (req, res) => {
     const filePath = path.join(AUDIO_DIR, req.params.filename);
     if (!fsSync.existsSync(filePath)) return res.status(404).end();
-    const contentType = req.params.filename.endsWith(".wav") ? "audio/wav" : "audio/mpeg";
-    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Type", "audio/mpeg");
     res.sendFile(filePath);
   });
 
   return httpServer;
 }
 
-const TTS_TIMEOUT_MS = 20_000;
-
-async function synthesizeAudio(text: string): Promise<string> {
-  // The TTS model returns WAV-encoded audio regardless of the requested output format,
-  // so we save (and serve) it with a matching .wav extension.
-  const filename = `${randomUUID()}.wav`;
+async function synthesizeAudio(text: string, voice: string): Promise<string> {
+  const filename = `${randomUUID()}.mp3`;
   const outputPath = path.join(AUDIO_DIR, filename);
-  const scriptPath = path.join(process.cwd(), "server", "tts.py");
-
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn("python3", [scriptPath, text, "kore", outputPath]);
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      proc.kill("SIGKILL");
-      reject(new Error("TTS generation timed out"));
-    }, TTS_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => (stderr += d.toString()));
-    proc.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`TTS script exited with code ${code}: ${stderr}`));
-    });
-  });
-
+  const audioBuffer = await synthesizeSpeech(text, voice);
+  await fs.writeFile(outputPath, audioBuffer);
   return `/api/audio/${filename}`;
 }

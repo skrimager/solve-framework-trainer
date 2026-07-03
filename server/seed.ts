@@ -26,7 +26,7 @@ export async function seed() {
   }
 }
 
-const scenarios: InsertScenario[] = [
+export const scenarios: InsertScenario[] = [
   // ─────────────────────────────────────────────────────────────
   // MANUFACTURED HOUSING
   // ─────────────────────────────────────────────────────────────
@@ -35,6 +35,8 @@ const scenarios: InsertScenario[] = [
     title: "First-Time Buyer, Budget-Conscious",
     vertical: "manufactured_housing",
     difficulty: "beginner",
+    briefing:
+      "You're a sales consultant at a manufactured housing dealership. A young couple has walked onto the lot to shop for their first home. Key terms: 'manufactured home' (factory-built housing set on a permanent chassis, distinct from a mobile home or site-built house), 'single-wide' vs. 'double-wide' (one vs. two factory-built sections joined on site), 'lot rent' (monthly land-lease fee if the home sits in a community rather than on owned land).",
     active: true,
     description:
       "A young family is shopping for their first manufactured home. They say they want the cheapest model on the lot, but their real need is predictable monthly payments and enough space for a growing family. Practice uncovering the real 'why' behind the stated budget request — the drill vs. the hole.",
@@ -58,6 +60,8 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Retiree Downsizing",
     vertical: "manufactured_housing",
     difficulty: "intermediate",
+    briefing:
+      "You're a sales consultant at a manufactured housing dealership. A retiree is considering downsizing into a manufactured home. Key terms: 'single-wide' vs. 'double-wide' (one vs. two factory-built sections joined on site), 'age-restricted community' (55+ community with its own rules), 'HOA/community fees' (recurring dues separate from any mortgage).",
     active: true,
     description:
       "A retired couple in their late 60s is downsizing from a large single-family home. They present as just wanting 'something small and easy,' but the real need is single-level living due to a mobility issue with one spouse, proximity to their adult children, and emotional readiness to let go of their family home. Practice discovery around sensitive, emotionally-loaded transitions.",
@@ -81,6 +85,8 @@ Stay conversational and human — warm but a little guarded at first. One to thr
     title: "Single Parent Relocating for Work",
     vertical: "manufactured_housing",
     difficulty: "intermediate",
+    briefing:
+      "You're a sales consultant at a manufactured housing dealership. A single parent relocating for a new job is shopping under time pressure. Key terms: 'manufactured home' (factory-built, distinct from site-built), 'in-stock/spec home' (already built and ready for quick move-in vs. a custom order), 'setup and delivery timeline' (time from purchase to move-in-ready).",
     active: true,
     description:
       "A single mother relocating for a new job needs housing fast. She opens focused on move-in timeline and presents as needing 'whatever's available soonest,' but her deeper needs are a safe, stable environment for her two school-age kids and proximity to a good school district — and she's anxious about doing this alone. Practice discovery under time pressure without sacrificing depth.",
@@ -103,6 +109,8 @@ Stay natural and a little rushed/stressed in tone, but warm up as trust builds. 
     title: "Investor Buying for a Rental",
     vertical: "manufactured_housing",
     difficulty: "advanced",
+    briefing:
+      "You're a sales consultant at a manufactured housing dealership. An investor is exploring a manufactured home purchase as a rental property. Key terms: 'cap rate' (annual return on investment as a percentage of purchase price), 'chattel loan' (a loan secured by the home itself rather than the land, common when the home isn't on owned land), 'turnkey' (move-in ready with no additional work needed).",
     active: true,
     description:
       "A small-scale real estate investor is looking to buy a manufactured home purely as a rental property. He leads with numbers and ROI, resistant to any 'soft' discovery questions, but the real decision driver is confidence in resale/rental durability and low-maintenance features, not just price per unit. Practice discovery with an analytical, guarded, numbers-first buyer.",
@@ -129,6 +137,8 @@ Stay clipped, businesslike, mildly impatient at first, softening only when the c
     title: "Prospective Resident Sticker-Shocked by Lot Rent",
     vertical: "manufactured_housing_community",
     difficulty: "beginner",
+    briefing:
+      "You're a leasing consultant at a manufactured housing community. A prospective resident is reacting to the monthly lot rent. Key terms: 'lot rent' (the monthly fee to lease the land under a resident-owned home), 'community amenities' (shared features like clubhouses, pools, or maintained grounds bundled into that fee), 'space lease agreement' (the contract governing the land lease, separate from home ownership).",
     active: true,
     description:
       "A prospective resident touring the community fixates on the monthly lot rent being higher than she expected, and seems ready to walk. Her stated objection is pure price, but the real driver is fear of being 'priced out' again like she was at her last community. Practice discovery that surfaces the real fear behind a price objection before defaulting to a discount pitch.",
@@ -151,6 +161,8 @@ Stay guarded and price-focused at first, softening into genuine engagement once 
     title: "Retiree Worried About Community Fit",
     vertical: "manufactured_housing_community",
     difficulty: "intermediate",
+    briefing:
+      "You're a leasing consultant at a manufactured housing community. A retiree is deciding whether the community is the right social and lifestyle fit. Key terms: 'age-restricted' or '55+ community' (age-qualified community with its own occupancy rules), 'lot rent' (monthly land-lease fee), 'community rules/covenants' (governing standards for home upkeep and conduct).",
     active: true,
     description:
       "A retired veteran shopping for a lot to place his home says he just wants to know 'if dogs are allowed and what the rent is,' but his real concern is whether he'll be isolated — he's recently widowed and worried about fitting in at a new community. Practice discovery around an emotionally guarded customer whose surface questions are a stand-in for a bigger unspoken concern.",
@@ -173,6 +185,8 @@ Stay terse and matter-of-fact at first, like a man not used to talking about fee
     title: "Existing Resident Considering Not Renewing",
     vertical: "manufactured_housing_community",
     difficulty: "advanced",
+    briefing:
+      "You're a community manager at a manufactured housing community. An existing resident is weighing whether to renew their lease. Key terms: 'space lease renewal' (the annual or multi-year renewal of the land-lease agreement), 'lot rent increase' (an adjustment to the monthly land fee), 'resident retention' (community's effort to keep existing residents rather than lose them to a competing community or sale).",
     active: true,
     description:
       "A longtime resident calls the community office frustrated about a maintenance issue and mentions offhand that she's 'thinking about not renewing.' She frames it as a maintenance complaint, but the real issue is she no longer feels valued as a long-term resident and is testing whether anyone will actually respond. Practice discovery and retention conversations with an at-risk existing resident, not just new-sale scenarios.",
@@ -195,6 +209,8 @@ Stay frustrated and a little sharp at first, softening as you feel truly listene
     title: "Investor Asking About Multiple Lots",
     vertical: "manufactured_housing_community",
     difficulty: "advanced",
+    briefing:
+      "You're a community manager or sales consultant at a manufactured housing community. An investor is asking about acquiring multiple lots. Key terms: 'bulk lot lease' (leasing several vacant home sites at once), 'occupancy rate' (percentage of the community's lots currently leased), 'turn time' (how long a vacant lot typically takes to be re-leased).",
     active: true,
     description:
       "An investor who owns several manufactured homes as rentals asks about leasing multiple lots in the community at once, opening with a blunt request for a bulk-rate discount. His real underlying need is confidence in the community's occupancy stability and management quality, since a bad community reputation directly threatens his rental income. Practice discovery with a numbers-first, skeptical B2B-style buyer in a community leasing context.",
@@ -221,6 +237,8 @@ Stay clipped, businesslike, and skeptical at first, softening only when the cons
     title: "Tech Worker Upgrading Commuter Car",
     vertical: "auto_sales",
     difficulty: "beginner",
+    briefing:
+      "You're a sales consultant at an auto dealership. A tech professional is looking to upgrade their commuter vehicle. Key terms: 'trade-in value' (what the dealership will credit for their current car), 'MSRP' (manufacturer's suggested retail price, the sticker price before negotiation), 'APR' (annual percentage rate — the interest rate on any auto loan financing).",
     active: true,
     description:
       "A tech worker in his late 20s wants to upgrade from an old sedan. He leads with wanting 'the newest tech features,' but his real need is a reliable, low-hassle commuter car since his current one broke down unexpectedly and cost him a missed work day. Practice discovery around gadget-driven surface requests vs. reliability-driven real needs.",
@@ -243,6 +261,8 @@ Stay casual, a little tech-enthusiast in tone, mildly guarded about the embarras
     title: "Growing Family Needs More Room",
     vertical: "auto_sales",
     difficulty: "beginner",
+    briefing:
+      "You're a sales consultant at an auto dealership. A growing family is shopping for more space. Key terms: 'third-row seating' (an extra row for 2-3 more passengers), 'cargo capacity' (usable trunk/rear storage space), 'safety rating' (independent crash-test score, e.g. from IIHS or NHTSA).",
     active: true,
     description:
       "A couple with a new baby on the way is shopping for an SUV. They present as wanting 'the biggest one on the lot,' but their real needs are safety ratings, ease of installing a car seat, and a manageable price point they're nervous to admit given upcoming parental leave income changes. Practice discovery balancing stated wants against unstated financial anxiety.",
@@ -265,6 +285,8 @@ Stay warm, a little nervous-excited, guarded specifically about the money topic 
     title: "Price-Focused Skeptical Negotiator",
     vertical: "auto_sales",
     difficulty: "intermediate",
+    briefing:
+      "You're a sales consultant at an auto dealership. A price-focused customer wants to negotiate hard. Key terms: 'invoice price' (what the dealership paid the manufacturer, often used as a negotiating anchor), 'holdback' (a manufacturer rebate to the dealer not shown on invoice), 'out-the-door price' (the final total price including taxes, fees, and add-ons).",
     active: true,
     description:
       "A middle-aged customer walks in having already researched extensively online and is primed to distrust the sales process. He leads with adversarial pricing demands, but his real need is confidence that he's not being taken advantage of — trust matters more to him than the actual dollar amount. Practice discovery with a defensive, research-heavy buyer.",
@@ -287,6 +309,8 @@ Stay guarded, a bit combative early, testing the consultant — but capable of r
     title: "College Student Buying First Car",
     vertical: "auto_sales",
     difficulty: "beginner",
+    briefing:
+      "You're a sales consultant at an auto dealership. A college student is buying their first car, likely on a tight budget. Key terms: 'APR' (annual percentage rate on a loan), 'co-signer' (a second person who guarantees the loan, often needed for buyers with little credit history), 'certified pre-owned (CPO)' (a used car that passed manufacturer inspection and comes with an extended warranty).",
     active: true,
     description:
       "A college student is buying her first car with help from her parents' budget. She's overwhelmed by the process and defers a lot, but her real need is confidence and reassurance since she doesn't know car terminology and is afraid of being talked into something she can't actually afford to maintain. Practice discovery with a first-time, low-confidence buyer.",
@@ -313,6 +337,8 @@ Stay tentative, a little unsure of yourself, becoming more confident only as tru
     title: "AC Down During Heat Wave",
     vertical: "hvac_service",
     difficulty: "beginner",
+    briefing:
+      "You're an HVAC service technician/consultant. A homeowner's air conditioning has failed during a heat wave. Key terms: 'condenser unit' (the outdoor AC component that releases heat), 'refrigerant' (the chemical that absorbs and releases heat inside the system — a low charge often signals a leak), 'compressor' (the component that pressurizes refrigerant; a failed compressor is often the costliest repair).",
     active: true,
     description:
       "A homeowner's AC failed during a heat wave and she just wants it fixed today at the lowest cost. Her real underlying concern is whether this is a recurring problem given the unit's age, and whether she should be thinking about replacement rather than repeated repairs — but she's anxious about the cost of a bigger conversation. Practice discovery that surfaces replacement-vs-repair without being pushy.",
@@ -335,6 +361,8 @@ Stay a little frazzled and heat-stressed early on, softening into a more reflect
     title: "Recurring Furnace Noise Complaint",
     vertical: "hvac_service",
     difficulty: "intermediate",
+    briefing:
+      "You're an HVAC service technician/consultant. A homeowner has a furnace making a recurring, unresolved noise. Key terms: 'blower motor' (the fan component that circulates air, a common noise source), 'ductwork' (the network of tubes/vents distributing air — noise can also come from duct expansion/contraction), 'service call vs. diagnostic fee' (the cost just to have a technician assess the issue, separate from any repair cost).",
     active: true,
     description:
       "A homeowner calls about an intermittent rattling noise from the furnace, downplaying it as 'probably nothing.' His real concern is safety — he's worried (but embarrassed to say) that it could be a carbon monoxide risk, since he has young kids in the house. Practice discovery that surfaces a safety fear the customer is reluctant to voice directly.",
@@ -357,6 +385,8 @@ Stay understated and a little deflective early, revealing real worry only when d
     title: "Landlord Fielding a Tenant Complaint",
     vertical: "hvac_service",
     difficulty: "intermediate",
+    briefing:
+      "You're an HVAC service technician/consultant. A landlord is calling in about an HVAC complaint from a tenant. Key terms: 'preventive maintenance agreement' (a recurring service contract to catch issues before they become emergencies), 'habitability' (a landlord's legal obligation to keep essential systems like heating/cooling functional for tenants), 'unit vs. building system' (whether the HVAC serves just one rental unit or the whole property).",
     active: true,
     description:
       "A landlord is scheduling HVAC service because a tenant complained about weak airflow. He wants the fastest, cheapest fix to make the complaint go away. His real need is a solution that will actually hold up so he doesn't get another call in a month, since repeat calls cost him more in time than a slightly more thorough fix would. Practice discovery with a customer optimizing for their own convenience, not the end user's comfort.",
@@ -379,6 +409,8 @@ Stay brisk, transactional, mildly impatient — a landlord juggling multiple pro
     title: "Elderly Homeowner on a Fixed Income",
     vertical: "hvac_service",
     difficulty: "advanced",
+    briefing:
+      "You're an HVAC service technician/consultant. An elderly homeowner on a fixed income needs a repair but is worried about cost. Key terms: 'repair vs. replace threshold' (the rule-of-thumb where repair cost approaching a large share of a new system's cost tips the decision toward replacement), 'SEER rating' (Seasonal Energy Efficiency Ratio — higher means lower operating cost), 'financing/payment plan options' (ways to spread a larger repair or replacement cost over time).",
     active: true,
     description:
       "An elderly widow on a fixed income needs a heating system repair in winter. She's afraid of the cost and initially downplays the severity of the issue to avoid an expensive conversation. Her real need is warmth and safety balanced against real financial constraints — she needs a technician who can find a dignified, honest path forward rather than either overselling or dismissively underserving her. Practice discovery in a financially and emotionally sensitive situation.",
@@ -405,6 +437,8 @@ Stay soft-spoken, apologetic, minimizing at first, warming into more openness wi
     title: "Aging System on Its Last Legs",
     vertical: "hvac_sales",
     difficulty: "beginner",
+    briefing:
+      "You're an HVAC sales consultant meeting with a homeowner whose current system is failing and near end-of-life. Key terms: 'SEER rating' (Seasonal Energy Efficiency Ratio — higher SEER means more efficient, lower monthly operating cost), 'system lifespan' (typically 12-15 years for a central system before major components start failing), 'load calculation' (sizing analysis to determine what capacity system the home actually needs, rather than just matching the old unit).",
     active: true,
     description:
       "A homeowner is getting quotes for a full system replacement after his old unit failed for the third time. He leads with wanting 'the cheapest system that works,' but his real priority is peace of mind — he's tired of surprise breakdowns and values reliability and a strong warranty more than the lowest sticker price. Practice discovery distinguishing price-sensitivity from reliability-seeking.",
@@ -427,6 +461,8 @@ Stay initially price-defensive and a little weary, opening up once your real fru
     title: "New Homeowner, Overwhelmed by Options",
     vertical: "hvac_sales",
     difficulty: "intermediate",
+    briefing:
+      "You're an HVAC sales consultant meeting with new homeowners who are overwhelmed by system options. Key terms: 'SEER rating' (Seasonal Energy Efficiency Ratio — the efficiency scale used to compare systems, higher is more efficient), 'ductless (mini-split) system' (a system with no central ductwork, using individual wall-mounted units per zone — an alternative to a central ducted system), 'financing terms' (the interest rate, monthly payment, and repayment period on any promotional or third-party financing offered for the purchase).",
     active: true,
     description:
       "A couple who just bought their first home is looking to replace an outdated system as part of move-in renovations. They're overwhelmed by SEER ratings, ductless options, and financing terms, and default to asking the consultant to 'just tell us what to get.' Their real need is a confident recommendation paired with clear reasoning they can understand, not being fully deferred to. Practice discovery with over-deferential buyers who need guided decision-making.",
@@ -449,6 +485,8 @@ Stay a little sheepish about not knowing terminology, engaging more actively as 
     title: "Eco-Conscious Efficiency Upgrade",
     vertical: "hvac_sales",
     difficulty: "intermediate",
+    briefing:
+      "You're an HVAC sales consultant meeting with a homeowner focused on energy efficiency and environmental impact. Key terms: 'SEER rating' (Seasonal Energy Efficiency Ratio — the key efficiency metric for comparing systems), 'heat pump' (a system that both heats and cools by moving heat rather than generating it, generally more efficient than a furnace/AC combo), 'energy rebates/tax credits' (utility or government incentives that can offset the cost of high-efficiency systems).",
     active: true,
     description:
       "A homeowner proactively wants to replace a still-functioning but older system, framing it entirely around energy efficiency and environmental impact. Her real (additional, unstated) need is that she's also tired of high summer electric bills and wants the financial payoff, but frames it in green terms because that feels more socially acceptable to her. Practice discovery balancing stated values-based motivation with unstated financial motivation.",
@@ -471,6 +509,8 @@ Stay warm and values-driven in language at first, revealing pragmatic financial 
     title: "Homeowner Juggling Three Competing Quotes",
     vertical: "hvac_sales",
     difficulty: "advanced",
+    briefing:
+      "You're an HVAC sales consultant meeting with a homeowner who has already collected quotes from competitors. Key terms: 'SEER rating' (Seasonal Energy Efficiency Ratio, the efficiency benchmark customers use to compare quotes), 'load calculation' (proper sizing analysis — a common way quotes differ even when the sticker price looks similar), 'labor warranty vs. equipment warranty' (equipment is covered by the manufacturer, but labor/installation warranty terms vary by installer and are a common point of comparison).",
     active: true,
     description:
       "A homeowner is deep into a multi-quote comparison process and treats this call as one of three competing bids, leading with 'just beat their price.' His real need is confidence in installation quality and long-term support, since a bad HVAC install can cause years of problems — but he's suppressing this concern behind a pure price-comparison frame because he thinks that's how you're supposed to negotiate. Practice discovery with a competitive, price-anchored buyer who has a real underlying quality concern.",
@@ -496,6 +536,8 @@ Stay combative and price-anchored initially, revealing quality anxiety only when
     title: "Slow Drain Treated as Minor Annoyance",
     vertical: "plumbing",
     difficulty: "beginner",
+    briefing:
+      "You're a plumbing service consultant. A homeowner has a slow drain they've been treating as a minor annoyance. Key terms: 'main line vs. fixture line' (whether the clog is isolated to one fixture or affects the whole house's drainage), 'hydro-jetting' (a high-pressure water method to clear stubborn clogs, more thorough than a standard snake), 'camera inspection' (a video scope used to diagnose the exact location/cause of a blockage).",
     active: true,
     description:
       "A homeowner calls about a slow-draining kitchen sink, framing it as a minor annoyance needing a quick snake job. His real underlying concern, once uncovered, is that this is the second slow drain in the house in six months and he's worried about a bigger pipe issue he doesn't want to think about or pay for. Practice discovery that surfaces a bigger problem behind a 'quick fix' request.",
@@ -518,6 +560,8 @@ Stay casual and a little dismissive of the issue at first, becoming more thought
     title: "Water Heater Failure, Feeling Vulnerable",
     vertical: "plumbing",
     difficulty: "intermediate",
+    briefing:
+      "You're a plumbing service consultant. A homeowner's water heater has failed and they're without hot water. Key terms: 'tank vs. tankless water heater' (a traditional storage tank vs. an on-demand unit with no tank), 'recovery rate' (how quickly a tank water heater reheats water after use), 'expansion tank' (a small tank that relieves pressure buildup in a closed water heating system, sometimes required by code).",
     active: true,
     description:
       "A homeowner's water heater burst overnight, causing minor water damage. She's stressed and just wants it replaced immediately, but is quietly anxious about being overcharged during what she perceives as a vulnerable, urgent moment — a common dynamic in emergency service calls. Practice discovery and trust-building under acute time pressure and emotional stress.",
@@ -540,6 +584,8 @@ Stay stressed and a little scattered early on, calming as trust and clarity are 
     title: "Homeowner Who Tried a DIY Fix First",
     vertical: "plumbing",
     difficulty: "intermediate",
+    briefing:
+      "You're a plumbing service consultant. A homeowner already attempted a DIY fix before calling. Key terms: 'compression fitting' (a common DIY-installed connector that can fail if over/under-tightened), 'shut-off valve' (the valve that stops water flow to a fixture, often a step DIYers miss or misuse), 'code compliance' (whether a repair meets local plumbing code, relevant if a DIY fix needs to be redone or inspected).",
     active: true,
     description:
       "A homeowner attempted his own repair on a leaking pipe using online tutorials before calling a professional, and he's slightly embarrassed and defensive about it. His real need is validation that calling for help wasn't a failure, plus confidence the professional isn't going to talk down to him — otherwise he may minimize the problem or push back on necessary work. Practice discovery with a defensive, DIY-minded customer.",
@@ -562,6 +608,8 @@ Stay a little defensive and slightly embarrassed at first, opening into genuine 
     title: "Renovation Contractor Under Timeline Pressure",
     vertical: "plumbing",
     difficulty: "advanced",
+    briefing:
+      "You're a plumbing service consultant. A renovation contractor is under timeline pressure and needs plumbing work coordinated with their schedule. Key terms: 'rough-in' (the stage where pipes are placed inside walls/floors before finishes go on), 'permit and inspection' (required approval steps that can affect the renovation timeline), 'change order' (a formal adjustment to scope/cost when plumbing work changes mid-project).",
     active: true,
     description:
       "A general contractor managing a kitchen renovation calls in a plumbing sub for rough-in work, focused entirely on hitting a tight schedule for other trades waiting behind him. His real underlying concern is that a previous plumbing sub on a different job caused a costly schedule slip, and he's testing whether this plumber will be straight with him about realistic timing rather than over-promising. Practice discovery in a B2B, trade-to-trade context with high schedule stakes.",
@@ -588,6 +636,8 @@ Stay brusque, schedule-obsessed, and testing for straight-shooting — warm only
     title: "Young Professional Starting to Invest",
     vertical: "financial_advisor",
     difficulty: "beginner",
+    briefing:
+      "You're a financial advisor meeting with a young professional just starting to invest. Key terms: '401(k)' (an employer-sponsored retirement account, often with employer matching), 'Roth vs. traditional IRA' (a Roth IRA is funded with after-tax dollars and grows tax-free; a traditional IRA is funded pre-tax and taxed on withdrawal), 'diversification' (spreading investments across asset types to manage risk).",
     active: true,
     description:
       "A young professional wants to 'just start investing' and asks for stock picks, but has no real emergency fund or understanding of his own risk tolerance. His real need is foundational financial planning before investment picks matter at all. Practice discovery that gently redirects a surface-level request toward the deeper, more important conversation.",
@@ -610,6 +660,8 @@ Stay eager and a little anxious/comparison-driven at first, becoming more reflec
     title: "Pre-Retiree Anxious About Market Volatility",
     vertical: "financial_advisor",
     difficulty: "intermediate",
+    briefing:
+      "You're a financial advisor meeting with a client nearing retirement who is anxious about market volatility. Key terms: 'sequence of returns risk' (the danger of experiencing market losses right before/during retirement when withdrawals begin), 'asset allocation' (the mix of stocks, bonds, and cash in a portfolio), 'withdrawal rate' (the percentage of a portfolio drawn down annually in retirement).",
     active: true,
     description:
       "A 61-year-old client wants to move everything to cash after a rough market week, framing it as pure risk management. Her real underlying driver is acute fear triggered by a specific memory of a relative's retirement being wrecked in a past downturn — an emotional trigger, not a rational reassessment. Practice discovery that surfaces the emotional root behind an urgent, reactive financial request.",
@@ -632,6 +684,8 @@ Stay anxious and somewhat urgent/insistent at first, becoming emotional when the
     title: "Sudden Inheritance, Overwhelmed and Guilty",
     vertical: "financial_advisor",
     difficulty: "advanced",
+    briefing:
+      "You're a financial advisor meeting with a client who just received a sudden inheritance. Key terms: 'stepped-up cost basis' (inherited assets are often revalued to their worth at the time of inheritance for tax purposes), 'estate tax' (a tax on the value of an inherited estate, though most estates fall below the exemption threshold), 'emergency fund' (readily accessible cash reserved before any investing decision).",
     active: true,
     description:
       "A client recently inherited a significant sum after a parent's death and wants tactical advice on 'where to put it.' Her real underlying state is grief and guilt about benefiting financially from a loss, which is affecting her ability to make any decision at all — she's stuck, not just uninformed. Practice discovery in an emotionally complex situation where the financial question is secondary to processing grief.",
@@ -654,6 +708,8 @@ Stay outwardly composed and business-like at first, with grief surfacing only wh
     title: "Overconfident DIY Investor Seeking a Second Opinion",
     vertical: "financial_advisor",
     difficulty: "advanced",
+    briefing:
+      "You're a financial advisor meeting with a self-directed investor seeking a second opinion. Key terms: 'diversification' (spreading investments to reduce concentration risk), 'behavioral bias' (psychological tendencies, like overconfidence or recency bias, that can distort investment decisions), 'fee structure' (how an advisor is compensated — e.g., fee-only vs. commission-based — relevant to any trust conversation).",
     active: true,
     description:
       "A confident, self-taught investor comes in for a 'second opinion,' subtly testing whether the advisor adds real value or is just going to recommend generic products. His real underlying need, softened by ego, is uncertainty about a concentrated position he's overexposed to and doesn't want to admit was a mistake. Practice discovery with a guarded, ego-protective client hiding a real vulnerability.",
@@ -680,6 +736,8 @@ Stay confident, faintly testing/skeptical, revealing vulnerability only when tre
     title: "Straight Price Comparison Shopper",
     vertical: "insurance_auto",
     difficulty: "beginner",
+    briefing:
+      "You're an insurance consultant. A customer is comparison-shopping purely on price. Key terms: 'premium' (the amount paid for coverage, typically monthly or annually), 'deductible' (the amount the policyholder pays out of pocket before coverage kicks in), 'liability vs. full coverage' (liability covers damage to others; full coverage also covers the policyholder's own vehicle).",
     active: true,
     description:
       "A customer calls purely to compare auto insurance rates after a renewal price increase, treating this as a commodity purchase. Her real, unstated gap is being underinsured on liability limits given her assets — she doesn't know this is a risk because no one has ever explained it to her. Practice discovery that surfaces a coverage gap the customer doesn't know to ask about.",
@@ -702,6 +760,8 @@ Stay brisk, price-focused, slightly impatient with anything that isn't the quote
     title: "Parent Adding a Teen Driver",
     vertical: "insurance_auto",
     difficulty: "intermediate",
+    briefing:
+      "You're an insurance consultant. A parent is calling to add a newly-licensed teen driver to their policy. Key terms: 'named driver vs. occasional driver' (how a teen can be listed on a policy, which affects premium), 'multi-car discount' (a discount for insuring multiple vehicles on one policy), 'good student discount' (a common discount for teen drivers with strong grades).",
     active: true,
     description:
       "A parent is adding a newly-licensed teenager to the policy and is fixated on minimizing the premium increase. Underneath the cost focus is real anxiety about the teen's safety and inexperience, which the parent hasn't fully processed emotionally. Practice discovery that connects a cost-focused request to an underlying safety concern, and surfaces relevant coverage/discount options tied to that concern (e.g., telematics, good-student discount, driver training).",
@@ -724,6 +784,8 @@ Stay cost-focused and a little tense at first, revealing real parental worry whe
     title: "Frustrated Customer After a Rate Increase Post-Accident",
     vertical: "insurance_auto",
     difficulty: "advanced",
+    briefing:
+      "You're an insurance consultant. A customer is frustrated after their rate increased following an accident. Key terms: 'surcharge' (a temporary premium increase applied after an at-fault claim), 'accident forgiveness' (a policy feature that waives the first at-fault surcharge for eligible customers), 'claims history' (the record of past claims that insurers use to price risk).",
     active: true,
     description:
       "A long-time customer's rate went up after a not-at-fault accident and he's furious, threatening to switch carriers. His real underlying need is to feel like loyalty and fairness matter to the company, not just actuarial tables — he's more interested in being heard and treated fairly than in the specific dollar amount. Practice discovery and de-escalation with an angry, loyalty-invoking customer.",
@@ -746,6 +808,8 @@ Stay heated and threatening early on, de-escalating only with genuine acknowledg
     title: "Renter Skeptical of Bundling Pitch",
     vertical: "insurance_auto",
     difficulty: "intermediate",
+    briefing:
+      "You're an insurance consultant. A renter is being introduced to the idea of bundling policies. Key terms: 'bundling discount' (a reduced rate for combining auto and renters/home insurance with one insurer), 'renters insurance' (coverage for personal belongings and liability in a rented home, separate from the landlord's own coverage), 'liability coverage' (protection against costs if the policyholder is responsible for injury or property damage to others).",
     active: true,
     description:
       "A customer calling about auto insurance gets a mention of bundling with renters insurance and immediately becomes guarded, assuming it's just an upsell. Her real situation is that she has no renters insurance at all and is genuinely underprotected for a theft or fire scenario — she's dismissive not because she doesn't need it, but because she assumes any add-on offer is self-serving for the agent. Practice discovery that reframes a perceived upsell as a genuine, relevant need.",
@@ -771,6 +835,8 @@ Stay guarded and a little short with responses initially, opening up once the co
     title: "Relocating Professional, Says Just Needs Square Footage",
     vertical: "real_estate",
     difficulty: "beginner",
+    briefing:
+      "You're a real estate agent working with a professional relocating for a new job. Key terms: 'contingency' (a condition that must be met for a sale to close, e.g. financing or inspection contingencies), 'closing costs' (fees due at closing beyond the purchase price, e.g. title, escrow, and lender fees), 'comps' (comparable recently-sold properties used to help price or evaluate an offer).",
     active: true,
     description:
       "A professional relocating for a new job opens by rattling off square footage and bedroom count like a checklist, but the real driver is anxiety about an unfamiliar city and wanting a neighborhood that will help their family feel settled fast. Practice discovery that gets past a spec-sheet request to the emotional and lifestyle need underneath.",
@@ -793,6 +859,8 @@ Stay brisk and businesslike at first, warming into more personal territory once 
     title: "Empty Nesters Selling the Family Home",
     vertical: "real_estate",
     difficulty: "intermediate",
+    briefing:
+      "You're a real estate agent working with empty nesters selling their family home. Key terms: 'net proceeds' (what a seller walks away with after paying off the mortgage, agent commissions, and closing costs), 'staging' (preparing a home's presentation to appeal to buyers), 'contingent offer' (an offer that depends on the buyer selling their own home first).",
     active: true,
     description:
       "A couple listing their longtime family home says they just want 'top dollar and a quick sale,' but underneath is real ambivalence about leaving a home full of memories and uncertainty about where they'll go next. Practice discovery on a listing appointment where the seller's stated goal masks emotional hesitation that could stall the whole process.",
@@ -815,6 +883,8 @@ Stay a little brisk and guarded early, softening as the conversation acknowledge
     title: "First-Time Buyer Overwhelmed by the Process",
     vertical: "real_estate",
     difficulty: "beginner",
+    briefing:
+      "You're a real estate agent working with a first-time buyer who feels overwhelmed by the process. Key terms: 'pre-approval' (a lender's conditional commitment to loan a buyer a certain amount, distinct from pre-qualification), 'earnest money' (a good-faith deposit made with an offer to show serious intent), 'escrow' (a neutral third party holding funds and documents until closing conditions are met).",
     active: true,
     description:
       "A first-time homebuyer insists they 'just want to see listings' and resists talking financing or process, but is actually overwhelmed and afraid of asking questions that reveal how little they know. Practice discovery that builds enough trust for an anxious buyer to admit what they don't understand.",
@@ -837,6 +907,8 @@ Stay a little clipped and deflecting about the "boring" parts of the process at 
     title: "Investor Evaluating a Multi-Unit Property",
     vertical: "real_estate",
     difficulty: "advanced",
+    briefing:
+      "You're a real estate agent working with an investor evaluating a multi-unit property. Key terms: 'cap rate' (a property's annual net operating income divided by its purchase price, a key investment metric), 'cash-on-cash return' (annual cash flow relative to the actual cash invested, accounting for financing), 'NOI' (net operating income — rental income minus operating expenses, before debt service).",
     active: true,
     description:
       "An experienced real estate investor asks only about cap rate and cash flow numbers on a multi-unit listing, but is actually trying to decide whether to keep scaling their portfolio or start winding down — a much bigger decision than this single property. Practice discovery with a sophisticated buyer who uses financial jargon to keep the conversation surface-level.",
@@ -863,6 +935,8 @@ Stay terse and numbers-focused initially, opening into a more strategic conversa
     title: "Recent Grad Fixated on Rent Price",
     vertical: "apartment_rental",
     difficulty: "beginner",
+    briefing:
+      "You're a leasing consultant at an apartment community. A recent graduate is fixated on the listed rent price. Key terms: 'effective rent' (the actual average monthly rent after factoring in any move-in concessions or discounts), 'application/admin fees' (one-time charges due at move-in, separate from the monthly rent), 'lease term' (the length of the rental commitment, e.g. 12 months, which can affect the rate).",
     active: true,
     description:
       "A recent college graduate on their first apartment search says the only thing that matters is the lowest rent, but is actually anxious about living alone for the first time and being taken advantage of by a landlord. Practice discovery with a young renter whose stated priority (price) masks a need for reassurance and clarity.",
@@ -885,6 +959,8 @@ Stay short and price-focused initially, opening up once you feel like the agent 
     title: "Family Says They Just Need Another Bedroom",
     vertical: "apartment_rental",
     difficulty: "intermediate",
+    briefing:
+      "You're a leasing consultant at an apartment community. A family believes they just need one more bedroom. Key terms: 'square footage vs. usable layout' (raw square footage doesn't always reflect how livable/functional a floor plan is), 'floor plan tiers' (different unit layouts within the same community, often priced differently), 'lease renewal terms' (conditions for renewing or transferring to a different unit within the same community).",
     active: true,
     description:
       "A family renting a 1-bedroom apartment says they simply need a 2-bedroom unit, but the deeper need is a lease and community that can accommodate a baby on the way plus aging-in-place concerns for a grandparent who may move in. Practice discovery that surfaces a more complex household situation than the stated request.",
@@ -907,6 +983,8 @@ Stay pleasant but fairly surface-level at first, revealing more as the agent ask
     title: "Remote Worker Focused Only on Amenities List",
     vertical: "apartment_rental",
     difficulty: "beginner",
+    briefing:
+      "You're a leasing consultant at an apartment community. A remote worker is focused only on the amenities list. Key terms: 'unit orientation' (which direction/side of the building a unit faces, which affects noise and light exposure), 'sound rating (STC)' (Sound Transmission Class — a measure of how well a wall/floor blocks noise between units), 'amenity fee' (a recurring charge for access to shared amenities, separate from base rent).",
     active: true,
     description:
       "A remote worker touring apartments asks almost exclusively about the gym and pool, but the real deciding factor for their daily life is noise levels and a reliable, quiet space to take video calls all day. Practice discovery that gets past a generic amenities checklist to the specific daily-use need.",
@@ -929,6 +1007,8 @@ Stay casual and amenities-focused at first, opening up quickly once asked a genu
     title: "Pet Owner Worried About Breed Restrictions",
     vertical: "apartment_rental",
     difficulty: "intermediate",
+    briefing:
+      "You're a leasing consultant at an apartment community. A pet owner is worried about breed or size restrictions. Key terms: 'pet deposit vs. pet rent' (a one-time refundable deposit vs. a recurring monthly fee for having a pet), 'breed restriction' (specific dog breeds a community's insurance policy excludes), 'weight limit' (a maximum pet weight allowed under the community's pet policy).",
     active: true,
     description:
       "A prospective renter with a dog asks vague questions about the pet policy without mentioning their dog's breed, because they're anxious it will be an automatic disqualifier. Practice discovery that creates enough safety for a renter to disclose a detail they're afraid will end the conversation.",

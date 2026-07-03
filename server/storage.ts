@@ -21,12 +21,14 @@ export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUser(id: number, patch: Partial<InsertUser>): Promise<User | undefined>;
   listUsers(): Promise<User[]>;
 
   listScenarios(): Promise<Scenario[]>;
   getScenario(id: number): Promise<Scenario | undefined>;
   getScenarioBySlug(slug: string): Promise<Scenario | undefined>;
   createScenario(scenario: InsertScenario): Promise<Scenario>;
+  updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
 
   createSession(session: InsertSession): Promise<Session>;
   getSession(id: number): Promise<Session | undefined>;
@@ -51,6 +53,11 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
+  async updateUser(id: number, patch: Partial<InsertUser>): Promise<User | undefined> {
+    const rows = await db.update(users).set(patch).where(eq(users.id, id)).returning();
+    return rows[0];
+  }
+
   async listUsers(): Promise<User[]> {
     return db.select().from(users);
   }
@@ -71,6 +78,11 @@ export class DatabaseStorage implements IStorage {
 
   async createScenario(scenario: InsertScenario): Promise<Scenario> {
     const rows = await db.insert(scenarios).values(scenario).returning();
+    return rows[0];
+  }
+
+  async updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined> {
+    const rows = await db.update(scenarios).set(patch).where(eq(scenarios.id, id)).returning();
     return rows[0];
   }
 
