@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import trainerPhoto from "@assets/trainer-photo-1.png";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -41,16 +42,35 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-dvh flex items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <div className="mx-auto w-12 h-12 rounded-xl bg-primary flex items-center justify-center" aria-hidden="true">
+    <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-10">
+      <div className="w-full max-w-4xl grid md:grid-cols-2 gap-8 items-center">
+        <div className="hidden md:block">
+          <div className="relative rounded-2xl overflow-hidden border border-card-border">
+            <img
+              src={trainerPhoto}
+              alt="Consultative discovery conversation between a trainer and client"
+              className="w-full h-full object-cover aspect-[4/3]"
+              data-testid="img-training-photo"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-background/80 via-background/10 to-transparent" />
+            <p className="absolute bottom-4 left-4 right-4 text-sm text-foreground/90 font-medium">
+              Practice real discovery conversations. Get SOLVE Framework Certified.
+            </p>
+          </div>
+        </div>
+        <div className="w-full max-w-sm mx-auto space-y-6">
+        <div className="text-center space-y-4">
+          <div
+            className="mx-auto w-24 h-24 rounded-3xl flex items-center justify-center shadow-lg"
+            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(224,109,0,0.35)" }}
+            aria-hidden="true"
+          >
             <SolveMark />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight" data-testid="text-app-title">SOLVE Framework Trainer</h1>
+          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">SOLVE Framework Trainer</h1>
           <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
         </div>
-        <Card>
+        <Card className="border-2" style={{ borderColor: "#E06D00" }}>
           <CardHeader>
             <CardTitle className="text-lg">Sign in</CardTitle>
             <CardDescription>Use your pilot credentials to continue.</CardDescription>
@@ -80,7 +100,13 @@ export default function Login() {
                   required
                 />
               </div>
-              <Button type="submit" className="w-full" disabled={isSubmitting} data-testid="button-login">
+              <Button
+                type="submit"
+                className="w-full"
+                style={{ backgroundColor: "#E06D00", color: "white" }}
+                disabled={isSubmitting}
+                data-testid="button-login"
+              >
                 {isSubmitting ? "Signing in..." : "Sign in"}
               </Button>
             </form>
@@ -89,6 +115,7 @@ export default function Login() {
         <p className="text-center text-xs text-muted-foreground">
           Private pilot preview. Not for public distribution.
         </p>
+        </div>
       </div>
     </div>
   );
@@ -96,7 +123,7 @@ export default function Login() {
 
 function SolveMark() {
   return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-label="SOLVE Framework logo">
+    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" aria-label="SOLVE Framework logo">
       <path
         d="M4 16c0-2 1.5-3 3-3s2 1 3 1 1.5-1 3-1 3 1 3 3"
         stroke="white"
@@ -104,7 +131,7 @@ function SolveMark() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx="12" cy="8" r="3.25" stroke="white" strokeWidth="2" />
+      <circle cx="15.5" cy="8" r="3.25" fill="#E06D00" />
     </svg>
   );
 }
