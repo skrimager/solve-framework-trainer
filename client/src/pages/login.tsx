@@ -111,6 +111,18 @@ export default function Login() {
                 {isSubmitting ? "Signing in..." : "Sign in"}
               </Button>
             </form>
+            <p className="mt-4 text-center text-sm text-muted-foreground">
+              New here?{" "}
+              <button
+                type="button"
+                onClick={() => navigate("/register")}
+                className="font-medium hover:underline"
+                style={{ color: "#E06D00" }}
+                data-testid="link-register"
+              >
+                Create an account
+              </button>
+            </p>
           </CardContent>
         </Card>
         <div className="text-center">
@@ -124,9 +136,6 @@ export default function Login() {
             Back to SOLVE Framework
           </a>
         </div>
-        <p className="text-center text-xs text-muted-foreground">
-          Private pilot preview. Not for public distribution.
-        </p>
         </div>
       </div>
     </div>

@@ -1,16 +1,34 @@
 import { storage } from "./storage";
-import type { InsertScenario } from "@shared/schema";
+import type { InsertScenario, Office } from "@shared/schema";
+
+const DEMO_OFFICE_NAME = "Demo Office";
+const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
+
+// Idempotently returns the shared Demo Office, creating it if absent. Used to give
+// the pre-existing demo users (and any legacy rows) a home office post-migration.
+async function ensureDemoOffice(): Promise<Office> {
+  const existing = await storage.getOfficeByInviteCode(DEMO_OFFICE_INVITE_CODE);
+  if (existing) return existing;
+  return storage.createOffice({
+    name: DEMO_OFFICE_NAME,
+    inviteCode: DEMO_OFFICE_INVITE_CODE,
+    createdAt: new Date().toISOString(),
+  });
+}
 
 // Seeds demo users and the full scenario portfolio across all verticals.
 // Safe to run multiple times — skips if data already exists.
 export async function seed() {
+  // Every user belongs to an office. The demo users live in a shared "Demo Office".
+  const demoOffice = await ensureDemoOffice();
+
   const existingUsers = await storage.listUsers();
   if (existingUsers.length === 0) {
-    await storage.createUser({ username: "manager", password: "manager123", role: "manager", displayName: "Manager Demo" });
-    await storage.createUser({ username: "consultant", password: "consultant123", role: "consultant", displayName: "Consultant Demo" });
-    await storage.createUser({ username: "qa_taylor", password: "qatest123", role: "qa", displayName: "Taylor (QA)" });
-    await storage.createUser({ username: "qa_morgan", password: "qatest123", role: "qa", displayName: "Morgan (QA)" });
-    console.log("Seeded demo users.");
+    await storage.createUser({ officeId: demoOffice.id, username: "manager", password: "manager123", role: "manager", displayName: "Manager Demo", currentLevel: "beginner" });
+    await storage.createUser({ officeId: demoOffice.id, username: "consultant", password: "consultant123", role: "consultant", displayName: "Consultant Demo", currentLevel: "beginner" });
+    await storage.createUser({ officeId: demoOffice.id, username: "qa_taylor", password: "qatest123", role: "qa", displayName: "Taylor (QA)", currentLevel: "beginner" });
+    await storage.createUser({ officeId: demoOffice.id, username: "qa_morgan", password: "qatest123", role: "qa", displayName: "Morgan (QA)", currentLevel: "beginner" });
+    console.log("Seeded demo users into Demo Office.");
   }
 
   // Add any scenario whose slug doesn't exist yet — keeps a live, already-seeded

@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Login from "@/pages/login";
+import Register from "@/pages/register";
 import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
 import Results from "@/pages/results";
@@ -22,6 +23,7 @@ function AppRouter() {
   return (
     <Switch>
       <Route path="/" component={Login} />
+      <Route path="/register" component={Register} />
       <Route path="/scenarios">
         <RequireAuth>
           <Scenarios />

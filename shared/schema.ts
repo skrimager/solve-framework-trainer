@@ -2,10 +2,27 @@ import { pgTable, text, integer, boolean, serial } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// An office/organization tenant. Each office has its own manager(s), consultants,
+// and (via user ownership) its own pool of role-play sessions.
+export const offices = pgTable("offices", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(), // office / business name
+  inviteCode: text("invite_code").notNull().unique(), // short random code consultants use to join
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertOfficeSchema = createInsertSchema(offices).omit({
+  id: true,
+});
+
+export type InsertOffice = z.infer<typeof insertOfficeSchema>;
+export type Office = typeof offices.$inferSelect;
+
 // Roles: manager (sees all reps' sessions + analytics), consultant (does role-plays),
 // qa (reviews transcripts/scores for quality assurance)
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
+  officeId: integer("office_id").notNull().references(() => offices.id), // every user belongs to exactly one office
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
@@ -14,6 +31,7 @@ export const users = pgTable("users", {
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
+  officeId: true,
   username: true,
   password: true,
   role: true,

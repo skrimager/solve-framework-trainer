@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/lib/auth";
-import type { Session } from "@shared/schema";
+import type { Session, Office } from "@shared/schema";
 
 // Shared by 'manager' and 'qa' roles — both need to review sessions across consultants.
 export default function Dashboard() {
@@ -13,7 +13,13 @@ export default function Dashboard() {
   const [, navigate] = useLocation();
 
   const { data: sessions, isLoading } = useQuery<Session[]>({
-    queryKey: ["/api/sessions"],
+    queryKey: [`/api/sessions?requesterId=${user?.id}`],
+    enabled: !!user,
+  });
+
+  const { data: office } = useQuery<Office>({
+    queryKey: [`/api/offices/${user?.officeId}`],
+    enabled: !!user && user.role === "manager",
   });
 
   const completed = sessions?.filter((s) => s.status === "completed") ?? [];
@@ -24,6 +30,19 @@ export default function Dashboard() {
   return (
     <AppShell title={user?.role === "manager" ? "Manager overview" : "QA review"}>
       <div className="space-y-6">
+        {user?.role === "manager" && office && (
+          <Card className="border-2" style={{ borderColor: "#E06D00" }}>
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
+              <div>
+                <p className="text-sm text-muted-foreground">Your office invite code</p>
+                <p className="text-2xl font-bold tracking-widest" data-testid="text-invite-code">{office.inviteCode}</p>
+              </div>
+              <p className="text-xs text-muted-foreground max-w-xs">
+                Share this code with your consultants so they can join <span className="font-medium">{office.name}</span> at sign-up.
+              </p>
+            </CardContent>
+          </Card>
+        )}
         <div className="grid gap-4 sm:grid-cols-3">
           <Card>
             <CardHeader className="pb-2">

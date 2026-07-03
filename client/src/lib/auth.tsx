@@ -4,6 +4,7 @@ export type Level = "beginner" | "intermediate" | "advanced" | "certified";
 
 export type AuthUser = {
   id: number;
+  officeId: number;
   username: string;
   role: "manager" | "consultant" | "qa";
   displayName: string;

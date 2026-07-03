@@ -6,7 +6,8 @@ import { getCustomerReply, scoreTranscript, synthesizeSpeech, hasProposedRecomme
 import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage } from "@shared/schema";
 import { seed } from "./seed";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
+import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
@@ -36,7 +37,86 @@ export async function registerRoutes(
     if (!user || user.password !== password) {
       return res.status(401).json({ message: "Invalid username or password" });
     }
-    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName, currentLevel: user.currentLevel });
+    res.json(publicUser(user));
+  });
+
+  // --- Registration (self-serve office sign-up) ---
+  app.post("/api/register/manager", async (req, res) => {
+    const schema = z.object({
+      officeName: z.string().trim().min(1, "Office name is required"),
+      username: z.string().trim().min(1, "Username is required"),
+      password: z.string().min(1, "Password is required"),
+      displayName: z.string().trim().min(1, "Your name is required"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { officeName, username, password, displayName } = parsed.data;
+
+    const existing = await storage.getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken. Please choose another." });
+    }
+
+    const inviteCode = await generateUniqueInviteCode();
+    const office = await storage.createOffice({
+      name: officeName,
+      inviteCode,
+      createdAt: new Date().toISOString(),
+    });
+    const user = await storage.createUser({
+      officeId: office.id,
+      username,
+      password,
+      role: "manager",
+      displayName,
+      currentLevel: "beginner",
+    });
+
+    res.json({ user: publicUser(user), office });
+  });
+
+  app.post("/api/register/consultant", async (req, res) => {
+    const schema = z.object({
+      inviteCode: z.string().trim().min(1, "Invite code is required"),
+      username: z.string().trim().min(1, "Username is required"),
+      password: z.string().min(1, "Password is required"),
+      displayName: z.string().trim().min(1, "Your name is required"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { inviteCode, username, password, displayName } = parsed.data;
+
+    const office = await storage.getOfficeByInviteCode(inviteCode.trim().toUpperCase());
+    if (!office) {
+      return res.status(404).json({ message: "That invite code doesn't match any office. Double-check it with your manager." });
+    }
+
+    const existing = await storage.getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken. Please choose another." });
+    }
+
+    const user = await storage.createUser({
+      officeId: office.id,
+      username,
+      password,
+      role: "consultant",
+      displayName,
+      currentLevel: "beginner",
+    });
+
+    res.json({ user: publicUser(user) });
+  });
+
+  // Fetch an office (used by the manager dashboard to display its invite code).
+  app.get("/api/offices/:id", async (req, res) => {
+    const office = await storage.getOffice(Number(req.params.id));
+    if (!office) return res.status(404).json({ message: "Not found" });
+    res.json(office);
   });
 
   // --- Scenarios ---
@@ -79,9 +159,17 @@ export async function registerRoutes(
     res.json(sessions);
   });
 
-  // manager/QA: all sessions across consultants
-  app.get("/api/sessions", async (_req, res) => {
-    const sessions = await storage.listAllSessions();
+  // manager/QA: sessions across consultants, scoped to the requester's own office.
+  app.get("/api/sessions", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) {
+      return res.status(401).json({ message: "Unknown user" });
+    }
+    const sessions = await storage.listSessionsByOffice(requester.officeId);
     res.json(sessions);
   });
 
@@ -242,7 +330,7 @@ export async function registerRoutes(
   app.get("/api/users/:userId", async (req, res) => {
     const user = await storage.getUser(Number(req.params.userId));
     if (!user) return res.status(404).json({ message: "Not found" });
-    res.json({ id: user.id, username: user.username, role: user.role, displayName: user.displayName, currentLevel: user.currentLevel });
+    res.json(publicUser(user));
   });
 
   // Serve generated audio files
@@ -254,6 +342,31 @@ export async function registerRoutes(
   });
 
   return httpServer;
+}
+
+// Public-safe user shape returned to the client (never leaks the password).
+function publicUser(user: { id: number; officeId: number; username: string; role: string; displayName: string; currentLevel: string }) {
+  return {
+    id: user.id,
+    officeId: user.officeId,
+    username: user.username,
+    role: user.role,
+    displayName: user.displayName,
+    currentLevel: user.currentLevel,
+  };
+}
+
+// Generate a short, unambiguous, uppercase alphanumeric invite code that isn't already in use.
+async function generateUniqueInviteCode(): Promise<string> {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing chars (0/O, 1/I)
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const bytes = randomBytes(8);
+    let code = "";
+    for (let i = 0; i < 8; i++) code += alphabet[bytes[i] % alphabet.length];
+    const existing = await storage.getOfficeByInviteCode(code);
+    if (!existing) return code;
+  }
+  throw new Error("Could not generate a unique invite code");
 }
 
 async function synthesizeAudio(text: string, voice: string): Promise<string> {
