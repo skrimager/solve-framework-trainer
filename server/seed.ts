@@ -13,12 +13,16 @@ export async function seed() {
     console.log("Seeded demo users.");
   }
 
+  // Add any scenario whose slug doesn't exist yet — keeps a live, already-seeded
+  // database in sync with new scenarios added to this file without wiping data.
   const existingScenarios = await storage.listScenarios();
-  if (existingScenarios.length === 0) {
-    for (const scenario of scenarios) {
+  const existingSlugs = new Set(existingScenarios.map((s) => s.slug));
+  const missing = scenarios.filter((s) => !existingSlugs.has(s.slug));
+  if (missing.length > 0) {
+    for (const scenario of missing) {
       await storage.createScenario(scenario);
     }
-    console.log(`Seeded ${scenarios.length} scenarios across ${new Set(scenarios.map((s) => s.vertical)).size} verticals.`);
+    console.log(`Seeded ${missing.length} new scenario(s) across ${new Set(missing.map((s) => s.vertical)).size} vertical(s).`);
   }
 }
 
