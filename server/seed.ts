@@ -4,8 +4,11 @@ import type { InsertScenario, Office } from "@shared/schema";
 const DEMO_OFFICE_NAME = "Demo Office";
 const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
 
-// Idempotently returns the shared Demo Office, creating it if absent. Used to give
-// the pre-existing demo users (and any legacy rows) a home office post-migration.
+// Returns the shared Demo Office. The 0001_offices migration is the source of
+// truth: it creates this office (invite code DEMO2024) and backfills existing
+// users onto it on boot, so this lookup normally just finds that row. The
+// create fallback keeps seed() usable on its own (e.g. dev scripts) and stays
+// idempotent by matching the same invite code the migration uses.
 async function ensureDemoOffice(): Promise<Office> {
   const existing = await storage.getOfficeByInviteCode(DEMO_OFFICE_INVITE_CODE);
   if (existing) return existing;

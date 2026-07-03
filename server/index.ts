@@ -3,6 +3,7 @@ import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { runMigrations } from "./migrate";
 import { createServer } from "node:http";
 
 const app = express();
@@ -62,6 +63,11 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Self-heal the schema on boot so a plain build+start deploy (which does not
+  // run drizzle-kit push) brings the live database up to date before seed()
+  // queries it and before we start serving traffic.
+  await runMigrations();
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
