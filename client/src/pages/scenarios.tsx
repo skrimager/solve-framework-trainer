@@ -10,6 +10,7 @@ import { AppShell } from "@/components/app-shell";
 import type { Scenario } from "@shared/schema";
 
 const VERTICAL_LABELS: Record<string, string> = {
+  manufactured_housing_community: "Manufactured housing community",
   manufactured_housing: "Manufactured housing dealer",
   real_estate: "Real estate purchase / listing",
   apartment_rental: "Apartment rental",
@@ -23,6 +24,7 @@ const VERTICAL_LABELS: Record<string, string> = {
 
 // Order verticals should appear in on the picker — top scenarios first per owner priority
 const VERTICAL_ORDER = [
+  "manufactured_housing_community",
   "manufactured_housing",
   "real_estate",
   "apartment_rental",
