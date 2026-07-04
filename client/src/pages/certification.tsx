@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { AppShell } from "@/components/app-shell";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
 import { Award, Lock, CheckCircle2, XCircle } from "lucide-react";
 
 type Track = "consulting" | "leadership";
@@ -66,6 +67,20 @@ type WrittenResult = {
   scenarioSessionId: number | null;
 };
 
+// apiRequest throws Error(`${status}: ${bodyText}`) where bodyText is usually
+// a JSON object like {"message": "..."}. Best-effort extraction of that
+// message for a friendlier toast; falls back to undefined if it doesn't parse.
+function parseServerMessage(errMessage: unknown): string | undefined {
+  if (typeof errMessage !== "string") return undefined;
+  const jsonPart = errMessage.slice(errMessage.indexOf(":") + 1).trim();
+  try {
+    const parsed = JSON.parse(jsonPart);
+    return typeof parsed?.message === "string" ? parsed.message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function initialTrack(): Track {
   if (typeof window === "undefined") return "consulting";
   const t = new URLSearchParams(window.location.search).get("track");
@@ -76,6 +91,7 @@ export default function Certification() {
   const { user } = useAuth();
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [track, setTrack] = useState<Track>(initialTrack);
 
   // Local exam state: the drawn question set + the candidate's answers + the
@@ -105,6 +121,13 @@ export default function Certification() {
       setAnswers({});
       setWrittenResult(null);
     },
+    onError: () => {
+      toast({
+        title: "Couldn't start the exam",
+        description: "Something went wrong preparing your exam. Please try again.",
+        variant: "destructive",
+      });
+    },
   });
 
   const submitWritten = useMutation({
@@ -115,6 +138,18 @@ export default function Certification() {
     onSuccess: (data) => {
       setWrittenResult(data);
       queryClient.invalidateQueries({ queryKey: ["/api/users", user?.id, "certification"] });
+    },
+    onError: (err: any) => {
+      // Your answers are preserved in local state, so it's always safe to retry —
+      // the attempt isn't marked submitted on the server until grading succeeds.
+      const serverMessage = parseServerMessage(err?.message);
+      toast({
+        title: "Couldn't grade your exam",
+        description:
+          serverMessage ??
+          "We hit a problem grading your answers. Your answers are still here — please try submitting again.",
+        variant: "destructive",
+      });
     },
   });
 

@@ -10,6 +10,7 @@ import {
   scoresForTrackAtLevel,
   REQUIRED_QUALIFYING_SESSIONS,
   ADVANCE_THRESHOLD,
+  WrittenGradingUnavailableError,
 } from "./llm";
 import {
   drawExam,
@@ -249,6 +250,25 @@ describe("gradeWrittenAnswer (mocked responder)", () => {
     const prompt = buildWrittenGradingPrompt("q", "r", "");
     assert.ok(prompt.includes("(no answer provided)"));
   });
+
+  test("a transient responder failure is retried and succeeds without surfacing an error", async () => {
+    let calls = 0;
+    const flakyThenOk = async () => {
+      calls += 1;
+      if (calls < 3) throw new Error("429 rate limited");
+      return '{"correct": true, "reason": "ok on retry"}';
+    };
+    const ok = await gradeWrittenAnswer("q", "r", "a", flakyThenOk);
+    assert.equal(ok, true);
+    assert.equal(calls, 3);
+  });
+
+  test("a persistently failing responder throws WrittenGradingUnavailableError, not a silent fail", async () => {
+    const alwaysFails = async () => {
+      throw new Error("401 Incorrect API key provided");
+    };
+    await assert.rejects(() => gradeWrittenAnswer("q", "r", "a", alwaysFails), WrittenGradingUnavailableError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -337,6 +357,20 @@ describe("gradeWrittenExam", () => {
     const result = await gradeWrittenExam(wrIds, {}, responder);
     assert.deepEqual(seen.sort(), [...wrIds].sort());
     assert.equal(result.correct, wrIds.length);
+  });
+
+  test("a grader failure aborts the whole exam rather than silently marking questions wrong", async () => {
+    // Build a set with both deterministic and written questions so we prove
+    // the failure isn't swallowed as a false/incorrect result for the written one.
+    const mcIds = questionBank("consulting").filter((q) => q.type === "multiple_choice").slice(0, 20).map((q) => q.id);
+    const wrIds = questionBank("consulting").filter((q) => q.type === "written").slice(0, 3).map((q) => q.id);
+    assert.ok(wrIds.length > 0, "expected the consulting bank to contain written questions");
+    const ids = [...mcIds, ...wrIds];
+    const answers = buildAnswers(ids, true);
+    const failingGrader = async () => {
+      throw new WrittenGradingUnavailableError(new Error("401 Incorrect API key provided"));
+    };
+    await assert.rejects(() => gradeWrittenExam(ids, answers, failingGrader), WrittenGradingUnavailableError);
   });
 });
 

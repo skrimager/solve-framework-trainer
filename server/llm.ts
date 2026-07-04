@@ -220,6 +220,35 @@ Candidate's answer: ${answer || "(no answer provided)"}
 Respond with ONLY valid JSON, no other text: {"correct": boolean, "reason": string}. Mark "correct" true only if the answer substantively meets the rubric.`;
 }
 
+// Retries a flaky async call a few times with a short backoff before giving
+// up. Written-exam grading calls the LLM once per free-text question; a
+// single transient failure (rate limit, timeout, brief outage) shouldn't
+// force the candidate to redo the whole 30-question exam.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseDelayMs = 400): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// Thrown when the LLM grader itself fails after retries (auth, rate limit,
+// outage) — distinct from a normal "the answer didn't meet the rubric"
+// result so callers can tell a real service failure apart from a fair grade.
+export class WrittenGradingUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`Written-answer grading is temporarily unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "WrittenGradingUnavailableError";
+  }
+}
+
 export async function gradeWrittenAnswer(
   prompt: string,
   rubric: string,
@@ -227,7 +256,15 @@ export async function gradeWrittenAnswer(
   responder: WrittenGradeResponder = defaultWrittenGradeResponder
 ): Promise<boolean> {
   const input = buildWrittenGradingPrompt(prompt, rubric, answer);
-  const raw = (await responder(input)).trim();
+  let raw: string;
+  try {
+    raw = (await withRetry(() => responder(input))).trim();
+  } catch (err) {
+    // The LLM call itself failed (not a grading judgment) — surface this
+    // distinctly so the exam route can fail the whole submission cleanly
+    // instead of silently marking a valid answer wrong.
+    throw new WrittenGradingUnavailableError(err);
+  }
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return false;
   try {

@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   normalizeTrack,
   drawExam,
@@ -771,6 +771,15 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       console.error("Written exam grading failed:", err);
+      if (err instanceof WrittenGradingUnavailableError) {
+        // The grading service itself failed (not a rubric judgment) after
+        // retries. Nothing was persisted, so the attempt is untouched and
+        // safe to resubmit — tell the client this is transient and retryable.
+        return res.status(503).json({
+          message: "Grading is temporarily unavailable. Your answers were not lost — please try submitting again in a moment.",
+          retryable: true,
+        });
+      }
       res.status(500).json({ message: err.message ?? "Failed to grade written test" });
     }
   });
