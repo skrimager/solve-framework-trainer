@@ -9,6 +9,7 @@ export type AuthUser = {
   role: "manager" | "consultant" | "qa";
   displayName: string;
   currentLevel: Level;
+  leadershipLevel: Level;
   seatActive: boolean;
   isDemoAccount: boolean;
 };

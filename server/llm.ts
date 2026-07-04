@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { TranscriptMessage, RubricScores } from "@shared/schema";
+import type { TranscriptMessage, RubricScores, LeadershipRubricScores } from "@shared/schema";
 
 const client = new OpenAI();
 // Uses a real OpenAI model name for production (Render). In the Perplexity
@@ -30,8 +30,16 @@ export async function synthesizeSpeech(text: string, voice: string): Promise<Buf
 // themselves by first name, used to start a session so the consultant walks in
 // cold (no pre-roleplay briefing) and must uncover the situation through
 // discovery. The persona's underlying needs/concerns must NOT be revealed here.
-export async function getCustomerOpening(customerPersona: string): Promise<string> {
-  const input = `${customerPersona}\n\nYou are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
+export async function getCustomerOpening(customerPersona: string, track: string = "consulting"): Promise<string> {
+  // Consulting (discovery) counterparts open cold and hide their real need. In
+  // a Leadership/Conflict-Management scenario the counterpart is already upset
+  // or in conflict, so they open by surfacing that frustration (but not the
+  // underlying root cause, which the consultant must still uncover).
+  const openingInstruction =
+    track === "leadership"
+      ? `You are starting the conversation already frustrated, upset, or in conflict about something. Open with a short, natural line that introduces yourself by first name and makes your annoyance/complaint clear in one or two sentences (for example: "I'm Dana, and honestly I'm pretty frustrated right now — this is the second time this has happened"). Do NOT calmly explain the full root cause or what would satisfy you; the consultant has to draw that out. Output ONLY the spoken line, no labels or narration.`
+      : `You are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
+  const input = `${customerPersona}\n\n${openingInstruction}`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -100,18 +108,70 @@ const RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
     "Scoring calibration (ADVANCED): Grade strictly. Award high scores (85+) ONLY when discovery is thorough and multi-layered, the real underlying need is explicitly uncovered and reflected back in the customer's own words, objections are anticipated and handled rather than merely reacted to, and any close/next step is precisely tied to what the customer said. Penalize shallow questioning, missed objections, and incomplete needs-matching more heavily than at lower levels.",
 };
 
+// Leadership / Conflict-Management scoring rubric. Parallel to RUBRIC_SYSTEM but
+// evaluates de-escalation skill (listening, empathy, root-cause discovery,
+// co-created solutions, blameless resolution) instead of sales discovery.
+const LEADERSHIP_RUBRIC_SYSTEM = `You are scoring a conflict-management / de-escalation role-play transcript. The consultant is a manager or service professional handling an upset customer, an aggrieved employee, or a peer conflict. This is NOT sales training — evaluate their ability to de-escalate, understand the other person, and reach a resolution nobody is blamed for.
+
+Score each dimension 0-100:
+- activeListening: Did the consultant let the person fully vent and feel heard before responding — no interrupting, defending, or jumping to solutions?
+- empathyAcknowledgment: Did the consultant name and validate the person's feeling ("I can hear how frustrating this is") before problem-solving?
+- rootCauseDiscovery: Did the consultant ask questions to uncover the real underlying issue rather than reacting only to the surface complaint?
+- solutionVisualization: Did the consultant co-create what a good outcome looks like WITH the other party, rather than imposing a fix unilaterally?
+- blamelessResolution: Was the resolution offered without blaming the customer/employee/peer OR scapegoating the company/coworker?
+
+Return ONLY valid JSON matching this shape, no other text:
+{"activeListening": number, "empathyAcknowledgment": number, "rootCauseDiscovery": number, "solutionVisualization": number, "blamelessResolution": number, "feedback": string}
+
+"feedback" should be 2-4 sentences of specific, constructive narrative feedback in a coaching tone, using conflict-management / de-escalation language (never "sales" or "closing" language).`;
+
+const LEADERSHIP_RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
+  beginner:
+    "Scoring calibration (BEGINNER): Reward solid fundamentals. Give credit for a genuine attempt to listen, acknowledge the feeling, and reach a fair resolution even when not every step is polished.",
+  intermediate:
+    "Scoring calibration (INTERMEDIATE): Hold a professional bar. Expect the consultant to let the person vent, explicitly acknowledge emotion, uncover the real issue, and land a mutually-agreed resolution before awarding high marks.",
+  advanced:
+    "Scoring calibration (ADVANCED): Grade strictly. Award high scores (85+) ONLY when the consultant fully de-escalates a hostile counterpart, names the emotion precisely, uncovers the true root cause behind the stated complaint, co-creates the resolution rather than dictating it, and assigns blame to no one. Penalize interrupting, defensiveness, premature solutions, and blame-shifting more heavily than at lower levels.",
+};
+
+const CONSULTING_RUBRIC_KEYS = [
+  "needsDiscovery",
+  "objectionPrevention",
+  "trustBuilding",
+  "naturalClose",
+  "relationshipContinuity",
+] as const;
+
+const LEADERSHIP_RUBRIC_KEYS = [
+  "activeListening",
+  "empathyAcknowledgment",
+  "rootCauseDiscovery",
+  "solutionVisualization",
+  "blamelessResolution",
+] as const;
+
+// Scores a completed session. Branches on the scenario's `track`: consulting
+// sessions use the discovery rubric (RubricScores); leadership sessions use the
+// conflict-management rubric (LeadershipRubricScores). Both are stored the same
+// way (JSON text in sessions.rubricScores) and disambiguated by track on read.
 export async function scoreTranscript(
   transcript: TranscriptMessage[],
-  difficulty: string = "intermediate"
-): Promise<{ rubric: RubricScores; feedback: string; overall: number }> {
+  difficulty: string = "intermediate",
+  track: string = "consulting"
+): Promise<{ rubric: RubricScores | LeadershipRubricScores; feedback: string; overall: number }> {
   const transcriptText = transcript
     .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
     .join("\n");
 
-  const calibration = RUBRIC_DIFFICULTY_CALIBRATION[difficulty] ?? RUBRIC_DIFFICULTY_CALIBRATION.intermediate;
+  const isLeadership = track === "leadership";
+  const system = isLeadership ? LEADERSHIP_RUBRIC_SYSTEM : RUBRIC_SYSTEM;
+  const calibrationMap = isLeadership ? LEADERSHIP_RUBRIC_DIFFICULTY_CALIBRATION : RUBRIC_DIFFICULTY_CALIBRATION;
+  const calibration = calibrationMap[difficulty] ?? calibrationMap.intermediate;
+  const keys = isLeadership ? LEADERSHIP_RUBRIC_KEYS : CONSULTING_RUBRIC_KEYS;
+
   const response = await client.responses.create({
     model: CHAT_MODEL,
-    input: `${RUBRIC_SYSTEM}\n\n${calibration}\n\nTranscript:\n${transcriptText}`,
+    input: `${system}\n\n${calibration}\n\nTranscript:\n${transcriptText}`,
   });
 
   const raw = (response.output_text || "").trim();
@@ -121,21 +181,12 @@ export async function scoreTranscript(
   }
   const parsed = JSON.parse(jsonMatch[0]);
 
-  const rubric: RubricScores = {
-    needsDiscovery: parsed.needsDiscovery ?? 0,
-    objectionPrevention: parsed.objectionPrevention ?? 0,
-    trustBuilding: parsed.trustBuilding ?? 0,
-    naturalClose: parsed.naturalClose ?? 0,
-    relationshipContinuity: parsed.relationshipContinuity ?? 0,
-  };
+  const rubric = Object.fromEntries(keys.map((k) => [k, parsed[k] ?? 0])) as unknown as
+    | RubricScores
+    | LeadershipRubricScores;
 
   const overall = Math.round(
-    (rubric.needsDiscovery +
-      rubric.objectionPrevention +
-      rubric.trustBuilding +
-      rubric.naturalClose +
-      rubric.relationshipContinuity) /
-      5
+    keys.reduce((sum, k) => sum + (parsed[k] ?? 0), 0) / keys.length
   );
 
   return { rubric, feedback: parsed.feedback ?? "", overall };
@@ -181,4 +232,41 @@ export function computeLevelAdvancement(
   const avg = scoresAtCurrentLevel.reduce((sum, s) => sum + s, 0) / scoresAtCurrentLevel.length;
   if (avg >= ADVANCE_THRESHOLD) return LEVEL_ORDER[idx + 1];
   return null;
+}
+
+// The verticals that belong to the Leadership / Conflict-Management track.
+export const LEADERSHIP_VERTICALS = [
+  "upset_customer_service",
+  "employee_grievance",
+  "peer_conflict",
+] as const;
+
+// Normalizes a scenario's track. Rows created before the track column existed
+// have no track and are treated as consulting.
+export function scenarioTrack(track: string | null | undefined): string {
+  return track === "leadership" ? "leadership" : "consulting";
+}
+
+type ScoredSession = { scenarioId: number; status: string; score: number | null };
+type LeveledScenario = { id: number; track?: string | null; difficulty: string };
+
+// Collects a user's completed scores that count toward advancement on ONE track
+// at ONE difficulty level. This is what keeps the two tracks independent: a
+// consulting session never contributes to leadership progress and vice versa,
+// so being Advanced in Consulting can never auto-certify someone in Leadership.
+export function scoresForTrackAtLevel(
+  track: string,
+  level: string,
+  sessions: ScoredSession[],
+  scenarios: LeveledScenario[]
+): number[] {
+  const byId = new Map(scenarios.map((s) => [s.id, s]));
+  return sessions
+    .filter((s) => s.status === "completed" && s.score !== null)
+    .filter((s) => {
+      const scenario = byId.get(s.scenarioId);
+      if (!scenario) return false;
+      return scenarioTrack(scenario.track) === track && scenario.difficulty === level;
+    })
+    .map((s) => s.score as number);
 }

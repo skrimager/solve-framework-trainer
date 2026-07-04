@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,7 +19,25 @@ const LEVEL_LABELS: Record<Level, string> = {
   advanced: "Advanced",
 };
 
+type Track = "consulting" | "leadership";
+
+const TRACK_LABELS: Record<Track, string> = {
+  consulting: "Consulting",
+  leadership: "Leadership / Conflict Management",
+};
+
+// Named credential earned per track at the "advanced" ceiling. Distinct name
+// per track (same 3-level structure and auto-advance mechanism underneath).
+const TRACK_CREDENTIAL: Record<Track, string> = {
+  consulting: "SOLVE Framework Certified",
+  leadership: "SOLVE Conflict Management Certified",
+};
+
 const VERTICAL_LABELS: Record<string, string> = {
+  // Leadership / Conflict-Management verticals
+  upset_customer_service: "Upset customer service",
+  employee_grievance: "Employee grievance",
+  peer_conflict: "Peer conflict",
   manufactured_housing_community: "Manufactured housing community",
   manufactured_housing: "Manufactured housing dealer",
   real_estate: "Real estate purchase / listing",
@@ -35,7 +54,13 @@ const VERTICAL_LABELS: Record<string, string> = {
   insurance_auto: "Insurance",
 };
 
-// Order verticals should appear in on the picker — top scenarios first per owner priority
+// Order verticals should appear in on the picker, per track — top scenarios first per owner priority
+const LEADERSHIP_VERTICAL_ORDER = [
+  "upset_customer_service",
+  "employee_grievance",
+  "peer_conflict",
+];
+
 const VERTICAL_ORDER = [
   "manufactured_housing_community",
   "manufactured_housing",
@@ -53,10 +78,29 @@ const VERTICAL_ORDER = [
   "landscaping",
 ];
 
+function initialTrack(): Track {
+  if (typeof window === "undefined") return "consulting";
+  const t = new URLSearchParams(window.location.search).get("track");
+  return t === "leadership" ? "leadership" : "consulting";
+}
+
 export default function Scenarios() {
   const { user } = useAuth();
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
+
+  // Which top-level track the picker is filtered to. Persisted in the URL
+  // (?track=) so it survives refresh/sharing without needing a schema change —
+  // the track a session belongs to is derived from its scenario, not the user.
+  const [track, setTrackState] = useState<Track>(initialTrack);
+  const setTrack = (t: Track) => {
+    setTrackState(t);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("track", t);
+      window.history.replaceState({}, "", url);
+    }
+  };
 
   const { data: scenarios, isLoading } = useQuery<Scenario[]>({
     queryKey: ["/api/scenarios"],
@@ -98,16 +142,24 @@ export default function Scenarios() {
   // persona is chosen at random when the consultant starts — revealing the title
   // or persona ahead of time would give away exactly what discovery is supposed
   // to uncover.
+  // Rows with no track (created before the track column existed) count as consulting.
+  const scenarioTrack = (s: Scenario): Track => (s.track === "leadership" ? "leadership" : "consulting");
   const verticalGroups = new Map<string, Scenario[]>();
   for (const s of scenarios ?? []) {
+    if (scenarioTrack(s) !== track) continue;
     const list = verticalGroups.get(s.vertical) ?? [];
     list.push(s);
     verticalGroups.set(s.vertical, list);
   }
+  const orderPref = track === "leadership" ? LEADERSHIP_VERTICAL_ORDER : VERTICAL_ORDER;
   const orderedVerticals = [
-    ...VERTICAL_ORDER.filter((v) => verticalGroups.has(v)),
-    ...Array.from(verticalGroups.keys()).filter((v) => !VERTICAL_ORDER.includes(v)),
+    ...orderPref.filter((v) => verticalGroups.has(v)),
+    ...Array.from(verticalGroups.keys()).filter((v) => !orderPref.includes(v)),
   ];
+
+  // The level shown/highlighted is the one for the selected track — the two are
+  // tracked independently per user.
+  const activeLevel = user ? (track === "leadership" ? user.leadershipLevel : user.currentLevel) : undefined;
 
   const handleStart = (vertical: string) => {
     const pool = verticalGroups.get(vertical) ?? [];
@@ -117,8 +169,35 @@ export default function Scenarios() {
   };
 
   return (
-    <AppShell title="Discovery scenarios">
+    <AppShell title="Training scenarios">
       <div className="space-y-4">
+        {/* Track picker — filters the scenario list to one training track. Uses
+            the same orange accent as the level badges to stay on-brand. */}
+        <div
+          className="inline-flex rounded-lg border-2 p-1"
+          style={{ borderColor: "#E06D00" }}
+          role="tablist"
+          aria-label="Training track"
+          data-testid="track-picker"
+        >
+          {(["consulting", "leadership"] as Track[]).map((t) => {
+            const selected = track === t;
+            return (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setTrack(t)}
+                className="text-sm font-semibold rounded-md px-3 py-1.5 transition-colors"
+                style={selected ? { backgroundColor: "#E06D00", color: "white" } : { color: "#E06D00" }}
+                data-testid={`track-option-${t}`}
+              >
+                {TRACK_LABELS[t]}
+              </button>
+            );
+          })}
+        </div>
         {user && (
           <div
             className="flex items-center gap-3 rounded-lg border-2 px-4 py-3"
@@ -127,16 +206,22 @@ export default function Scenarios() {
           >
             <Award className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
             <div>
-              <p className="text-xs text-muted-foreground">Your current level</p>
+              <p className="text-xs text-muted-foreground">Your current level — {TRACK_LABELS[track]}</p>
               <p className="text-sm font-semibold" style={{ color: "#E06D00" }} data-testid="text-current-level">
-                {LEVEL_LABELS[user.currentLevel] ?? user.currentLevel}
+                {(activeLevel && LEVEL_LABELS[activeLevel]) ?? activeLevel}
               </p>
+              {activeLevel === "advanced" && (
+                <p className="text-xs font-medium text-muted-foreground" data-testid="text-credential">
+                  {TRACK_CREDENTIAL[track]}
+                </p>
+              )}
             </div>
           </div>
         )}
         <p className="text-sm text-muted-foreground max-w-prose" data-testid="text-scenarios-intro">
-          Pick a scenario and start the conversation cold — no preview. Your goal isn't to close
-          fast, it's to uncover the real need behind whatever the customer opens with.
+          {track === "leadership"
+            ? "Pick a scenario and start the conversation cold — no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
+            : "Pick a scenario and start the conversation cold — no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
@@ -197,7 +282,7 @@ export default function Scenarios() {
                   </div>
                   <CardDescription className="flex flex-wrap gap-1.5 pt-1">
                     {difficulties.map((d) => {
-                      const isCurrent = user?.currentLevel === d;
+                      const isCurrent = activeLevel === d;
                       return (
                         <Badge
                           key={d}
@@ -217,16 +302,16 @@ export default function Scenarios() {
                     disabled={startSession.isPending}
                     data-testid={`button-start-${vertical}`}
                   >
-                    {startSession.isPending ? "Starting..." : "Start discovery session"}
+                    {startSession.isPending ? "Starting..." : track === "leadership" ? "Start conflict scenario" : "Start discovery session"}
                   </Button>
                 </CardContent>
               </Card>
             );
           })}
         </div>
-        {!isLoading && scenarios?.length === 0 && (
+        {!isLoading && orderedVerticals.length === 0 && (
           <p className="text-sm text-muted-foreground" data-testid="text-no-scenarios">
-            No scenarios available yet.
+            No scenarios available in this track yet.
           </p>
         )}
       </div>

@@ -36,6 +36,13 @@
       "when": 1783106651000,
       "tag": "0004_admin_leads_visitors",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1783106652000,
+      "tag": "0005_leadership_track",
+      "breakpoints": true
     }
   ]
 }

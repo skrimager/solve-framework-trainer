@@ -323,16 +323,22 @@ export default function RolePlay() {
     handleSendRef.current = handleSend;
   });
 
+  const isLeadership = scenario?.track === "leadership";
+  const sessionTitle = isLeadership ? "Conflict scenario" : "Discovery session";
+  const sessionHint = isLeadership
+    ? "Listen with empathy, uncover the root cause, and work toward a resolution that doesn't lay blame."
+    : "Ask open questions before proposing anything. Uncover the real need.";
+
   if (isLoading || !session) {
     return (
-      <AppShell title="Discovery session" compact>
+      <AppShell title={sessionTitle} compact>
         <Skeleton className="h-96 rounded-lg" />
       </AppShell>
     );
   }
 
   return (
-    <AppShell title="Discovery session" compact>
+    <AppShell title={sessionTitle} compact>
       <div
         ref={containerRef}
         className="flex flex-col flex-1 min-h-0 rounded-lg border bg-card overflow-hidden"
@@ -353,7 +359,7 @@ export default function RolePlay() {
               </div>
             )}
             <p className="text-sm text-muted-foreground truncate" data-testid="text-session-hint">
-              Ask open questions before proposing anything. Uncover the real need.
+              {sessionHint}
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
