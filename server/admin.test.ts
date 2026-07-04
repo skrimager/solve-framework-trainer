@@ -124,13 +124,13 @@ describe("sales aggregation", () => {
     assert.equal(seatsMrr(16), 29 * 5 + 24 * 10 + 19);
   });
 
-  test("active office MRR = seats + amortized manager fee", () => {
+  test("active office MRR = seats + flat monthly manager fee", () => {
     const row = computeSalesRow(office({ activeSeatCount: 3 }));
     assert.equal(row.active, true);
     assert.equal(row.seatCount, 3);
     assert.equal(row.seatsMrr, 87);
-    assert.equal(row.managerMrr, 15.75); // 189 / 12
-    assert.equal(row.mrr, 102.75);
+    assert.equal(row.managerMrr, 189);
+    assert.equal(row.mrr, 276);
   });
 
   test("inactive office contributes zero MRR", () => {
@@ -146,7 +146,7 @@ describe("sales aggregation", () => {
     ]);
     assert.equal(rows.length, 2);
     assert.equal(activeOffices, 1);
-    assert.equal(totalMrr, 44.75); // 29 + 15.75
+    assert.equal(totalMrr, 218); // 29 + 189
   });
 });
 

@@ -94,9 +94,8 @@ export function toCsv<T extends Record<string, unknown>>(
 // Per-office subscription/revenue rows derived from the billing fields already
 // stored per office (populated by the Stripe webhook sync). MRR is a directional
 // estimate from the seat count using the same public volume-tiered seat pricing;
-// the flat annual Manager Dashboard fee is amortized to a monthly figure.
-const MANAGER_ANNUAL_PRICE = 189;
-const MANAGER_MONTHLY = MANAGER_ANNUAL_PRICE / 12;
+// the Manager Dashboard fee is a flat monthly fee (not amortized from an annual price).
+const MANAGER_MONTHLY = 189;
 
 export function seatMonthlyRate(seatIndex: number): number {
   // seatIndex is 1-based position of the seat within the office.
