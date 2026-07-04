@@ -34,7 +34,8 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
-  currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances at 85%+ average score
+  currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances at 85%+ average score
+  leadershipLevel: text("leadership_level").notNull().default("beginner"), // Leadership/Conflict-Management track level, tracked independently from currentLevel so a user can be Advanced in one track and Beginner in the other
   // A paid, occupied consultant seat. Set true only after the office's Stripe seat
   // quantity has been incremented for this user (consultants and managers who buy
   // their own training seat). Gates access to roleplay/session creation.
@@ -51,6 +52,7 @@ export const insertUserSchema = createInsertSchema(users).pick({
   role: true,
   displayName: true,
   currentLevel: true,
+  leadershipLevel: true,
   seatActive: true,
   isDemoAccount: true,
 });
@@ -63,7 +65,8 @@ export const scenarios = pgTable("scenarios", {
   id: serial("id").primaryKey(),
   slug: text("slug").notNull().unique(),
   title: text("title").notNull(),
-  vertical: text("vertical").notNull(), // 'manufactured_housing' | 'real_estate' | 'apartment_rental' | 'auto_sales' | 'hvac_service' | 'hvac_sales' | 'plumbing' | 'financial_advisor' | 'insurance_auto'
+  vertical: text("vertical").notNull(), // consulting: 'manufactured_housing' | 'real_estate' | 'apartment_rental' | 'auto_sales' | 'hvac_service' | 'hvac_sales' | 'plumbing' | 'financial_advisor' | 'insurance_auto'; leadership: 'upset_customer_service' | 'employee_grievance' | 'peer_conflict'
+  track: text("track").notNull().default("consulting"), // 'consulting' | 'leadership' — which top-level training track this scenario belongs to; existing rows backfill to 'consulting'
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // system prompt describing the simulated customer
   gender: text("gender").notNull(), // 'male' | 'female' — single source of truth that must match the persona's avatar image; deterministically gates TTS voice selection so the heard voice can never be the wrong gender for the shown face
@@ -195,3 +198,15 @@ export const rubricScoresSchema = z.object({
   relationshipContinuity: z.number(), // follow-up / next-steps signal
 });
 export type RubricScores = z.infer<typeof rubricScoresSchema>;
+
+// Rubric scores shape for Leadership / Conflict-Management sessions (stored the
+// same way as RubricScores — as JSON text in sessions.rubricScores). Which
+// shape a row holds is disambiguated by the session's scenario `track`.
+export const leadershipRubricScoresSchema = z.object({
+  activeListening: z.number(), // let the person fully vent before responding; no interrupting/defending
+  empathyAcknowledgment: z.number(), // named/validated the person's feeling before problem-solving
+  rootCauseDiscovery: z.number(), // asked questions to find the real issue vs. reacting to the surface complaint
+  solutionVisualization: z.number(), // co-created what a good outcome looks like with the other party, not unilaterally
+  blamelessResolution: z.number(), // resolution offered without blaming the client/customer OR the company/coworker
+});
+export type LeadershipRubricScores = z.infer<typeof leadershipRubricScoresSchema>;

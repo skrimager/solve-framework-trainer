@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack } from "./llm";
 import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage, type User } from "@shared/schema";
 import { seed } from "./seed";
@@ -345,9 +345,17 @@ export async function registerRoutes(
   });
 
   // --- Scenarios ---
-  app.get("/api/scenarios", async (_req, res) => {
+  app.get("/api/scenarios", async (req, res) => {
     const scenarios = await storage.listScenarios();
-    res.json(scenarios.filter((s) => s.active));
+    let active = scenarios.filter((s) => s.active);
+    // Optional ?track= filter so the client (consultant picker and admin
+    // management) can request just one track's scenarios. Unknown/absent track
+    // returns all active scenarios (back-compat).
+    const track = typeof req.query.track === "string" ? req.query.track : undefined;
+    if (track === "consulting" || track === "leadership") {
+      active = active.filter((s) => scenarioTrack(s.track) === track);
+    }
+    res.json(active);
   });
 
   app.get("/api/scenarios/:id", async (req, res) => {
@@ -370,7 +378,7 @@ export async function registerRoutes(
     try {
       const scenario = await storage.getScenario(scenarioId);
       if (scenario) {
-        const openingText = await getCustomerOpening(scenario.customerPersona);
+        const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
         if (openingText) {
           const openingMsg = transcriptMessageSchema.parse({
             role: "customer",
@@ -514,9 +522,11 @@ export async function registerRoutes(
         }
       }
 
-      // Score against the scenario's difficulty so higher levels are graded stricter.
+      // Score against the scenario's difficulty (stricter at higher levels) and
+      // its track (consulting vs. leadership uses a different rubric).
       const scenario = await storage.getScenario(session.scenarioId);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty);
+      const track = scenarioTrack(scenario?.track);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track);
 
       const updated = await storage.updateSession(session.id, {
         status: "completed",
@@ -526,21 +536,25 @@ export async function registerRoutes(
         completedAt: new Date().toISOString(),
       });
 
-      // Auto-advance the consultant's level if their average score at their
-      // current level's difficulty has reached the threshold.
+      // Auto-advance the consultant's level for THIS track if their average score
+      // at their current level's difficulty on this track has reached the
+      // threshold. The two tracks advance independently: only sessions on the
+      // same track count, and only that track's level column is updated — so
+      // being Advanced in Consulting never auto-certifies someone in Leadership.
       const user = await storage.getUser(session.userId);
       if (user) {
         const [allSessions, allScenarios] = await Promise.all([
           storage.listSessionsByUser(user.id),
           storage.listScenarios(),
         ]);
-        const scenarioDifficulty = new Map(allScenarios.map((s) => [s.id, s.difficulty]));
-        const scoresAtLevel = allSessions
-          .filter((s) => s.status === "completed" && s.score !== null && scenarioDifficulty.get(s.scenarioId) === user.currentLevel)
-          .map((s) => s.score as number);
-        const nextLevel = computeLevelAdvancement(user.currentLevel, scoresAtLevel);
+        const levelForTrack = track === "leadership" ? user.leadershipLevel : user.currentLevel;
+        const scoresAtLevel = scoresForTrackAtLevel(track, levelForTrack, allSessions, allScenarios);
+        const nextLevel = computeLevelAdvancement(levelForTrack, scoresAtLevel);
         if (nextLevel) {
-          await storage.updateUser(user.id, { currentLevel: nextLevel });
+          await storage.updateUser(
+            user.id,
+            track === "leadership" ? { leadershipLevel: nextLevel } : { currentLevel: nextLevel },
+          );
         }
       }
 
@@ -811,6 +825,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       officeId: u.officeId,
       role: u.role,
       currentLevel: u.currentLevel,
+      leadershipLevel: u.leadershipLevel,
       seatActive: u.seatActive ? "yes" : "no",
       isDemoAccount: u.isDemoAccount ? "yes" : "no",
       subscriptionStatus: officeStatus.get(u.officeId) ?? "",
@@ -821,7 +836,8 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       { key: "displayName", header: "Name" },
       { key: "office", header: "Office" },
       { key: "role", header: "Role" },
-      { key: "currentLevel", header: "Level" },
+      { key: "currentLevel", header: "Consulting Level" },
+      { key: "leadershipLevel", header: "Leadership Level" },
       { key: "seatActive", header: "Seat Active" },
       { key: "isDemoAccount", header: "Demo" },
       { key: "subscriptionStatus", header: "Office Subscription" },
@@ -864,6 +880,7 @@ function publicUser(user: User) {
     role: user.role,
     displayName: user.displayName,
     currentLevel: user.currentLevel,
+    leadershipLevel: user.leadershipLevel,
     seatActive: user.seatActive,
     isDemoAccount: user.isDemoAccount,
   };
