@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, leads, visitorPageViews } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Lead, InsertLead, VisitorPageView, InsertVisitorPageView } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, leads, visitorPageViews, certificationAttempts } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc } from "drizzle-orm";
@@ -63,6 +63,12 @@ export interface IStorage {
   listVisitorPageViews(limit?: number): Promise<VisitorPageView[]>;
 
   listOffices(): Promise<Office[]>;
+
+  createCertificationAttempt(attempt: InsertCertificationAttempt): Promise<CertificationAttempt>;
+  getCertificationAttempt(id: number): Promise<CertificationAttempt | undefined>;
+  getCertificationAttemptByScenarioSession(sessionId: number): Promise<CertificationAttempt | undefined>;
+  updateCertificationAttempt(id: number, patch: Partial<InsertCertificationAttempt>): Promise<CertificationAttempt | undefined>;
+  listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -232,6 +238,33 @@ export class DatabaseStorage implements IStorage {
 
   async listOffices(): Promise<Office[]> {
     return db.select().from(offices);
+  }
+
+  async createCertificationAttempt(attempt: InsertCertificationAttempt): Promise<CertificationAttempt> {
+    const rows = await db.insert(certificationAttempts).values(attempt).returning();
+    return rows[0];
+  }
+
+  async getCertificationAttempt(id: number): Promise<CertificationAttempt | undefined> {
+    const rows = await db.select().from(certificationAttempts).where(eq(certificationAttempts.id, id));
+    return rows[0];
+  }
+
+  async getCertificationAttemptByScenarioSession(sessionId: number): Promise<CertificationAttempt | undefined> {
+    const rows = await db
+      .select()
+      .from(certificationAttempts)
+      .where(eq(certificationAttempts.scenarioSessionId, sessionId));
+    return rows[0];
+  }
+
+  async updateCertificationAttempt(id: number, patch: Partial<InsertCertificationAttempt>): Promise<CertificationAttempt | undefined> {
+    const rows = await db.update(certificationAttempts).set(patch).where(eq(certificationAttempts.id, id)).returning();
+    return rows[0];
+  }
+
+  async listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]> {
+    return db.select().from(certificationAttempts).where(eq(certificationAttempts.userId, userId)).orderBy(desc(certificationAttempts.id));
   }
 }
 

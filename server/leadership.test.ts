@@ -124,20 +124,42 @@ describe("per-track level independence", () => {
   });
 
   test("leadership scores drive leadership advancement without touching consulting", () => {
+    // Five individually-qualifying (85+) leadership beginner sessions are required
+    // to advance — an average is NOT enough. Give the user exactly five.
+    const manyScenarios = [
+      ...scenarios,
+      { id: 22, track: "leadership", difficulty: "beginner" },
+      { id: 23, track: "leadership", difficulty: "beginner" },
+      { id: 24, track: "leadership", difficulty: "beginner" },
+    ];
     const sessions = [
       { scenarioId: 10, status: "completed", score: 40 }, // poor consulting score
-      { scenarioId: 20, status: "completed", score: 90 }, // strong leadership beginner
+      { scenarioId: 20, status: "completed", score: 90 },
       { scenarioId: 21, status: "completed", score: 88 },
+      { scenarioId: 22, status: "completed", score: 86 },
+      { scenarioId: 23, status: "completed", score: 91 },
+      { scenarioId: 24, status: "completed", score: 85 },
     ];
-    const leadershipScores = scoresForTrackAtLevel("leadership", "beginner", sessions, scenarios);
-    assert.deepEqual(leadershipScores.sort(), [88, 90]);
-    // Leadership advances beginner -> intermediate (avg 89 >= threshold).
-    assert.ok((88 + 90) / 2 >= ADVANCE_THRESHOLD);
+    const leadershipScores = scoresForTrackAtLevel("leadership", "beginner", sessions, manyScenarios);
+    assert.deepEqual([...leadershipScores].sort((a, b) => a - b), [85, 86, 88, 90, 91]);
+    // All five clear the bar, so leadership advances beginner -> intermediate.
+    assert.ok(leadershipScores.every((s) => s >= ADVANCE_THRESHOLD));
     assert.equal(computeLevelAdvancement("beginner", leadershipScores), "intermediate");
 
     // The consulting side, meanwhile, sees only the poor consulting score and does not advance.
-    const consultingScores = scoresForTrackAtLevel("consulting", "beginner", sessions, scenarios);
+    const consultingScores = scoresForTrackAtLevel("consulting", "beginner", sessions, manyScenarios);
     assert.deepEqual(consultingScores, []); // no consulting beginner sessions
+  });
+
+  test("fewer than five qualifying sessions does not advance, even at a high average", () => {
+    const sessions = [
+      { scenarioId: 20, status: "completed", score: 99 },
+      { scenarioId: 21, status: "completed", score: 98 },
+    ];
+    const leadershipScores = scoresForTrackAtLevel("leadership", "beginner", sessions, scenarios);
+    // Two sessions averaging 98.5 — but only two, so no advancement under the
+    // 5-qualifying rule (this is the behavior change from the old averaging logic).
+    assert.equal(computeLevelAdvancement("beginner", leadershipScores), null);
   });
 
   test("only completed, scored sessions on the matching difficulty count", () => {

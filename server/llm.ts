@@ -192,6 +192,89 @@ export async function scoreTranscript(
   return { rubric, feedback: parsed.feedback ?? "", overall };
 }
 
+// Grades a single free-text ("written") certification answer against a rubric,
+// using the SAME client.responses.create shape as scoreTranscript. Returns a
+// deterministic boolean (correct / not correct) so the written test can be
+// scored exactly out of 30. `responder` is injectable purely so tests can
+// exercise the prompt-building + parsing without hitting the real API; in
+// production it defaults to the shared OpenAI client.
+export type WrittenGradeResponder = (input: string) => Promise<string>;
+
+const defaultWrittenGradeResponder: WrittenGradeResponder = async (input) => {
+  const response = await client.responses.create({
+    model: CHAT_MODEL,
+    input,
+  });
+  return response.output_text || "";
+};
+
+export function buildWrittenGradingPrompt(prompt: string, rubric: string, answer: string): string {
+  return `You are grading a single free-text answer on a professional certification exam. Decide whether the candidate's answer satisfies the rubric.
+
+Question: ${prompt}
+
+Rubric for a correct answer: ${rubric}
+
+Candidate's answer: ${answer || "(no answer provided)"}
+
+Respond with ONLY valid JSON, no other text: {"correct": boolean, "reason": string}. Mark "correct" true only if the answer substantively meets the rubric.`;
+}
+
+// Retries a flaky async call a few times with a short backoff before giving
+// up. Written-exam grading calls the LLM once per free-text question; a
+// single transient failure (rate limit, timeout, brief outage) shouldn't
+// force the candidate to redo the whole 30-question exam.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseDelayMs = 400): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// Thrown when the LLM grader itself fails after retries (auth, rate limit,
+// outage) — distinct from a normal "the answer didn't meet the rubric"
+// result so callers can tell a real service failure apart from a fair grade.
+export class WrittenGradingUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`Written-answer grading is temporarily unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "WrittenGradingUnavailableError";
+  }
+}
+
+export async function gradeWrittenAnswer(
+  prompt: string,
+  rubric: string,
+  answer: string,
+  responder: WrittenGradeResponder = defaultWrittenGradeResponder
+): Promise<boolean> {
+  const input = buildWrittenGradingPrompt(prompt, rubric, answer);
+  let raw: string;
+  try {
+    raw = (await withRetry(() => responder(input))).trim();
+  } catch (err) {
+    // The LLM call itself failed (not a grading judgment) — surface this
+    // distinctly so the exam route can fail the whole submission cleanly
+    // instead of silently marking a valid answer wrong.
+    throw new WrittenGradingUnavailableError(err);
+  }
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return false;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.correct === true;
+  } catch {
+    return false;
+  }
+}
+
 // Checks whether the consultant has proposed any recommendation, solution, or
 // next step/close yet in the conversation. Used to gate "End & score this
 // session" — a consultation that never reaches a recommendation is incomplete
@@ -217,21 +300,53 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
 // the ceiling — there is no auto-advance beyond it.
 export const LEVEL_ORDER = ["beginner", "intermediate", "advanced"] as const;
 export type Level = (typeof LEVEL_ORDER)[number];
+// A session "qualifies" at a level only if it INDIVIDUALLY scores at or above
+// this bar. This is not an average — one great session cannot carry a weak one.
 export const ADVANCE_THRESHOLD = 85;
+// A level (and, at Advanced, exam eligibility) is gated behind this many
+// individually-qualifying sessions at that level. Identical at every level and
+// on both tracks.
+export const REQUIRED_QUALIFYING_SESSIONS = 5;
+
+// Counts how many of the given completed scores individually clear the
+// qualifying bar (>= ADVANCE_THRESHOLD). A sub-85 session simply doesn't count
+// toward the total — it does NOT erase already-earned qualifying sessions, so
+// progress never resets. This is the single source of truth for both level
+// advancement and Advanced-level exam eligibility.
+export function countQualifyingSessions(scoresAtCurrentLevel: number[]): number {
+  return scoresAtCurrentLevel.filter((s) => s >= ADVANCE_THRESHOLD).length;
+}
 
 // Given a consultant's current level and their completed scores at that level's
-// difficulty, returns the next level to advance to if their average score meets
-// the threshold, or null if they should stay put.
+// difficulty, returns the next level to advance to once they have accumulated
+// REQUIRED_QUALIFYING_SESSIONS individually-qualifying (85+) sessions, or null
+// if they should stay put. Advanced is the ceiling: there is no auto-advance
+// beyond it (a user at Advanced becomes exam-ELIGIBLE instead — see
+// isExamEligible — but does not auto-certify).
 export function computeLevelAdvancement(
   currentLevel: string,
   scoresAtCurrentLevel: number[]
 ): Level | null {
   const idx = LEVEL_ORDER.indexOf(currentLevel as Level);
   if (idx === -1 || idx === LEVEL_ORDER.length - 1) return null; // already at the ceiling (advanced) or unknown
-  if (scoresAtCurrentLevel.length === 0) return null;
-  const avg = scoresAtCurrentLevel.reduce((sum, s) => sum + s, 0) / scoresAtCurrentLevel.length;
-  if (avg >= ADVANCE_THRESHOLD) return LEVEL_ORDER[idx + 1];
+  if (countQualifyingSessions(scoresAtCurrentLevel) >= REQUIRED_QUALIFYING_SESSIONS) {
+    return LEVEL_ORDER[idx + 1];
+  }
   return null;
+}
+
+// True once a user at the Advanced ceiling has accumulated the required number
+// of individually-qualifying Advanced sessions. This is the gate that unlocks
+// the certification exam — reaching Advanced alone is NOT enough. Applies per
+// track (the caller passes that track's Advanced scores).
+export function isExamEligible(
+  currentLevel: string,
+  scoresAtCurrentLevel: number[]
+): boolean {
+  return (
+    currentLevel === "advanced" &&
+    countQualifyingSessions(scoresAtCurrentLevel) >= REQUIRED_QUALIFYING_SESSIONS
+  );
 }
 
 // The verticals that belong to the Leadership / Conflict-Management track.

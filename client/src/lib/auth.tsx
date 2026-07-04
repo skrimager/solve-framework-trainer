@@ -12,6 +12,10 @@ export type AuthUser = {
   leadershipLevel: Level;
   seatActive: boolean;
   isDemoAccount: boolean;
+  consultingCertified: boolean;
+  consultingCertifiedAt: string | null;
+  leadershipCertified: boolean;
+  leadershipCertifiedAt: string | null;
 };
 
 type AuthContextValue = {

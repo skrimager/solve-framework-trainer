@@ -43,6 +43,14 @@ export const users = pgTable("users", {
   // QA/demo accounts are permanently free: they never consume a paid seat nor count
   // toward activeSeatCount, and are exempt from the seat access gate.
   isDemoAccount: boolean("is_demo_account").notNull().default(false),
+  // Certification is a distinct, sequential state AFTER reaching Advanced on a track:
+  // reaching Advanced only makes a user eligible to sit the exam; these flags flip
+  // true only once BOTH the written test and the final expert scenario are passed.
+  // Tracked fully independently per track, exactly like currentLevel/leadershipLevel.
+  consultingCertified: boolean("consulting_certified").notNull().default(false),
+  consultingCertifiedAt: text("consulting_certified_at"), // ISO timestamp when consulting certification was earned
+  leadershipCertified: boolean("leadership_certified").notNull().default(false),
+  leadershipCertifiedAt: text("leadership_certified_at"), // ISO timestamp when leadership certification was earned
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
@@ -55,6 +63,10 @@ export const insertUserSchema = createInsertSchema(users).pick({
   leadershipLevel: true,
   seatActive: true,
   isDemoAccount: true,
+  consultingCertified: true,
+  consultingCertifiedAt: true,
+  leadershipCertified: true,
+  leadershipCertifiedAt: true,
 });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -103,6 +115,33 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({
 
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
+
+// A single certification-exam attempt for one track. The two-part exam (written
+// test + final expert scenario) is tracked here start-to-finish. `overallPassed`
+// is only true once BOTH parts pass; that is the event that flips the user's
+// per-track `*Certified` flag. Attempts are per-track and never shared between
+// tracks (a consulting attempt can never certify leadership and vice versa).
+export const certificationAttempts = pgTable("certification_attempts", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  track: text("track").notNull(), // 'consulting' | 'leadership'
+  startedAt: text("started_at").notNull(),
+  questionIds: text("question_ids").notNull().default("[]"), // JSON array of the 30 drawn question ids, so grading re-derives the exact set
+  writtenScore: integer("written_score"), // percent correct (0-100), set on written submission
+  writtenPassed: boolean("written_passed").notNull().default(false),
+  scenarioSessionId: integer("scenario_session_id"), // FK into sessions — the final expert roleplay, created only after the written test passes
+  scenarioScore: integer("scenario_score"), // 0-100 overall from scoreTranscript, set when that session completes
+  scenarioPassed: boolean("scenario_passed").notNull().default(false),
+  overallPassed: boolean("overall_passed").notNull().default(false), // true only when writtenPassed AND scenarioPassed
+  completedAt: text("completed_at"), // set when the attempt reaches a terminal state (both parts scored)
+});
+
+export const insertCertificationAttemptSchema = createInsertSchema(certificationAttempts).omit({
+  id: true,
+});
+
+export type InsertCertificationAttempt = z.infer<typeof insertCertificationAttemptSchema>;
+export type CertificationAttempt = typeof certificationAttempts.$inferSelect;
 
 // Transcript message shape (stored as JSON text in sessions.transcript)
 export const transcriptMessageSchema = z.object({
