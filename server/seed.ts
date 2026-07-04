@@ -1,8 +1,25 @@
 import { storage } from "./storage";
+import { hashPassword } from "./admin";
 import type { InsertScenario, Office } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
 const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
+
+// The single top-level Solve Admin account. Seeded (idempotently) with a hashed
+// password so the owner can reach /admin. Credentials can be overridden via env.
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Solve Framework";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Sooners@1031";
+
+async function ensureAdminAccount(): Promise<void> {
+  const existing = await storage.getAdminByUsername(ADMIN_USERNAME);
+  if (existing) return;
+  await storage.createAdmin({
+    username: ADMIN_USERNAME,
+    passwordHash: hashPassword(ADMIN_PASSWORD),
+    createdAt: new Date().toISOString(),
+  });
+  console.log("Seeded Solve Admin account.");
+}
 
 // Returns the shared Demo Office. The 0001_offices migration is the source of
 // truth: it creates this office (invite code DEMO2024) and backfills existing
@@ -31,6 +48,8 @@ async function ensureDemoOffice(): Promise<Office> {
 export async function seed() {
   // Every user belongs to an office. The demo users live in a shared "Demo Office".
   const demoOffice = await ensureDemoOffice();
+
+  await ensureAdminAccount();
 
   const existingUsers = await storage.listUsers();
   if (existingUsers.length === 0) {

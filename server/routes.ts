@@ -19,6 +19,57 @@ import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import type { Request, Response, NextFunction } from "express";
+import {
+  ADMIN_SESSION_COOKIE,
+  verifyPassword,
+  signAdminSession,
+  verifyAdminSession,
+  toCsv,
+  summarizeSales,
+  RateLimiter,
+} from "./admin";
+
+// Marketing-site origins allowed to call the public lead/visit endpoints cross-origin.
+const ALLOWED_CORS_ORIGINS = new Set([
+  "https://www.solveframework.com",
+  "https://solveframework.com",
+]);
+
+// Reflect an allowed Origin back so the browser accepts the cross-origin POST.
+function applyCors(req: Request, res: Response): void {
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && ALLOWED_CORS_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+}
+
+// Parse a specific cookie value out of the raw Cookie header (no cookie-parser dep).
+function readCookie(req: Request, name: string): string | undefined {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return undefined;
+}
+
+function clientIp(req: Request): string {
+  const fwd = req.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd.length > 0) return fwd.split(",")[0].trim();
+  return req.socket?.remoteAddress ?? "unknown";
+}
+
+const leadsLimiter = new RateLimiter(5, 60 * 1000); // 5 lead submissions / IP / minute
+const visitsLimiter = new RateLimiter(60, 60 * 1000); // 60 page-views / IP / minute
 
 const AUDIO_DIR = path.join(process.cwd(), "audio_cache");
 if (!fsSync.existsSync(AUDIO_DIR)) fsSync.mkdirSync(AUDIO_DIR, { recursive: true });
@@ -547,7 +598,261 @@ export async function registerRoutes(
     res.sendFile(filePath);
   });
 
+  registerPublicAndAdminRoutes(app);
+
   return httpServer;
+}
+
+// Public marketing-site endpoints + the top-level admin console. Extracted so it
+// can be mounted on a bare Express app in tests without booting seed()/the DB.
+export function registerPublicAndAdminRoutes(app: Express): void {
+  // ===========================================================================
+  // Public marketing-site endpoints (CORS-enabled, rate-limited, no auth)
+  // ===========================================================================
+
+  // Preflight for the cross-origin POSTs from the marketing site.
+  app.options(["/api/leads", "/api/track-visit"], (req, res) => {
+    applyCors(req, res);
+    res.status(204).end();
+  });
+
+  // Lead capture from the marketing site "Request Access" form.
+  app.post("/api/leads", async (req, res) => {
+    applyCors(req, res);
+    if (!leadsLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      name: z.string().trim().min(1, "Name is required").max(200),
+      email: z.string().trim().email("A valid email is required").max(200),
+      company: z.string().trim().max(200).optional().or(z.literal("")),
+      message: z.string().trim().max(2000).optional().or(z.literal("")),
+      source: z.string().trim().max(100).optional().or(z.literal("")),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { name, email, company, message, source } = parsed.data;
+    const lead = await storage.createLead({
+      name,
+      email,
+      company: company || null,
+      message: message || null,
+      source: source || null,
+      status: "new",
+      createdAt: new Date().toISOString(),
+    });
+    res.status(201).json({ ok: true, id: lead.id });
+  });
+
+  // Anonymous page-view tracking from the marketing site.
+  app.post("/api/track-visit", async (req, res) => {
+    applyCors(req, res);
+    if (!visitsLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "rate limited" });
+    }
+    const schema = z.object({
+      path: z.string().trim().min(1).max(500),
+      referrer: z.string().trim().max(500).optional().or(z.literal("")),
+      visitorToken: z.string().trim().max(100).optional().or(z.literal("")),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false });
+    }
+    const { path: viewPath, referrer, visitorToken } = parsed.data;
+    const ua = req.headers["user-agent"];
+    await storage.createVisitorPageView({
+      path: viewPath,
+      referrer: referrer || null,
+      visitorToken: visitorToken || null,
+      userAgent: typeof ua === "string" ? ua.slice(0, 400) : null,
+      createdAt: new Date().toISOString(),
+    });
+    res.status(201).json({ ok: true });
+  });
+
+  // ===========================================================================
+  // Admin: top-level Solve Admin account (separate cookie/session from users)
+  // ===========================================================================
+
+  function setAdminCookie(res: Response, token: string): void {
+    res.cookie(ADMIN_SESSION_COOKIE, token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 1000 * 60 * 60 * 12,
+      path: "/",
+    });
+  }
+
+  // Guard for every /api/admin/* data route. 401 unless a valid admin session
+  // cookie is present. A manager/consultant has no such cookie, so their session
+  // can never reach these routes regardless of role.
+  function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+    const token = readCookie(req, ADMIN_SESSION_COOKIE);
+    const session = verifyAdminSession(token);
+    if (!session) {
+      res.status(401).json({ message: "Admin authentication required" });
+      return;
+    }
+    (req as any).admin = session;
+    next();
+  }
+
+  app.post("/api/admin/login", async (req, res) => {
+    const { username, password } = req.body ?? {};
+    if (typeof username !== "string" || typeof password !== "string") {
+      return res.status(400).json({ message: "Username and password are required" });
+    }
+    const admin = await storage.getAdminByUsername(username);
+    if (!admin || !verifyPassword(password, admin.passwordHash)) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+    const token = signAdminSession(admin.id, admin.username);
+    setAdminCookie(res, token);
+    res.json({ username: admin.username });
+  });
+
+  app.post("/api/admin/logout", (_req, res) => {
+    res.clearCookie(ADMIN_SESSION_COOKIE, { path: "/" });
+    res.json({ ok: true });
+  });
+
+  app.get("/api/admin/me", requireAdmin, (req, res) => {
+    const session = (req as any).admin;
+    res.json({ username: session.username });
+  });
+
+  // Send either JSON rows or a CSV download depending on ?format=csv.
+  function sendData(
+    req: Request,
+    res: Response,
+    filename: string,
+    columns: { key: string; header: string }[],
+    rows: Record<string, unknown>[],
+  ): void {
+    if (req.query.format === "csv") {
+      const csv = toCsv(columns as any, rows);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(csv);
+      return;
+    }
+    res.json({ rows });
+  }
+
+  app.get("/api/admin/visitors", requireAdmin, async (req, res) => {
+    const views = await storage.listVisitorPageViews(2000);
+    const rows = views.map((v) => ({
+      id: v.id,
+      path: v.path,
+      referrer: v.referrer ?? "",
+      visitorToken: v.visitorToken ?? "",
+      userAgent: v.userAgent ?? "",
+      createdAt: v.createdAt,
+    }));
+    sendData(req, res, "visitors.csv", [
+      { key: "id", header: "ID" },
+      { key: "path", header: "Path" },
+      { key: "referrer", header: "Referrer" },
+      { key: "visitorToken", header: "Visitor Token" },
+      { key: "userAgent", header: "User Agent" },
+      { key: "createdAt", header: "Timestamp" },
+    ], rows);
+  });
+
+  app.get("/api/admin/leads", requireAdmin, async (req, res) => {
+    const leads = await storage.listLeads();
+    const rows = leads.map((l) => ({
+      id: l.id,
+      name: l.name,
+      email: l.email,
+      company: l.company ?? "",
+      message: l.message ?? "",
+      status: l.status,
+      source: l.source ?? "",
+      createdAt: l.createdAt,
+    }));
+    sendData(req, res, "leads.csv", [
+      { key: "id", header: "ID" },
+      { key: "name", header: "Name" },
+      { key: "email", header: "Email" },
+      { key: "company", header: "Company" },
+      { key: "message", header: "Message" },
+      { key: "status", header: "Status" },
+      { key: "source", header: "Source" },
+      { key: "createdAt", header: "Submitted" },
+    ], rows);
+  });
+
+  // Inline status update from the Leads table (new | contacted | converted).
+  app.patch("/api/admin/leads/:id", requireAdmin, async (req, res) => {
+    const schema = z.object({ status: z.enum(["new", "contacted", "converted"]) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+    const updated = await storage.updateLeadStatus(Number(req.params.id), parsed.data.status);
+    if (!updated) return res.status(404).json({ message: "Lead not found" });
+    res.json(updated);
+  });
+
+  app.get("/api/admin/users", requireAdmin, async (req, res) => {
+    const [allUsers, allOffices] = await Promise.all([storage.listUsers(), storage.listOffices()]);
+    const officeName = new Map(allOffices.map((o) => [o.id, o.name]));
+    const officeStatus = new Map(allOffices.map((o) => [o.id, o.subscriptionStatus]));
+    const rows = allUsers.map((u) => ({
+      id: u.id,
+      username: u.username,
+      displayName: u.displayName,
+      office: officeName.get(u.officeId) ?? "",
+      officeId: u.officeId,
+      role: u.role,
+      currentLevel: u.currentLevel,
+      seatActive: u.seatActive ? "yes" : "no",
+      isDemoAccount: u.isDemoAccount ? "yes" : "no",
+      subscriptionStatus: officeStatus.get(u.officeId) ?? "",
+    }));
+    sendData(req, res, "users.csv", [
+      { key: "id", header: "ID" },
+      { key: "username", header: "Username" },
+      { key: "displayName", header: "Name" },
+      { key: "office", header: "Office" },
+      { key: "role", header: "Role" },
+      { key: "currentLevel", header: "Level" },
+      { key: "seatActive", header: "Seat Active" },
+      { key: "isDemoAccount", header: "Demo" },
+      { key: "subscriptionStatus", header: "Office Subscription" },
+    ], rows);
+  });
+
+  app.get("/api/admin/sales", requireAdmin, async (req, res) => {
+    const allOffices = await storage.listOffices();
+    const { rows, totalMrr, activeOffices } = summarizeSales(allOffices);
+    const csvRows = rows.map((r) => ({
+      officeId: r.officeId,
+      officeName: r.officeName,
+      subscriptionStatus: r.subscriptionStatus,
+      seatCount: r.seatCount,
+      seatsMrr: r.seatsMrr,
+      managerMrr: r.managerMrr,
+      mrr: r.mrr,
+    }));
+    if (req.query.format === "csv") {
+      return sendData(req, res, "sales.csv", [
+        { key: "officeId", header: "Office ID" },
+        { key: "officeName", header: "Office" },
+        { key: "subscriptionStatus", header: "Status" },
+        { key: "seatCount", header: "Seats" },
+        { key: "seatsMrr", header: "Seat MRR" },
+        { key: "managerMrr", header: "Manager MRR" },
+        { key: "mrr", header: "MRR" },
+      ], csvRows);
+    }
+    res.json({ rows, totalMrr, activeOffices });
+  });
 }
 
 // Public-safe user shape returned to the client (never leaks the password).
