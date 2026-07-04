@@ -27,6 +27,10 @@ const VERTICAL_LABELS: Record<string, string> = {
   hvac_service: "HVAC service call",
   hvac_sales: "HVAC new system sales call",
   plumbing: "Plumbing service call",
+  kitchen_remodel: "Kitchen remodel consultation",
+  bathroom_remodel: "Bathroom remodel consultation",
+  pool_installation: "Pool installation consultation",
+  landscaping: "Landscaping services",
   financial_advisor: "Financial advisor",
   insurance_auto: "Insurance",
 };
@@ -43,6 +47,10 @@ const VERTICAL_ORDER = [
   "insurance_auto",
   "auto_sales",
   "plumbing",
+  "kitchen_remodel",
+  "bathroom_remodel",
+  "pool_installation",
+  "landscaping",
 ];
 
 export default function Scenarios() {

@@ -48,6 +48,22 @@ const AVATAR_SLUGS = new Set([
   "apartment-rental-remote-worker-noise",
   "apartment-rental-pet-owner-restrictions",
   "apartment-rental-competitor-anchored-negotiator",
+  "kitchen-remodel-outdated-layout-frustration",
+  "kitchen-remodel-overwhelmed-first-timer",
+  "kitchen-remodel-couple-conflicting-budgets",
+  "kitchen-remodel-burned-by-change-orders",
+  "bathroom-remodel-aging-in-place-unspoken",
+  "bathroom-remodel-quick-refresh-home-sale",
+  "bathroom-remodel-landlord-rental-durability",
+  "bathroom-remodel-botched-prior-job-distrust",
+  "pool-installation-family-kids-maintenance-blind",
+  "pool-installation-retiree-therapy-unspoken",
+  "pool-installation-hoa-permit-frustration",
+  "pool-installation-lowest-bid-steamroller",
+  "landscaping-blank-yard-new-homeowner",
+  "landscaping-mow-trim-hidden-drainage",
+  "landscaping-hoa-compliance-pressure",
+  "landscaping-failing-diy-defensive",
 ]);
 
 export function getAvatarUrl(slug: string | undefined | null): string | null {
