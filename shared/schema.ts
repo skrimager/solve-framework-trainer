@@ -50,6 +50,7 @@ export const scenarios = pgTable("scenarios", {
   vertical: text("vertical").notNull(), // 'manufactured_housing' | 'real_estate' | 'apartment_rental' | 'auto_sales' | 'hvac_service' | 'hvac_sales' | 'plumbing' | 'financial_advisor' | 'insurance_auto'
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // system prompt describing the simulated customer
+  gender: text("gender").notNull(), // 'male' | 'female' — single source of truth that must match the persona's avatar image; deterministically gates TTS voice selection so the heard voice can never be the wrong gender for the shown face
   difficulty: text("difficulty").notNull(), // 'beginner' | 'intermediate' | 'advanced'
   briefing: text("briefing").notNull().default(""), // consultant-facing setup: the setting + any technical terms shown before the role-play starts
   active: boolean("active").notNull().default(true),

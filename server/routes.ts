@@ -237,7 +237,7 @@ export async function registerRoutes(
 
       // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
       if (withAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug))
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender))
           .then(async (audioUrl) => {
             const latestSession = await storage.getSession(session.id);
             if (!latestSession) return;
