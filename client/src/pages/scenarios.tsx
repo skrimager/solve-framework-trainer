@@ -16,9 +16,7 @@ const LEVEL_LABELS: Record<Level, string> = {
   beginner: "Beginner",
   intermediate: "Intermediate",
   advanced: "Advanced",
-  certified: "Certified",
 };
-const LEVEL_ORDER: Level[] = ["beginner", "intermediate", "advanced", "certified"];
 
 const VERTICAL_LABELS: Record<string, string> = {
   manufactured_housing_community: "Manufactured housing community",

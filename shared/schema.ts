@@ -27,7 +27,7 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
-  currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' | 'certified' — auto-advances at 85%+ average score
+  currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances at 85%+ average score
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
