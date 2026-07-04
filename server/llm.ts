@@ -7,6 +7,9 @@ const client = new OpenAI();
 // the injected llm-api:website credential.
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 const TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+// Slightly faster than OpenAI's default (1.0) so the customer voice sounds
+// natural rather than sluggish. Configurable via OPENAI_TTS_SPEED (0.25–4.0).
+const TTS_SPEED = Number(process.env.OPENAI_TTS_SPEED) || 1.12;
 
 // Generates speech audio for a simulated customer's line using OpenAI TTS.
 // Runs directly in Node so it works identically in the dev sandbox and on
@@ -17,6 +20,7 @@ export async function synthesizeSpeech(text: string, voice: string): Promise<Buf
     voice: voice as any,
     input: text,
     response_format: "mp3",
+    speed: TTS_SPEED,
   });
   const arrayBuffer = await response.arrayBuffer();
   return Buffer.from(arrayBuffer);

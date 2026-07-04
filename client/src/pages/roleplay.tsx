@@ -79,8 +79,9 @@ export default function RolePlay() {
   const { data: session, isLoading } = useQuery<Session>({
     queryKey: ["/api/sessions", id],
     // While a voice reply is still generating in the background, poll so it appears
-    // automatically without the consultant waiting or needing to refresh.
-    refetchInterval: () => (pendingAudioIds.size > 0 ? 1500 : false),
+    // automatically without the consultant waiting or needing to refresh. Kept
+    // tight so the customer's voice starts playing as soon as the audio is ready.
+    refetchInterval: () => (pendingAudioIds.size > 0 ? 700 : false),
   });
 
   const { data: scenario } = useQuery<Scenario>({
@@ -99,7 +100,9 @@ export default function RolePlay() {
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftBeforeListening = useRef("");
   // Hands-free: after the consultant stops talking for this long, auto-send.
-  const SILENCE_AUTOSEND_MS = 1600;
+  // Tight enough to feel responsive, but long enough to ride over natural
+  // mid-sentence pauses so it doesn't cut the consultant off.
+  const SILENCE_AUTOSEND_MS = 1100;
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handsFreeOnRef = useRef(handsFreeOn);
   useEffect(() => {
