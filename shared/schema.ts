@@ -9,6 +9,13 @@ export const offices = pgTable("offices", {
   name: text("name").notNull(), // office / business name
   inviteCode: text("invite_code").notNull().unique(), // short random code consultants use to join
   createdAt: text("created_at").notNull(),
+  // --- Stripe billing (one Stripe subscription per office) ---
+  stripeCustomerId: text("stripe_customer_id"), // set when the manager first checks out
+  stripeSubscriptionId: text("stripe_subscription_id"), // the office's single subscription
+  subscriptionStatus: text("subscription_status").notNull().default("incomplete"), // Stripe status: incomplete | active | past_due | canceled | unpaid | trialing
+  managerItemId: text("manager_item_id"), // subscription item id for the flat annual Manager Dashboard line
+  seatItemId: text("seat_item_id"), // subscription item id for the tiered monthly Consultant Seat line (added lazily on first seat)
+  activeSeatCount: integer("active_seat_count").notNull().default(0), // number of paid seats currently reflected in Stripe quantity
 });
 
 export const insertOfficeSchema = createInsertSchema(offices).omit({
@@ -28,6 +35,13 @@ export const users = pgTable("users", {
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
   currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' | 'certified' — auto-advances at 85%+ average score
+  // A paid, occupied consultant seat. Set true only after the office's Stripe seat
+  // quantity has been incremented for this user (consultants and managers who buy
+  // their own training seat). Gates access to roleplay/session creation.
+  seatActive: boolean("seat_active").notNull().default(false),
+  // QA/demo accounts are permanently free: they never consume a paid seat nor count
+  // toward activeSeatCount, and are exempt from the seat access gate.
+  isDemoAccount: boolean("is_demo_account").notNull().default(false),
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
@@ -37,6 +51,8 @@ export const insertUserSchema = createInsertSchema(users).pick({
   role: true,
   displayName: true,
   currentLevel: true,
+  seatActive: true,
+  isDemoAccount: true,
 });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -94,6 +110,24 @@ export const transcriptMessageSchema = z.object({
   timestamp: z.string(),
 });
 export type TranscriptMessage = z.infer<typeof transcriptMessageSchema>;
+
+// Audit log of processed Stripe webhook events. `stripeEventId` is unique so a
+// redelivered event is a no-op (idempotency guard).
+export const billingEvents = pgTable("billing_events", {
+  id: serial("id").primaryKey(),
+  stripeEventId: text("stripe_event_id").notNull().unique(),
+  eventType: text("event_type").notNull(),
+  officeId: integer("office_id"), // resolved office, if known
+  payloadSummary: text("payload_summary"), // small JSON summary for debugging (not the full event)
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertBillingEventSchema = createInsertSchema(billingEvents).omit({
+  id: true,
+});
+
+export type InsertBillingEvent = z.infer<typeof insertBillingEventSchema>;
+export type BillingEvent = typeof billingEvents.$inferSelect;
 
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({

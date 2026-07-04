@@ -8,11 +8,18 @@ const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
 // the pre-existing demo users (and any legacy rows) a home office post-migration.
 async function ensureDemoOffice(): Promise<Office> {
   const existing = await storage.getOfficeByInviteCode(DEMO_OFFICE_INVITE_CODE);
-  if (existing) return existing;
+  if (existing) {
+    // Keep the demo office permanently unlocked regardless of any Stripe status.
+    if (existing.subscriptionStatus !== "active") {
+      return (await storage.updateOffice(existing.id, { subscriptionStatus: "active" })) ?? existing;
+    }
+    return existing;
+  }
   return storage.createOffice({
     name: DEMO_OFFICE_NAME,
     inviteCode: DEMO_OFFICE_INVITE_CODE,
     createdAt: new Date().toISOString(),
+    subscriptionStatus: "active",
   });
 }
 
@@ -24,10 +31,13 @@ export async function seed() {
 
   const existingUsers = await storage.listUsers();
   if (existingUsers.length === 0) {
-    await storage.createUser({ officeId: demoOffice.id, username: "manager", password: "manager123", role: "manager", displayName: "Manager Demo", currentLevel: "beginner" });
-    await storage.createUser({ officeId: demoOffice.id, username: "consultant", password: "consultant123", role: "consultant", displayName: "Consultant Demo", currentLevel: "beginner" });
-    await storage.createUser({ officeId: demoOffice.id, username: "qa_taylor", password: "qatest123", role: "qa", displayName: "Taylor (QA)", currentLevel: "beginner" });
-    await storage.createUser({ officeId: demoOffice.id, username: "qa_morgan", password: "qatest123", role: "qa", displayName: "Morgan (QA)", currentLevel: "beginner" });
+    // All seeded demo users are permanently free demo accounts: they never consume a
+    // paid Stripe seat, never count toward activeSeatCount, and bypass the seat gate.
+    // seatActive is true so they can run roleplay without a live subscription.
+    await storage.createUser({ officeId: demoOffice.id, username: "manager", password: "manager123", role: "manager", displayName: "Manager Demo", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
+    await storage.createUser({ officeId: demoOffice.id, username: "consultant", password: "consultant123", role: "consultant", displayName: "Consultant Demo", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
+    await storage.createUser({ officeId: demoOffice.id, username: "qa_taylor", password: "qatest123", role: "qa", displayName: "Taylor (QA)", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
+    await storage.createUser({ officeId: demoOffice.id, username: "qa_morgan", password: "qatest123", role: "qa", displayName: "Morgan (QA)", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
     console.log("Seeded demo users into Demo Office.");
   }
 

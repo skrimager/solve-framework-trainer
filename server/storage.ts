@@ -1,8 +1,8 @@
-import { users, scenarios, sessions, offices } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 
 const { Pool } = pg;
 
@@ -21,6 +21,9 @@ export interface IStorage {
   createOffice(office: InsertOffice): Promise<Office>;
   getOffice(id: number): Promise<Office | undefined>;
   getOfficeByInviteCode(inviteCode: string): Promise<Office | undefined>;
+  getOfficeByStripeCustomerId(customerId: string): Promise<Office | undefined>;
+  getOfficeByStripeSubscriptionId(subscriptionId: string): Promise<Office | undefined>;
+  updateOffice(id: number, patch: Partial<Office>): Promise<Office | undefined>;
 
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -28,6 +31,13 @@ export interface IStorage {
   updateUser(id: number, patch: Partial<InsertUser>): Promise<User | undefined>;
   listUsers(): Promise<User[]>;
   listUsersByOffice(officeId: number): Promise<User[]>;
+  // Count paid consultant seats in an office (role 'consultant' or a manager who bought
+  // their own training seat), excluding demo/QA accounts. This is the source of truth
+  // for the Stripe seat quantity.
+  countPaidSeats(officeId: number): Promise<number>;
+
+  getBillingEventByStripeId(stripeEventId: string): Promise<BillingEvent | undefined>;
+  recordBillingEvent(event: InsertBillingEvent): Promise<BillingEvent>;
 
   listScenarios(): Promise<Scenario[]>;
   getScenario(id: number): Promise<Scenario | undefined>;
@@ -59,6 +69,22 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
+  async getOfficeByStripeCustomerId(customerId: string): Promise<Office | undefined> {
+    const rows = await db.select().from(offices).where(eq(offices.stripeCustomerId, customerId));
+    return rows[0];
+  }
+
+  async getOfficeByStripeSubscriptionId(subscriptionId: string): Promise<Office | undefined> {
+    const rows = await db.select().from(offices).where(eq(offices.stripeSubscriptionId, subscriptionId));
+    return rows[0];
+  }
+
+  async updateOffice(id: number, patch: Partial<Office>): Promise<Office | undefined> {
+    const { id: _ignore, ...rest } = patch as Partial<Office> & { id?: number };
+    const rows = await db.update(offices).set(rest).where(eq(offices.id, id)).returning();
+    return rows[0];
+  }
+
   async getUser(id: number): Promise<User | undefined> {
     const rows = await db.select().from(users).where(eq(users.id, id));
     return rows[0];
@@ -85,6 +111,24 @@ export class DatabaseStorage implements IStorage {
 
   async listUsersByOffice(officeId: number): Promise<User[]> {
     return db.select().from(users).where(eq(users.officeId, officeId));
+  }
+
+  async countPaidSeats(officeId: number): Promise<number> {
+    const rows = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.officeId, officeId), eq(users.seatActive, true), eq(users.isDemoAccount, false)));
+    return rows.length;
+  }
+
+  async getBillingEventByStripeId(stripeEventId: string): Promise<BillingEvent | undefined> {
+    const rows = await db.select().from(billingEvents).where(eq(billingEvents.stripeEventId, stripeEventId));
+    return rows[0];
+  }
+
+  async recordBillingEvent(event: InsertBillingEvent): Promise<BillingEvent> {
+    const rows = await db.insert(billingEvents).values(event).returning();
+    return rows[0];
   }
 
   async listScenarios(): Promise<Scenario[]> {
