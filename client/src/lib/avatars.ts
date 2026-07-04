@@ -18,6 +18,7 @@ const AVATAR_SLUGS = new Set([
   "auto-sales-growing-family-suv",
   "auto-sales-skeptical-negotiator",
   "auto-sales-first-car-college-student",
+  "auto-sales-cross-shopper-competing-offers",
   "hvac-service-ac-out-in-summer",
   "hvac-service-recurring-noise-complaint",
   "hvac-service-landlord-tenant-complaint",
@@ -46,6 +47,7 @@ const AVATAR_SLUGS = new Set([
   "apartment-rental-family-more-space",
   "apartment-rental-remote-worker-noise",
   "apartment-rental-pet-owner-restrictions",
+  "apartment-rental-competitor-anchored-negotiator",
 ]);
 
 export function getAvatarUrl(slug: string | undefined | null): string | null {
