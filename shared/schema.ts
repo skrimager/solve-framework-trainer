@@ -130,6 +130,62 @@ export const insertBillingEventSchema = createInsertSchema(billingEvents).omit({
 export type InsertBillingEvent = z.infer<typeof insertBillingEventSchema>;
 export type BillingEvent = typeof billingEvents.$inferSelect;
 
+// A single top-level "Solve Admin" account. Structurally separate from the
+// office-scoped users table: it has NO officeId and never participates in the
+// manager/consultant hierarchy or seat billing. Its own login/session path keeps
+// an admin session from ever being confused with a regular user session.
+export const adminUsers = pgTable("admin_users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  passwordHash: text("password_hash").notNull(), // scrypt hash: "salt:derivedKey" (hex)
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertAdminUserSchema = createInsertSchema(adminUsers).omit({
+  id: true,
+});
+
+export type InsertAdminUser = z.infer<typeof insertAdminUserSchema>;
+export type AdminUser = typeof adminUsers.$inferSelect;
+
+// A lead captured from the marketing site's "Request Access" form (replaces the
+// old mailto: CTA). status is admin-updatable inline: new | contacted | converted.
+export const leads = pgTable("leads", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull(),
+  company: text("company"), // office / company name (optional)
+  message: text("message"), // optional free-text
+  status: text("status").notNull().default("new"), // 'new' | 'contacted' | 'converted'
+  source: text("source"), // which CTA/plan the lead came from (optional)
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertLeadSchema = createInsertSchema(leads).omit({
+  id: true,
+});
+
+export type InsertLead = z.infer<typeof insertLeadSchema>;
+export type Lead = typeof leads.$inferSelect;
+
+// An anonymous page-view logged by the marketing site's tracking snippet. No PII,
+// no cookies/fingerprinting — visitorToken is a fresh random per page load.
+export const visitorPageViews = pgTable("visitor_page_views", {
+  id: serial("id").primaryKey(),
+  path: text("path").notNull(),
+  referrer: text("referrer"),
+  visitorToken: text("visitor_token"), // opaque per-page-load token, not tied to identity
+  userAgent: text("user_agent"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertVisitorPageViewSchema = createInsertSchema(visitorPageViews).omit({
+  id: true,
+});
+
+export type InsertVisitorPageView = z.infer<typeof insertVisitorPageViewSchema>;
+export type VisitorPageView = typeof visitorPageViews.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request

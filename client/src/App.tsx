@@ -11,6 +11,8 @@ import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
 import Results from "@/pages/results";
 import Dashboard from "@/pages/dashboard";
+import AdminLogin from "@/pages/admin-login";
+import AdminDashboard from "@/pages/admin-dashboard";
 import { AuthProvider, useAuth } from "@/lib/auth";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -44,6 +46,11 @@ function AppRouter() {
           <Dashboard />
         </RequireAuth>
       </Route>
+      {/* Admin area: unlisted, its own server-side session (solve_admin_session
+          cookie). Not wrapped in RequireAuth — the office-scoped user session is
+          unrelated; each admin page verifies the admin cookie via /api/admin/me. */}
+      <Route path="/admin/login" component={AdminLogin} />
+      <Route path="/admin" component={AdminDashboard} />
       <Route component={NotFound} />
     </Switch>
   );

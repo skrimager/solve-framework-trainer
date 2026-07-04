@@ -10,7 +10,7 @@
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "stripe:setup": "tsx scripts/stripe-setup.ts",
-    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/unused} STRIPE_MANAGER_DASHBOARD_PRICE_ID=price_manager STRIPE_CONSULTANT_SEAT_PRICE_ID=price_seat tsx --test server/*.test.ts"
+    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/unused} OPENAI_API_KEY=${OPENAI_API_KEY:-sk-test-dummy} STRIPE_MANAGER_DASHBOARD_PRICE_ID=price_manager STRIPE_CONSULTANT_SEAT_PRICE_ID=price_seat tsx --test server/*.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

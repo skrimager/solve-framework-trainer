@@ -1,8 +1,8 @@
-import { users, scenarios, sessions, offices, billingEvents } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, leads, visitorPageViews } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Lead, InsertLead, VisitorPageView, InsertVisitorPageView } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray, and } from "drizzle-orm";
+import { eq, inArray, and, desc } from "drizzle-orm";
 
 const { Pool } = pg;
 
@@ -51,6 +51,18 @@ export interface IStorage {
   listSessionsByUser(userId: number): Promise<Session[]>;
   listAllSessions(): Promise<Session[]>;
   listSessionsByOffice(officeId: number): Promise<Session[]>;
+
+  getAdminByUsername(username: string): Promise<AdminUser | undefined>;
+  createAdmin(admin: InsertAdminUser): Promise<AdminUser>;
+
+  createLead(lead: InsertLead): Promise<Lead>;
+  listLeads(): Promise<Lead[]>;
+  updateLeadStatus(id: number, status: string): Promise<Lead | undefined>;
+
+  createVisitorPageView(view: InsertVisitorPageView): Promise<VisitorPageView>;
+  listVisitorPageViews(limit?: number): Promise<VisitorPageView[]>;
+
+  listOffices(): Promise<Office[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -183,6 +195,43 @@ export class DatabaseStorage implements IStorage {
     const userIds = officeUsers.map((u) => u.id);
     if (userIds.length === 0) return [];
     return db.select().from(sessions).where(inArray(sessions.userId, userIds));
+  }
+
+  async getAdminByUsername(username: string): Promise<AdminUser | undefined> {
+    const rows = await db.select().from(adminUsers).where(eq(adminUsers.username, username));
+    return rows[0];
+  }
+
+  async createAdmin(admin: InsertAdminUser): Promise<AdminUser> {
+    const rows = await db.insert(adminUsers).values(admin).returning();
+    return rows[0];
+  }
+
+  async createLead(lead: InsertLead): Promise<Lead> {
+    const rows = await db.insert(leads).values(lead).returning();
+    return rows[0];
+  }
+
+  async listLeads(): Promise<Lead[]> {
+    return db.select().from(leads).orderBy(desc(leads.id));
+  }
+
+  async updateLeadStatus(id: number, status: string): Promise<Lead | undefined> {
+    const rows = await db.update(leads).set({ status }).where(eq(leads.id, id)).returning();
+    return rows[0];
+  }
+
+  async createVisitorPageView(view: InsertVisitorPageView): Promise<VisitorPageView> {
+    const rows = await db.insert(visitorPageViews).values(view).returning();
+    return rows[0];
+  }
+
+  async listVisitorPageViews(limit = 1000): Promise<VisitorPageView[]> {
+    return db.select().from(visitorPageViews).orderBy(desc(visitorPageViews.id)).limit(limit);
+  }
+
+  async listOffices(): Promise<Office[]> {
+    return db.select().from(offices);
   }
 }
 
