@@ -2,7 +2,20 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer } from "./llm";
+import {
+  normalizeTrack,
+  drawExam,
+  getQuestions,
+  toPublicQuestion,
+  gradeWrittenExam,
+  questionBankSize,
+  EXAM_QUESTION_COUNT,
+  WRITTEN_PASS_CORRECT,
+  WRITTEN_PASS_PERCENT,
+  TRACK_CREDENTIAL,
+  type Track,
+} from "./certification";
 import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage, type User } from "@shared/schema";
 import { seed } from "./seed";
@@ -536,11 +549,24 @@ export async function registerRoutes(
         completedAt: new Date().toISOString(),
       });
 
-      // Auto-advance the consultant's level for THIS track if their average score
-      // at their current level's difficulty on this track has reached the
-      // threshold. The two tracks advance independently: only sessions on the
-      // same track count, and only that track's level column is updated — so
-      // being Advanced in Consulting never auto-certifies someone in Leadership.
+      // If this completed session is the FINAL expert scenario of a certification
+      // attempt, finalize the second half of the exam instead of ordinary
+      // advancement. Certification requires BOTH parts: the written test must have
+      // already passed in this attempt AND this scenario must score >= threshold.
+      const certAttempt = await storage.getCertificationAttemptByScenarioSession(session.id);
+      if (certAttempt && certAttempt.completedAt === null) {
+        await finalizeCertificationScenario(certAttempt, overall);
+        res.json(updated);
+        return;
+      }
+
+      // Auto-advance the consultant's level for THIS track once they have
+      // accumulated the required number of individually-qualifying (85+) sessions
+      // at their current level's difficulty on this track. The two tracks advance
+      // independently: only sessions on the same track count, and only that track's
+      // level column is updated — so being Advanced in Consulting never advances or
+      // certifies someone in Leadership. Reaching Advanced does NOT auto-certify;
+      // it only makes the user exam-eligible (see the certification endpoints).
       const user = await storage.getUser(session.userId);
       if (user) {
         const [allSessions, allScenarios] = await Promise.all([
@@ -612,9 +638,255 @@ export async function registerRoutes(
     res.sendFile(filePath);
   });
 
+  // ===========================================================================
+  // Certification exam (two distinct credentials, one per track, fully independent)
+  // ===========================================================================
+
+  // Per-track certification status for a user: level, whether they're already
+  // certified, progress toward exam eligibility, and any in-flight attempt.
+  app.get("/api/users/:userId/certification", async (req, res) => {
+    const user = await storage.getUser(Number(req.params.userId));
+    if (!user) return res.status(404).json({ message: "Not found" });
+    const [allSessions, allScenarios, attempts] = await Promise.all([
+      storage.listSessionsByUser(user.id),
+      storage.listScenarios(),
+      storage.listCertificationAttemptsByUser(user.id),
+    ]);
+    const tracks: Track[] = ["consulting", "leadership"];
+    const status = Object.fromEntries(
+      tracks.map((t) => [t, certStatusForTrack(user, t, allSessions, allScenarios, attempts)]),
+    );
+    res.json(status);
+  });
+
+  // Start a new exam attempt: draws a random 30-question set from the track's
+  // bank. Requires the user to be exam-eligible (Advanced + 5 qualifying
+  // Advanced sessions) and not already certified on that track.
+  app.post("/api/certification/start", async (req, res) => {
+    const { userId, track: rawTrack } = req.body ?? {};
+    const track = normalizeTrack(rawTrack);
+    const gate = await checkSeatAccess(Number(userId));
+    if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+    const user = await storage.getUser(Number(userId));
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const [allSessions, allScenarios] = await Promise.all([
+      storage.listSessionsByUser(user.id),
+      storage.listScenarios(),
+    ]);
+    if (isTrackCertified(user, track)) {
+      return res.status(409).json({ message: "You are already certified on this track." });
+    }
+    const level = track === "leadership" ? user.leadershipLevel : user.currentLevel;
+    const advancedScores = scoresForTrackAtLevel(track, "advanced", allSessions, allScenarios);
+    if (!isExamEligible(level, advancedScores)) {
+      return res.status(403).json({ message: "You are not eligible for the certification exam yet." });
+    }
+
+    const questionIds = drawExam(track, EXAM_QUESTION_COUNT);
+    const attempt = await storage.createCertificationAttempt({
+      userId: user.id,
+      track,
+      startedAt: new Date().toISOString(),
+      questionIds: JSON.stringify(questionIds),
+      writtenScore: null,
+      writtenPassed: false,
+      scenarioSessionId: null,
+      scenarioScore: null,
+      scenarioPassed: false,
+      overallPassed: false,
+      completedAt: null,
+    });
+    res.json({
+      attemptId: attempt.id,
+      track,
+      credential: TRACK_CREDENTIAL[track],
+      passMark: WRITTEN_PASS_CORRECT,
+      total: EXAM_QUESTION_COUNT,
+      questions: getQuestions(questionIds).map(toPublicQuestion),
+    });
+  });
+
+  // Fetch an attempt's current state (used to resume / show results screens).
+  app.get("/api/certification/attempts/:id", async (req, res) => {
+    const attempt = await storage.getCertificationAttempt(Number(req.params.id));
+    if (!attempt) return res.status(404).json({ message: "Attempt not found" });
+    const questionIds: string[] = JSON.parse(attempt.questionIds);
+    res.json({
+      ...attempt,
+      credential: TRACK_CREDENTIAL[normalizeTrack(attempt.track)],
+      passMark: WRITTEN_PASS_CORRECT,
+      total: EXAM_QUESTION_COUNT,
+      // Only expose questions (without answers) while the written test is unsubmitted.
+      questions: attempt.writtenScore === null ? getQuestions(questionIds).map(toPublicQuestion) : undefined,
+    });
+  });
+
+  // Submit written-test answers. MC/fill-in-the-blank are graded deterministically;
+  // free-text ("written") answers are graded by the LLM against each question's
+  // rubric. On a pass, unlocks the final expert scenario by creating a roleplay
+  // session and linking it to the attempt.
+  app.post("/api/certification/attempts/:id/written", async (req, res) => {
+    try {
+      const attempt = await storage.getCertificationAttempt(Number(req.params.id));
+      if (!attempt) return res.status(404).json({ message: "Attempt not found" });
+      if (attempt.writtenScore !== null) {
+        return res.status(409).json({ message: "The written test was already submitted for this attempt." });
+      }
+      const gate = await checkSeatAccess(attempt.userId);
+      if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+      const answers = (req.body?.answers ?? {}) as Record<string, unknown>;
+      const track = normalizeTrack(attempt.track);
+      const questionIds: string[] = JSON.parse(attempt.questionIds);
+
+      const result = await gradeWrittenExam(questionIds, answers, (q, ans) =>
+        gradeWrittenAnswer(q.prompt, q.rubric, ans),
+      );
+
+      // On a pass, create the final expert-level scenario session for this track.
+      let scenarioSessionId: number | null = null;
+      if (result.passed) {
+        const scenario = await pickExpertScenario(track);
+        if (scenario) {
+          const session = await createScenarioSession(attempt.userId, scenario);
+          scenarioSessionId = session.id;
+        }
+      }
+
+      await storage.updateCertificationAttempt(attempt.id, {
+        writtenScore: result.percent,
+        writtenPassed: result.passed,
+        scenarioSessionId,
+      });
+
+      res.json({
+        writtenPassed: result.passed,
+        writtenScore: result.percent,
+        correct: result.correct,
+        total: result.total,
+        passMark: WRITTEN_PASS_CORRECT,
+        passPercent: WRITTEN_PASS_PERCENT,
+        scenarioSessionId,
+      });
+    } catch (err: any) {
+      console.error("Written exam grading failed:", err);
+      res.status(500).json({ message: err.message ?? "Failed to grade written test" });
+    }
+  });
+
   registerPublicAndAdminRoutes(app);
 
   return httpServer;
+}
+
+// Per-track certification status shape returned to the client. Kept a pure
+// function of the user + their sessions/scenarios/attempts so the two tracks
+// stay fully independent.
+function certStatusForTrack(
+  user: User,
+  track: Track,
+  allSessions: { scenarioId: number; status: string; score: number | null }[],
+  allScenarios: { id: number; track?: string | null; difficulty: string }[],
+  attempts: import("@shared/schema").CertificationAttempt[],
+) {
+  const level = track === "leadership" ? user.leadershipLevel : user.currentLevel;
+  const advancedScores = scoresForTrackAtLevel(track, "advanced", allSessions, allScenarios);
+  const qualifying = countQualifyingSessions(advancedScores);
+  const eligible = isExamEligible(level, advancedScores);
+  const certified = isTrackCertified(user, track);
+  const certifiedAt = track === "leadership" ? user.leadershipCertifiedAt : user.consultingCertifiedAt;
+  const trackAttempts = attempts.filter((a) => normalizeTrack(a.track) === track);
+  const latestAttempt = trackAttempts[0]; // listed newest-first
+  return {
+    track,
+    credential: TRACK_CREDENTIAL[track],
+    level,
+    certified,
+    certifiedAt: certifiedAt ?? null,
+    qualifyingAdvancedSessions: qualifying,
+    requiredSessions: REQUIRED_QUALIFYING_SESSIONS,
+    qualifyingThreshold: ADVANCE_THRESHOLD,
+    eligible,
+    latestAttempt: latestAttempt ?? null,
+  };
+}
+
+function isTrackCertified(user: User, track: Track): boolean {
+  return track === "leadership" ? user.leadershipCertified : user.consultingCertified;
+}
+
+// Finalize the scenario half of a certification attempt. Certification requires
+// BOTH halves: mark scenarioPassed if the score clears the bar, overallPassed
+// only if the written test also passed, and flip the user's per-track certified
+// flag (with a timestamp) only then.
+async function finalizeCertificationScenario(
+  attempt: import("@shared/schema").CertificationAttempt,
+  scenarioScore: number,
+): Promise<void> {
+  const scenarioPassed = scenarioScore >= ADVANCE_THRESHOLD;
+  const overallPassed = scenarioPassed && attempt.writtenPassed;
+  await storage.updateCertificationAttempt(attempt.id, {
+    scenarioScore,
+    scenarioPassed,
+    overallPassed,
+    completedAt: new Date().toISOString(),
+  });
+  if (overallPassed) {
+    const track = normalizeTrack(attempt.track);
+    const now = new Date().toISOString();
+    await storage.updateUser(
+      attempt.userId,
+      track === "leadership"
+        ? { leadershipCertified: true, leadershipCertifiedAt: now }
+        : { consultingCertified: true, consultingCertifiedAt: now },
+    );
+  }
+}
+
+// Pick a random active Advanced-difficulty scenario for the given track to serve
+// as the certification's final expert roleplay. Reuses the existing scenario
+// pool rather than seeding a special one.
+async function pickExpertScenario(track: Track) {
+  const all = await storage.listScenarios();
+  const pool = all.filter((s) => s.active && scenarioTrack(s.track) === track && s.difficulty === "advanced");
+  if (pool.length === 0) return undefined;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Create a roleplay session (mirrors POST /api/sessions) seeded with the
+// customer's cold opening line. Used for the certification's final scenario.
+async function createScenarioSession(
+  userId: number,
+  scenario: import("@shared/schema").Scenario,
+) {
+  let openingTranscript = "[]";
+  try {
+    const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
+    if (openingText) {
+      const openingMsg = transcriptMessageSchema.parse({
+        role: "customer",
+        content: openingText,
+        audioStatus: "none",
+        msgId: randomUUID(),
+        timestamp: new Date().toISOString(),
+      });
+      openingTranscript = JSON.stringify([openingMsg]);
+    }
+  } catch (err) {
+    console.error("Certification scenario opening generation failed; starting empty:", err);
+  }
+  return storage.createSession({
+    userId,
+    scenarioId: scenario.id,
+    status: "in_progress",
+    transcript: openingTranscript,
+    score: null,
+    rubricScores: null,
+    feedback: null,
+    createdAt: new Date().toISOString(),
+    completedAt: null,
+  });
 }
 
 // Public marketing-site endpoints + the top-level admin console. Extracted so it
@@ -883,6 +1155,10 @@ function publicUser(user: User) {
     leadershipLevel: user.leadershipLevel,
     seatActive: user.seatActive,
     isDemoAccount: user.isDemoAccount,
+    consultingCertified: user.consultingCertified,
+    consultingCertifiedAt: user.consultingCertifiedAt,
+    leadershipCertified: user.leadershipCertified,
+    leadershipCertifiedAt: user.leadershipCertifiedAt,
   };
 }
 

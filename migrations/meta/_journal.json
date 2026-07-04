@@ -43,6 +43,13 @@
       "when": 1783106652000,
       "tag": "0005_leadership_track",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783106653000,
+      "tag": "0006_certification",
+      "breakpoints": true
     }
   ]
 }

@@ -160,6 +160,21 @@ export default function Scenarios() {
   // The level shown/highlighted is the one for the selected track — the two are
   // tracked independently per user.
   const activeLevel = user ? (track === "leadership" ? user.leadershipLevel : user.currentLevel) : undefined;
+  const certified = user ? (track === "leadership" ? user.leadershipCertified : user.consultingCertified) : false;
+
+  // Advancement is no longer instant off one great session: a user needs
+  // REQUIRED_QUALIFYING sessions that EACH individually score QUALIFYING_SCORE+
+  // at their current level. Mirror that count here so the banner can show
+  // progress toward the next level (and, at Advanced, toward exam eligibility).
+  const REQUIRED_QUALIFYING = 5;
+  const QUALIFYING_SCORE = 85;
+  const qualifyingCount = (mySessions ?? []).filter((s) => {
+    if (s.status !== "completed" || s.score == null || s.score < QUALIFYING_SCORE) return false;
+    const sc = (scenarios ?? []).find((x) => x.id === s.scenarioId);
+    if (!sc) return false;
+    return scenarioTrack(sc) === track && sc.difficulty === activeLevel;
+  }).length;
+  const examEligible = activeLevel === "advanced" && qualifyingCount >= REQUIRED_QUALIFYING;
 
   const handleStart = (vertical: string) => {
     const pool = verticalGroups.get(vertical) ?? [];
@@ -205,17 +220,48 @@ export default function Scenarios() {
             data-testid="banner-current-level"
           >
             <Award className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
-            <div>
+            <div className="flex-1">
               <p className="text-xs text-muted-foreground">Your current level — {TRACK_LABELS[track]}</p>
               <p className="text-sm font-semibold" style={{ color: "#E06D00" }} data-testid="text-current-level">
                 {(activeLevel && LEVEL_LABELS[activeLevel]) ?? activeLevel}
               </p>
-              {activeLevel === "advanced" && (
-                <p className="text-xs font-medium text-muted-foreground" data-testid="text-credential">
-                  {TRACK_CREDENTIAL[track]}
+              {/* Advancement is gated behind 5 individually-qualifying (85+)
+                  sessions at this level, so show progress rather than implying a
+                  single session advances the user. */}
+              {activeLevel && activeLevel !== "advanced" && (
+                <p className="text-xs font-medium text-muted-foreground" data-testid="text-level-progress">
+                  {Math.min(qualifyingCount, REQUIRED_QUALIFYING)} of {REQUIRED_QUALIFYING} qualifying sessions passed at {LEVEL_LABELS[activeLevel]}
+                </p>
+              )}
+              {activeLevel === "advanced" && !certified && !examEligible && (
+                <p className="text-xs font-medium text-muted-foreground" data-testid="text-level-progress">
+                  {Math.min(qualifyingCount, REQUIRED_QUALIFYING)} of {REQUIRED_QUALIFYING} qualifying Advanced sessions toward exam eligibility
+                </p>
+              )}
+              {activeLevel === "advanced" && !certified && examEligible && (
+                <p className="text-xs font-medium" style={{ color: "#E06D00" }} data-testid="text-exam-eligible">
+                  Eligible for the {TRACK_CREDENTIAL[track]} exam
+                </p>
+              )}
+              {/* The credential is shown ONLY once actually certified — reaching
+                  Advanced is no longer sufficient (that only unlocks the exam). */}
+              {certified && (
+                <p className="text-xs font-semibold" style={{ color: "#E06D00" }} data-testid="text-credential">
+                  ✓ {TRACK_CREDENTIAL[track]}
                 </p>
               )}
             </div>
+            {activeLevel === "advanced" && !certified && (
+              <Button
+                size="sm"
+                onClick={() => navigate("/certification")}
+                style={examEligible ? { backgroundColor: "#E06D00", color: "white" } : undefined}
+                variant={examEligible ? "default" : "outline"}
+                data-testid="button-certification-exam"
+              >
+                {examEligible ? "Start certification exam" : "Certification exam"}
+              </Button>
+            )}
           </div>
         )}
         <p className="text-sm text-muted-foreground max-w-prose" data-testid="text-scenarios-intro">
