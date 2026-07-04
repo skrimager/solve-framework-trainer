@@ -2,11 +2,10 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
 import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage, type User } from "@shared/schema";
 import { seed } from "./seed";
-import { runBillingMigration } from "./migrate";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
   officeIsActive,
@@ -28,7 +27,6 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  await runBillingMigration();
   await seed();
 
   // --- Health check (verify environment is live) ---
@@ -312,11 +310,36 @@ export async function registerRoutes(
     const { userId, scenarioId } = req.body ?? {};
     const gate = await checkSeatAccess(Number(userId));
     if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+    // Start every session with the customer's own opening line so the consultant
+    // walks in cold (no pre-roleplay briefing) and must uncover the situation
+    // through discovery. Falls back to an empty transcript if generation fails,
+    // so a flaky LLM call never blocks starting a session.
+    let openingTranscript = "[]";
+    try {
+      const scenario = await storage.getScenario(scenarioId);
+      if (scenario) {
+        const openingText = await getCustomerOpening(scenario.customerPersona);
+        if (openingText) {
+          const openingMsg = transcriptMessageSchema.parse({
+            role: "customer",
+            content: openingText,
+            audioStatus: "none",
+            msgId: randomUUID(),
+            timestamp: new Date().toISOString(),
+          });
+          openingTranscript = JSON.stringify([openingMsg]);
+        }
+      }
+    } catch (err) {
+      console.error("Opening line generation failed; starting with empty transcript:", err);
+    }
+
     const session = await storage.createSession({
       userId,
       scenarioId,
       status: "in_progress",
-      transcript: "[]",
+      transcript: openingTranscript,
       score: null,
       rubricScores: null,
       feedback: null,
@@ -373,7 +396,7 @@ export async function registerRoutes(
       });
       transcript.push(consultantMsg);
 
-      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript);
+      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty);
 
       const msgId = randomUUID();
       const customerMsg = transcriptMessageSchema.parse({
@@ -393,7 +416,7 @@ export async function registerRoutes(
 
       // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
       if (withAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug))
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender))
           .then(async (audioUrl) => {
             const latestSession = await storage.getSession(session.id);
             if (!latestSession) return;
@@ -440,7 +463,9 @@ export async function registerRoutes(
         }
       }
 
-      const { rubric, feedback, overall } = await scoreTranscript(transcript);
+      // Score against the scenario's difficulty so higher levels are graded stricter.
+      const scenario = await storage.getScenario(session.scenarioId);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty);
 
       const updated = await storage.updateSession(session.id, {
         status: "completed",
