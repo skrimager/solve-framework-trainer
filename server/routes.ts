@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement } from "./llm";
 import { getVoiceForScenario } from "./voices";
 import { transcriptMessageSchema, type TranscriptMessage } from "@shared/schema";
 import { seed } from "./seed";
@@ -134,11 +134,36 @@ export async function registerRoutes(
   // --- Sessions (role-play attempts) ---
   app.post("/api/sessions", async (req, res) => {
     const { userId, scenarioId } = req.body ?? {};
+
+    // Start every session with the customer's own opening line so the consultant
+    // walks in cold (no pre-roleplay briefing) and must uncover the situation
+    // through discovery. Falls back to an empty transcript if generation fails,
+    // so a flaky LLM call never blocks starting a session.
+    let openingTranscript = "[]";
+    try {
+      const scenario = await storage.getScenario(scenarioId);
+      if (scenario) {
+        const openingText = await getCustomerOpening(scenario.customerPersona);
+        if (openingText) {
+          const openingMsg = transcriptMessageSchema.parse({
+            role: "customer",
+            content: openingText,
+            audioStatus: "none",
+            msgId: randomUUID(),
+            timestamp: new Date().toISOString(),
+          });
+          openingTranscript = JSON.stringify([openingMsg]);
+        }
+      }
+    } catch (err) {
+      console.error("Opening line generation failed; starting with empty transcript:", err);
+    }
+
     const session = await storage.createSession({
       userId,
       scenarioId,
       status: "in_progress",
-      transcript: "[]",
+      transcript: openingTranscript,
       score: null,
       rubricScores: null,
       feedback: null,

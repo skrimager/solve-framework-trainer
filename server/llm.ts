@@ -22,6 +22,21 @@ export async function synthesizeSpeech(text: string, voice: string): Promise<Buf
   return Buffer.from(arrayBuffer);
 }
 
+// Generates the customer's OPENING line: a natural greeting that introduces
+// themselves by first name, used to start a session so the consultant walks in
+// cold (no pre-roleplay briefing) and must uncover the situation through
+// discovery. The persona's underlying needs/concerns must NOT be revealed here.
+export async function getCustomerOpening(customerPersona: string): Promise<string> {
+  const input = `${customerPersona}\n\nYou are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
+
+  const response = await client.responses.create({
+    model: CHAT_MODEL,
+    input,
+  });
+
+  return (response.output_text || "").trim();
+}
+
 // Generates the simulated customer's next reply in a discovery-training role-play.
 export async function getCustomerReply(
   customerPersona: string,
