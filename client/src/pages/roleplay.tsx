@@ -18,7 +18,7 @@ import { AppShell } from "@/components/app-shell";
 import { useViewportHeight } from "@/hooks/use-viewport-height";
 import { apiRequest } from "@/lib/queryClient";
 import { getAvatarUrl } from "@/lib/avatars";
-import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Info, Save, XCircle } from "lucide-react";
+import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Save, XCircle } from "lucide-react";
 import type { Session, Scenario, TranscriptMessage } from "@shared/schema";
 
 // Web Speech API isn't in TS's default lib — declare the minimal shape we use.
@@ -57,7 +57,6 @@ export default function RolePlay() {
   const [voiceOn, setVoiceOn] = useState(true);
   const [handsFreeOn, setHandsFreeOn] = useState(false);
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
-  const [briefingDismissed, setBriefingDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Guards against auto-send firing twice for the same recognized utterance.
 
@@ -80,8 +79,9 @@ export default function RolePlay() {
   const { data: session, isLoading } = useQuery<Session>({
     queryKey: ["/api/sessions", id],
     // While a voice reply is still generating in the background, poll so it appears
-    // automatically without the consultant waiting or needing to refresh.
-    refetchInterval: () => (pendingAudioIds.size > 0 ? 1500 : false),
+    // automatically without the consultant waiting or needing to refresh. Kept
+    // tight so the customer's voice starts playing as soon as the audio is ready.
+    refetchInterval: () => (pendingAudioIds.size > 0 ? 700 : false),
   });
 
   const { data: scenario } = useQuery<Scenario>({
@@ -100,7 +100,9 @@ export default function RolePlay() {
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftBeforeListening = useRef("");
   // Hands-free: after the consultant stops talking for this long, auto-send.
-  const SILENCE_AUTOSEND_MS = 1600;
+  // Tight enough to feel responsive, but long enough to ride over natural
+  // mid-sentence pauses so it doesn't cut the consultant off.
+  const SILENCE_AUTOSEND_MS = 1100;
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handsFreeOnRef = useRef(handsFreeOn);
   useEffect(() => {
@@ -385,40 +387,7 @@ export default function RolePlay() {
           </div>
         </div>
 
-        {scenario?.briefing && transcript.length === 0 && !briefingDismissed ? (
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-6" data-testid="container-scenario-briefing">
-            <div className="max-w-lg mx-auto space-y-4">
-              {avatarUrl && (
-                <img
-                  src={avatarUrl}
-                  alt="Customer you're about to speak with"
-                  className="w-20 h-20 rounded-full object-cover border-2 mx-auto"
-                  style={{ borderColor: "#E06D00" }}
-                  data-testid="img-persona-avatar-briefing"
-                />
-              )}
-              <div className="rounded-lg border-2 p-4 space-y-2" style={{ borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.06)" }}>
-                <div className="flex items-center gap-2">
-                  <Info className="w-4 h-4 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
-                  <p className="text-sm font-semibold" style={{ color: "#E06D00" }}>What you're looking at</p>
-                </div>
-                <p className="text-sm text-foreground leading-relaxed" data-testid="text-scenario-briefing">
-                  {scenario.briefing}
-                </p>
-              </div>
-              <Button
-                className="w-full"
-                style={{ backgroundColor: "#E06D00", color: "white" }}
-                onClick={() => setBriefingDismissed(true)}
-                data-testid="button-start-conversation"
-              >
-                I understand — start the conversation
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <>
-            {avatarUrl && (
+        {avatarUrl && (
               <div
                 className="relative shrink-0 flex items-center justify-center overflow-hidden border-b bg-muted/30"
                 style={{ height: "clamp(96px, 22vh, 220px)" }}
@@ -552,8 +521,6 @@ export default function RolePlay() {
             </Button>
           </div>
         </div>
-          </>
-        )}
       </div>
 
       <Dialog open={showIncompleteModal} onOpenChange={setShowIncompleteModal}>

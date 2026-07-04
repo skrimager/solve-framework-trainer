@@ -53,6 +53,7 @@ export const scenarios: InsertScenario[] = [
   // ─────────────────────────────────────────────────────────────
   {
     slug: "manufactured-housing-first-time-buyer",
+    gender: "female",
     title: "First-Time Buyer, Budget-Conscious",
     vertical: "manufactured_housing",
     difficulty: "beginner",
@@ -78,6 +79,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
   },
   {
     slug: "manufactured-housing-retiree-downsizing",
+    gender: "female",
     title: "Retiree Downsizing",
     vertical: "manufactured_housing",
     difficulty: "intermediate",
@@ -103,6 +105,7 @@ Stay conversational and human — warm but a little guarded at first. One to thr
   },
   {
     slug: "manufactured-housing-single-mom-relocation",
+    gender: "female",
     title: "Single Parent Relocating for Work",
     vertical: "manufactured_housing",
     difficulty: "intermediate",
@@ -127,6 +130,7 @@ Stay natural and a little rushed/stressed in tone, but warm up as trust builds. 
   },
   {
     slug: "manufactured-housing-investor-buyer",
+    gender: "male",
     title: "Investor Buying for a Rental",
     vertical: "manufactured_housing",
     difficulty: "advanced",
@@ -155,6 +159,7 @@ Stay clipped, businesslike, mildly impatient at first, softening only when the c
   // ─────────────────────────────────────────────────────────────
   {
     slug: "manufactured-housing-community-lot-rent-sticker-shock",
+    gender: "female",
     title: "Prospective Resident Sticker-Shocked by Lot Rent",
     vertical: "manufactured_housing_community",
     difficulty: "beginner",
@@ -179,6 +184,7 @@ Stay guarded and price-focused at first, softening into genuine engagement once 
   },
   {
     slug: "manufactured-housing-community-retiree-community-fit",
+    gender: "male",
     title: "Retiree Worried About Community Fit",
     vertical: "manufactured_housing_community",
     difficulty: "intermediate",
@@ -203,6 +209,7 @@ Stay terse and matter-of-fact at first, like a man not used to talking about fee
   },
   {
     slug: "manufactured-housing-community-existing-resident-renewal",
+    gender: "female",
     title: "Existing Resident Considering Not Renewing",
     vertical: "manufactured_housing_community",
     difficulty: "advanced",
@@ -227,6 +234,7 @@ Stay frustrated and a little sharp at first, softening as you feel truly listene
   },
   {
     slug: "manufactured-housing-community-investor-bulk-lots",
+    gender: "male",
     title: "Investor Asking About Multiple Lots",
     vertical: "manufactured_housing_community",
     difficulty: "advanced",
@@ -255,6 +263,7 @@ Stay clipped, businesslike, and skeptical at first, softening only when the cons
   // ─────────────────────────────────────────────────────────────
   {
     slug: "auto-sales-tech-worker-upgrade",
+    gender: "male",
     title: "Tech Worker Upgrading Commuter Car",
     vertical: "auto_sales",
     difficulty: "beginner",
@@ -279,6 +288,7 @@ Stay casual, a little tech-enthusiast in tone, mildly guarded about the embarras
   },
   {
     slug: "auto-sales-growing-family-suv",
+    gender: "female",
     title: "Growing Family Needs More Room",
     vertical: "auto_sales",
     difficulty: "beginner",
@@ -303,6 +313,7 @@ Stay warm, a little nervous-excited, guarded specifically about the money topic 
   },
   {
     slug: "auto-sales-skeptical-negotiator",
+    gender: "male",
     title: "Price-Focused Skeptical Negotiator",
     vertical: "auto_sales",
     difficulty: "intermediate",
@@ -327,6 +338,7 @@ Stay guarded, a bit combative early, testing the consultant — but capable of r
   },
   {
     slug: "auto-sales-first-car-college-student",
+    gender: "female",
     title: "College Student Buying First Car",
     vertical: "auto_sales",
     difficulty: "beginner",
@@ -355,6 +367,7 @@ Stay tentative, a little unsure of yourself, becoming more confident only as tru
   // ─────────────────────────────────────────────────────────────
   {
     slug: "hvac-service-ac-out-in-summer",
+    gender: "female",
     title: "AC Down During Heat Wave",
     vertical: "hvac_service",
     difficulty: "beginner",
@@ -379,6 +392,7 @@ Stay a little frazzled and heat-stressed early on, softening into a more reflect
   },
   {
     slug: "hvac-service-recurring-noise-complaint",
+    gender: "male",
     title: "Recurring Furnace Noise Complaint",
     vertical: "hvac_service",
     difficulty: "intermediate",
@@ -403,6 +417,7 @@ Stay understated and a little deflective early, revealing real worry only when d
   },
   {
     slug: "hvac-service-landlord-tenant-complaint",
+    gender: "male",
     title: "Landlord Fielding a Tenant Complaint",
     vertical: "hvac_service",
     difficulty: "intermediate",
@@ -427,6 +442,7 @@ Stay brisk, transactional, mildly impatient — a landlord juggling multiple pro
   },
   {
     slug: "hvac-service-elderly-fixed-income",
+    gender: "female",
     title: "Elderly Homeowner on a Fixed Income",
     vertical: "hvac_service",
     difficulty: "advanced",
@@ -455,6 +471,7 @@ Stay soft-spoken, apologetic, minimizing at first, warming into more openness wi
   // ─────────────────────────────────────────────────────────────
   {
     slug: "hvac-sales-old-system-failing",
+    gender: "male",
     title: "Aging System on Its Last Legs",
     vertical: "hvac_sales",
     difficulty: "beginner",
@@ -479,6 +496,7 @@ Stay initially price-defensive and a little weary, opening up once your real fru
   },
   {
     slug: "hvac-sales-new-home-buyer",
+    gender: "female",
     title: "New Homeowner, Overwhelmed by Options",
     vertical: "hvac_sales",
     difficulty: "intermediate",
@@ -503,6 +521,7 @@ Stay a little sheepish about not knowing terminology, engaging more actively as 
   },
   {
     slug: "hvac-sales-eco-conscious-upgrade",
+    gender: "female",
     title: "Eco-Conscious Efficiency Upgrade",
     vertical: "hvac_sales",
     difficulty: "intermediate",
@@ -527,6 +546,7 @@ Stay warm and values-driven in language at first, revealing pragmatic financial 
   },
   {
     slug: "hvac-sales-competing-quotes",
+    gender: "male",
     title: "Homeowner Juggling Three Competing Quotes",
     vertical: "hvac_sales",
     difficulty: "advanced",
@@ -554,6 +574,7 @@ Stay combative and price-anchored initially, revealing quality anxiety only when
   // ─────────────────────────────────────────────────────────────
   {
     slug: "plumbing-service-slow-drain-annoyance",
+    gender: "male",
     title: "Slow Drain Treated as Minor Annoyance",
     vertical: "plumbing",
     difficulty: "beginner",
@@ -578,6 +599,7 @@ Stay casual and a little dismissive of the issue at first, becoming more thought
   },
   {
     slug: "plumbing-service-water-heater-emergency",
+    gender: "female",
     title: "Water Heater Failure, Feeling Vulnerable",
     vertical: "plumbing",
     difficulty: "intermediate",
@@ -602,6 +624,7 @@ Stay stressed and a little scattered early on, calming as trust and clarity are 
   },
   {
     slug: "plumbing-service-diy-attempted-repair",
+    gender: "male",
     title: "Homeowner Who Tried a DIY Fix First",
     vertical: "plumbing",
     difficulty: "intermediate",
@@ -626,6 +649,7 @@ Stay a little defensive and slightly embarrassed at first, opening into genuine 
   },
   {
     slug: "plumbing-service-renovation-timeline-pressure",
+    gender: "male",
     title: "Renovation Contractor Under Timeline Pressure",
     vertical: "plumbing",
     difficulty: "advanced",
@@ -654,6 +678,7 @@ Stay brusque, schedule-obsessed, and testing for straight-shooting — warm only
   // ─────────────────────────────────────────────────────────────
   {
     slug: "financial-advisor-young-professional-starting",
+    gender: "male",
     title: "Young Professional Starting to Invest",
     vertical: "financial_advisor",
     difficulty: "beginner",
@@ -678,6 +703,7 @@ Stay eager and a little anxious/comparison-driven at first, becoming more reflec
   },
   {
     slug: "financial-advisor-pre-retiree-anxious",
+    gender: "female",
     title: "Pre-Retiree Anxious About Market Volatility",
     vertical: "financial_advisor",
     difficulty: "intermediate",
@@ -702,6 +728,7 @@ Stay anxious and somewhat urgent/insistent at first, becoming emotional when the
   },
   {
     slug: "financial-advisor-inheritance-windfall",
+    gender: "female",
     title: "Sudden Inheritance, Overwhelmed and Guilty",
     vertical: "financial_advisor",
     difficulty: "advanced",
@@ -726,6 +753,7 @@ Stay outwardly composed and business-like at first, with grief surfacing only wh
   },
   {
     slug: "financial-advisor-overconfident-diy-investor",
+    gender: "male",
     title: "Overconfident DIY Investor Seeking a Second Opinion",
     vertical: "financial_advisor",
     difficulty: "advanced",
@@ -754,6 +782,7 @@ Stay confident, faintly testing/skeptical, revealing vulnerability only when tre
   // ─────────────────────────────────────────────────────────────
   {
     slug: "insurance-auto-price-shopper",
+    gender: "female",
     title: "Straight Price Comparison Shopper",
     vertical: "insurance_auto",
     difficulty: "beginner",
@@ -778,6 +807,7 @@ Stay brisk, price-focused, slightly impatient with anything that isn't the quote
   },
   {
     slug: "insurance-auto-new-driver-parent",
+    gender: "female",
     title: "Parent Adding a Teen Driver",
     vertical: "insurance_auto",
     difficulty: "intermediate",
@@ -802,6 +832,7 @@ Stay cost-focused and a little tense at first, revealing real parental worry whe
   },
   {
     slug: "insurance-auto-post-accident-frustrated",
+    gender: "male",
     title: "Frustrated Customer After a Rate Increase Post-Accident",
     vertical: "insurance_auto",
     difficulty: "advanced",
@@ -826,6 +857,7 @@ Stay heated and threatening early on, de-escalating only with genuine acknowledg
   },
   {
     slug: "insurance-auto-bundling-opportunity",
+    gender: "female",
     title: "Renter Skeptical of Bundling Pitch",
     vertical: "insurance_auto",
     difficulty: "intermediate",
@@ -853,6 +885,7 @@ Stay guarded and a little short with responses initially, opening up once the co
   // ─────────────────────────────────────────────────────────────
   {
     slug: "real-estate-relocating-professional",
+    gender: "male",
     title: "Relocating Professional, Says Just Needs Square Footage",
     vertical: "real_estate",
     difficulty: "beginner",
@@ -877,6 +910,7 @@ Stay brisk and businesslike at first, warming into more personal territory once 
   },
   {
     slug: "real-estate-downsizing-empty-nesters",
+    gender: "female",
     title: "Empty Nesters Selling the Family Home",
     vertical: "real_estate",
     difficulty: "intermediate",
@@ -901,6 +935,7 @@ Stay a little brisk and guarded early, softening as the conversation acknowledge
   },
   {
     slug: "real-estate-first-time-buyer-anxious",
+    gender: "female",
     title: "First-Time Buyer Overwhelmed by the Process",
     vertical: "real_estate",
     difficulty: "beginner",
@@ -925,6 +960,7 @@ Stay a little clipped and deflecting about the "boring" parts of the process at 
   },
   {
     slug: "real-estate-investor-multi-unit",
+    gender: "male",
     title: "Investor Evaluating a Multi-Unit Property",
     vertical: "real_estate",
     difficulty: "advanced",
@@ -953,6 +989,7 @@ Stay terse and numbers-focused initially, opening into a more strategic conversa
   // ─────────────────────────────────────────────────────────────
   {
     slug: "apartment-rental-recent-grad",
+    gender: "female",
     title: "Recent Grad Fixated on Rent Price",
     vertical: "apartment_rental",
     difficulty: "beginner",
@@ -977,6 +1014,7 @@ Stay short and price-focused initially, opening up once you feel like the agent 
   },
   {
     slug: "apartment-rental-family-more-space",
+    gender: "female",
     title: "Family Says They Just Need Another Bedroom",
     vertical: "apartment_rental",
     difficulty: "intermediate",
@@ -1001,6 +1039,7 @@ Stay pleasant but fairly surface-level at first, revealing more as the agent ask
   },
   {
     slug: "apartment-rental-remote-worker-noise",
+    gender: "male",
     title: "Remote Worker Focused Only on Amenities List",
     vertical: "apartment_rental",
     difficulty: "beginner",
@@ -1025,6 +1064,7 @@ Stay casual and amenities-focused at first, opening up quickly once asked a genu
   },
   {
     slug: "apartment-rental-pet-owner-restrictions",
+    gender: "female",
     title: "Pet Owner Worried About Breed Restrictions",
     vertical: "apartment_rental",
     difficulty: "intermediate",

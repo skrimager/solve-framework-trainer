@@ -7,6 +7,9 @@ const client = new OpenAI();
 // the injected llm-api:website credential.
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 const TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+// Slightly faster than OpenAI's default (1.0) so the customer voice sounds
+// natural rather than sluggish. Configurable via OPENAI_TTS_SPEED (0.25–4.0).
+const TTS_SPEED = Number(process.env.OPENAI_TTS_SPEED) || 1.12;
 
 // Generates speech audio for a simulated customer's line using OpenAI TTS.
 // Runs directly in Node so it works identically in the dev sandbox and on
@@ -17,21 +20,52 @@ export async function synthesizeSpeech(text: string, voice: string): Promise<Buf
     voice: voice as any,
     input: text,
     response_format: "mp3",
+    speed: TTS_SPEED,
   });
   const arrayBuffer = await response.arrayBuffer();
   return Buffer.from(arrayBuffer);
 }
 
+// Generates the customer's OPENING line: a natural greeting that introduces
+// themselves by first name, used to start a session so the consultant walks in
+// cold (no pre-roleplay briefing) and must uncover the situation through
+// discovery. The persona's underlying needs/concerns must NOT be revealed here.
+export async function getCustomerOpening(customerPersona: string): Promise<string> {
+  const input = `${customerPersona}\n\nYou are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
+
+  const response = await client.responses.create({
+    model: CHAT_MODEL,
+    input,
+  });
+
+  return (response.output_text || "").trim();
+}
+
+// Per-difficulty behavioral calibration layered on top of each persona so the
+// same scenario feels harder at higher levels: an advanced customer guards their
+// real needs, objects more, and pushes back harder on price/value, forcing the
+// consultant to use more skilled discovery to get anywhere.
+const DIFFICULTY_BEHAVIOR: Record<string, string> = {
+  beginner:
+    "Difficulty calibration (BEGINNER): Be relatively cooperative and warm. Volunteer some context with modest prompting, raise only mild objections, and open up fairly readily once the consultant shows basic curiosity.",
+  intermediate:
+    "Difficulty calibration (INTERMEDIATE): Be realistically guarded. Reveal your real needs only in response to genuinely good, open questions, and raise reasonable objections if the consultant jumps ahead or stays surface-level.",
+  advanced:
+    "Difficulty calibration (ADVANCED): Be markedly more skeptical and less immediately cooperative. Keep your real needs and priorities well hidden behind your stated request, and reveal them only when the consultant earns it with layered, insightful discovery questions. Push back hard on price and value, surface multiple objections, test whether the consultant is really listening, and stay non-committal until they clearly demonstrate they understand your underlying situation. Do not make it easy.",
+};
+
 // Generates the simulated customer's next reply in a discovery-training role-play.
 export async function getCustomerReply(
   customerPersona: string,
-  transcript: TranscriptMessage[]
+  transcript: TranscriptMessage[],
+  difficulty: string = "intermediate"
 ): Promise<string> {
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
 
-  const input = `${customerPersona}\n\nConversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character. Output ONLY the spoken line, no labels or narration.`;
+  const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
+  const input = `${customerPersona}\n\n${behavior}\n\nConversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character. Output ONLY the spoken line, no labels or narration.`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -55,16 +89,29 @@ Return ONLY valid JSON matching this shape, no other text:
 
 "feedback" should be 2-4 sentences of specific, constructive narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language).`;
 
+// Per-difficulty scoring strictness so a higher-level scenario demands more
+// precision and completeness to earn the same score.
+const RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
+  beginner:
+    "Scoring calibration (BEGINNER): Reward solid fundamentals. Give credit for a clear, genuine attempt at open discovery and trust-building even when coverage isn't exhaustive.",
+  intermediate:
+    "Scoring calibration (INTERMEDIATE): Hold a professional bar. Expect multiple layers of discovery and mostly complete needs-matching before awarding high marks.",
+  advanced:
+    "Scoring calibration (ADVANCED): Grade strictly. Award high scores (85+) ONLY when discovery is thorough and multi-layered, the real underlying need is explicitly uncovered and reflected back in the customer's own words, objections are anticipated and handled rather than merely reacted to, and any close/next step is precisely tied to what the customer said. Penalize shallow questioning, missed objections, and incomplete needs-matching more heavily than at lower levels.",
+};
+
 export async function scoreTranscript(
-  transcript: TranscriptMessage[]
+  transcript: TranscriptMessage[],
+  difficulty: string = "intermediate"
 ): Promise<{ rubric: RubricScores; feedback: string; overall: number }> {
   const transcriptText = transcript
     .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
     .join("\n");
 
+  const calibration = RUBRIC_DIFFICULTY_CALIBRATION[difficulty] ?? RUBRIC_DIFFICULTY_CALIBRATION.intermediate;
   const response = await client.responses.create({
     model: CHAT_MODEL,
-    input: `${RUBRIC_SYSTEM}\n\nTranscript:\n${transcriptText}`,
+    input: `${RUBRIC_SYSTEM}\n\n${calibration}\n\nTranscript:\n${transcriptText}`,
   });
 
   const raw = (response.output_text || "").trim();
@@ -115,8 +162,9 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
   return raw.startsWith("yes");
 }
 
-// Level progression order and the score threshold to auto-advance.
-export const LEVEL_ORDER = ["beginner", "intermediate", "advanced", "certified"] as const;
+// Level progression order and the score threshold to auto-advance. Advanced is
+// the ceiling — there is no auto-advance beyond it.
+export const LEVEL_ORDER = ["beginner", "intermediate", "advanced"] as const;
 export type Level = (typeof LEVEL_ORDER)[number];
 export const ADVANCE_THRESHOLD = 85;
 
@@ -128,7 +176,7 @@ export function computeLevelAdvancement(
   scoresAtCurrentLevel: number[]
 ): Level | null {
   const idx = LEVEL_ORDER.indexOf(currentLevel as Level);
-  if (idx === -1 || idx === LEVEL_ORDER.length - 1) return null; // already certified or unknown
+  if (idx === -1 || idx === LEVEL_ORDER.length - 1) return null; // already at the ceiling (advanced) or unknown
   if (scoresAtCurrentLevel.length === 0) return null;
   const avg = scoresAtCurrentLevel.reduce((sum, s) => sum + s, 0) / scoresAtCurrentLevel.length;
   if (avg >= ADVANCE_THRESHOLD) return LEVEL_ORDER[idx + 1];

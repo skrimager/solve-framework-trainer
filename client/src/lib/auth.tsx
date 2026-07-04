@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, ReactNode } from "react";
 
-export type Level = "beginner" | "intermediate" | "advanced" | "certified";
+export type Level = "beginner" | "intermediate" | "advanced";
 
 export type AuthUser = {
   id: number;
