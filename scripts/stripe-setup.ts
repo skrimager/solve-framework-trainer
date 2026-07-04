@@ -2,9 +2,11 @@
 // billing model, then prints the price IDs to paste into your environment.
 //
 //   Product 1 — "Manager Dashboard + User Portal": flat $189/year, quantity always 1.
-//   Product 2 — "Consultant Seat": $29/mo per seat for the first 5, $24/mo for 6–15,
-//               $19/mo for 16+ — using volume tiered pricing (the whole quantity is
-//               billed at the tier its total falls into).
+//               Fully optional add-on — an office can subscribe to seats only.
+//   Product 2 — "Consultant Seat": GRADUATED tiered pricing (like a tax bracket) —
+//               seats 1–5 @ $29, 6–15 @ $26, 16–30 @ $23, 31+ @ $19. Each seat is
+//               billed at the marginal rate for the band it falls into, so the total
+//               increases monotonically with seat count (no volume-mode cliff).
 //
 // Run against TEST mode first:
 //   STRIPE_SECRET_KEY=sk_test_... npx tsx scripts/stripe-setup.ts
@@ -37,20 +39,23 @@ async function main() {
   console.log("Creating Consultant Seat product…");
   const seatProduct = await stripe.products.create({
     name: "Consultant Seat",
-    description: "Per-consultant monthly training seat with volume pricing.",
+    description: "Per-consultant monthly training seat with graduated pricing.",
   });
+  // Graduated tiers: `up_to` values are cumulative seat-count boundaries. Each seat
+  // is charged the unit_amount of the band it falls into (marginal, like tax brackets).
   const seatPrice = await stripe.prices.create({
     product: seatProduct.id,
     currency: "usd",
     recurring: { interval: "month" },
     billing_scheme: "tiered",
-    tiers_mode: "volume",
+    tiers_mode: "graduated",
     tiers: [
-      { up_to: 5, unit_amount: 2900 }, // $29/seat when total ≤ 5
-      { up_to: 15, unit_amount: 2400 }, // $24/seat when total ≤ 15
-      { up_to: "inf", unit_amount: 1900 }, // $19/seat when total ≥ 16
+      { up_to: 5, unit_amount: 2900 }, // seats 1–5 @ $29 each
+      { up_to: 15, unit_amount: 2600 }, // seats 6–15 @ $26 each
+      { up_to: 30, unit_amount: 2300 }, // seats 16–30 @ $23 each
+      { up_to: "inf", unit_amount: 1900 }, // seats 31+ @ $19 each
     ],
-    nickname: "Consultant Seat (monthly, volume tiered)",
+    nickname: "Consultant Seat (monthly, graduated tiered)",
   });
 
   console.log("\n✅ Stripe products/prices created. Add these to your environment:\n");

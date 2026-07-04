@@ -31,24 +31,79 @@ export async function ensureCustomer(office: Office, email?: string): Promise<st
   return customer.id;
 }
 
-// Manager checkout: a subscription-mode Checkout Session containing only the flat
-// annual Manager Dashboard line (qty 1). The volume-tiered consultant seat line is
-// added lazily on the first seat join, so an office with no consultants yet is not
-// billed for zero seats. Access is granted by the webhook, never by the redirect.
-export async function createManagerCheckoutSession(office: Office, email?: string): Promise<string> {
+// Options for the office's initial subscription Checkout Session. The Manager
+// Dashboard is a fully optional add-on: an office can check out with seats only,
+// the dashboard only, or both — there is no forced bundling.
+export type CheckoutOptions = {
+  includeDashboard?: boolean; // add the flat Manager Dashboard line (qty 1)
+  seatQuantity?: number; // if > 0, start the graduated seat line at this quantity
+};
+
+// Manager checkout: a subscription-mode Checkout Session whose line items are
+// composed from CheckoutOptions. The dashboard and the graduated consultant-seat
+// line are independent — either may be present without the other, but at least one
+// line item is required (Stripe rejects an empty subscription). When no seat line is
+// requested here it is still added lazily on the first seat join, so an office that
+// activates with the dashboard only is not billed for zero seats. Access is granted
+// by the webhook, never by the redirect.
+export async function createCheckoutSession(
+  office: Office,
+  opts: CheckoutOptions,
+  email?: string,
+): Promise<string> {
+  const seatQuantity = opts.seatQuantity ?? 0;
+  const line_items: Stripe.Checkout.SessionCreateParams.LineItem[] = [];
+  if (opts.includeDashboard) {
+    line_items.push({ price: MANAGER_DASHBOARD_PRICE_ID, quantity: 1 });
+  }
+  if (seatQuantity > 0) {
+    line_items.push({ price: CONSULTANT_SEAT_PRICE_ID, quantity: seatQuantity });
+  }
+  if (line_items.length === 0) {
+    throw new Error("Checkout requires at least the dashboard add-on or one consultant seat");
+  }
+
   const stripe = getStripe();
   const customerId = await ensureCustomer(office, email);
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
     customer: customerId,
     client_reference_id: String(office.id),
-    line_items: [{ price: MANAGER_DASHBOARD_PRICE_ID, quantity: 1 }],
+    line_items,
     subscription_data: { metadata: { officeId: String(office.id) } },
     success_url: `${APP_URL}/dashboard?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${APP_URL}/dashboard?checkout=cancelled`,
   });
   if (!session.url) throw new Error("Stripe did not return a Checkout URL");
   return session.url;
+}
+
+// Add the Manager Dashboard line item to an office's existing subscription. Optional
+// and independent of seats — leaves the seat item and seat count untouched. Idempotent:
+// returns the existing item id if the dashboard is already active.
+export async function addDashboardItem(office: Office): Promise<string> {
+  if (!office.stripeSubscriptionId) {
+    throw new Error("Office has no active subscription to attach the dashboard to");
+  }
+  if (office.managerItemId) return office.managerItemId;
+  const stripe = getStripe();
+  const item = await stripe.subscriptionItems.create({
+    subscription: office.stripeSubscriptionId,
+    price: MANAGER_DASHBOARD_PRICE_ID,
+    quantity: 1,
+  });
+  await storage.updateOffice(office.id, { managerItemId: item.id });
+  return item.id;
+}
+
+// Remove the Manager Dashboard line item from an office's subscription. Independent
+// of seats — the seat item and seat count are unaffected. Idempotent no-op if the
+// dashboard isn't currently active.
+export async function removeDashboardItem(office: Office): Promise<void> {
+  if (!office.managerItemId) return;
+  const stripe = getStripe();
+  await stripe.subscriptionItems.del(office.managerItemId);
+  await storage.updateOffice(office.id, { managerItemId: null });
 }
 
 // Self-serve billing management (update card, cancel, view invoices).

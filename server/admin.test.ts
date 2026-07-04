@@ -117,15 +117,28 @@ describe("sales aggregation", () => {
     };
   }
 
-  test("seatsMrr applies the volume tiers", () => {
+  test("seatsMrr applies the graduated tiers (matches the confirmed pricing table)", () => {
+    // Marginal per-seat rates: 1–5 @29, 6–15 @26, 16–30 @23, 31+ @19.
     assert.equal(seatsMrr(1), 29);
-    assert.equal(seatsMrr(5), 29 * 5);
-    assert.equal(seatsMrr(6), 29 * 5 + 24);
-    assert.equal(seatsMrr(16), 29 * 5 + 24 * 10 + 19);
+    assert.equal(seatsMrr(5), 145);
+    assert.equal(seatsMrr(6), 171);
+    assert.equal(seatsMrr(15), 405);
+    assert.equal(seatsMrr(16), 428);
+    assert.equal(seatsMrr(30), 750);
+    assert.equal(seatsMrr(31), 769);
   });
 
-  test("active office MRR = seats + flat monthly manager fee", () => {
-    const row = computeSalesRow(office({ activeSeatCount: 3 }));
+  test("graduated seat totals are strictly monotonically increasing (no cliff)", () => {
+    let prev = 0;
+    for (let n = 1; n <= 60; n++) {
+      const total = seatsMrr(n);
+      assert.ok(total > prev, `seats ${n} total ${total} must exceed ${prev}`);
+      prev = total;
+    }
+  });
+
+  test("active office WITH the dashboard add-on = graduated seats + $189 dashboard", () => {
+    const row = computeSalesRow(office({ activeSeatCount: 3, managerItemId: "si_manager" }));
     assert.equal(row.active, true);
     assert.equal(row.seatCount, 3);
     assert.equal(row.seatsMrr, 87);
@@ -133,20 +146,38 @@ describe("sales aggregation", () => {
     assert.equal(row.mrr, 276);
   });
 
+  test("active office WITHOUT the dashboard add-on pays $0 for the dashboard (optional)", () => {
+    // Seats-only subscription: has a Stripe customer/subscription but no manager item.
+    const row = computeSalesRow(office({ activeSeatCount: 3, managerItemId: null }));
+    assert.equal(row.active, true);
+    assert.equal(row.seatsMrr, 87);
+    assert.equal(row.managerMrr, 0);
+    assert.equal(row.mrr, 87);
+  });
+
+  test("dashboard add-on toggles independently of seat count", () => {
+    const withDash = computeSalesRow(office({ activeSeatCount: 10, managerItemId: "si_manager" }));
+    const withoutDash = computeSalesRow(office({ activeSeatCount: 10, managerItemId: null }));
+    // Seat MRR is identical either way — the dashboard is fully decoupled from seats.
+    assert.equal(withDash.seatsMrr, withoutDash.seatsMrr);
+    assert.equal(withDash.mrr - withoutDash.mrr, 189);
+  });
+
   test("inactive office contributes zero MRR", () => {
-    const row = computeSalesRow(office({ subscriptionStatus: "past_due", activeSeatCount: 5 }));
+    const row = computeSalesRow(office({ subscriptionStatus: "past_due", activeSeatCount: 5, managerItemId: "si_manager" }));
     assert.equal(row.active, false);
     assert.equal(row.mrr, 0);
   });
 
-  test("summarizeSales totals across offices", () => {
+  test("summarizeSales totals across offices (dashboard-optional + graduated seats)", () => {
     const { rows, totalMrr, activeOffices } = summarizeSales([
-      office({ id: 1, activeSeatCount: 1 }),
-      office({ id: 2, subscriptionStatus: "canceled", activeSeatCount: 9 }),
+      office({ id: 1, activeSeatCount: 1, managerItemId: "si_manager" }), // 29 + 189
+      office({ id: 2, activeSeatCount: 6, managerItemId: null }), // 171, no dashboard
+      office({ id: 3, subscriptionStatus: "canceled", activeSeatCount: 9, managerItemId: "si_manager" }), // 0
     ]);
-    assert.equal(rows.length, 2);
-    assert.equal(activeOffices, 1);
-    assert.equal(totalMrr, 218); // 29 + 189
+    assert.equal(rows.length, 3);
+    assert.equal(activeOffices, 2);
+    assert.equal(totalMrr, 389); // 218 + 171 + 0
   });
 });
 

@@ -93,14 +93,19 @@ export function toCsv<T extends Record<string, unknown>>(
 // --- Sales aggregation -------------------------------------------------------
 // Per-office subscription/revenue rows derived from the billing fields already
 // stored per office (populated by the Stripe webhook sync). MRR is a directional
-// estimate from the seat count using the same public volume-tiered seat pricing;
-// the Manager Dashboard fee is a flat monthly fee (not amortized from an annual price).
+// estimate from the seat count using the same public GRADUATED seat pricing; the
+// Manager Dashboard is an optional add-on, so its flat monthly fee is only counted
+// for offices that have actually subscribed to it (a manager subscription item).
 const MANAGER_MONTHLY = 189;
 
+// Marginal (graduated) monthly rate for the seat at 1-based position `seatIndex`,
+// mirroring the Stripe `tiers_mode: "graduated"` price: seats 1–5 @ $29, 6–15 @ $26,
+// 16–30 @ $23, 31+ @ $19. Each seat is priced by the band it falls into, like a tax
+// bracket — never re-pricing the whole group.
 export function seatMonthlyRate(seatIndex: number): number {
-  // seatIndex is 1-based position of the seat within the office.
   if (seatIndex <= 5) return 29;
-  if (seatIndex <= 15) return 24;
+  if (seatIndex <= 15) return 26;
+  if (seatIndex <= 30) return 23;
   return 19;
 }
 
@@ -126,9 +131,10 @@ export function computeSalesRow(office: Office): SalesRow {
   const active = officeIsActive(office);
   const seatCount = office.activeSeatCount ?? 0;
   const seats = active ? seatsMrr(seatCount) : 0;
-  // The manager dashboard fee only contributes while the office is active and has
-  // actually subscribed (a Stripe customer exists).
-  const managerMrr = active && office.stripeCustomerId ? Math.round(MANAGER_MONTHLY * 100) / 100 : 0;
+  // The Manager Dashboard is optional, so its flat fee only contributes when the
+  // office is active AND has the dashboard add-on (a manager subscription item) —
+  // never assumed just because the office has a Stripe customer/subscription.
+  const managerMrr = active && office.managerItemId ? Math.round(MANAGER_MONTHLY * 100) / 100 : 0;
   const mrr = Math.round((seats + managerMrr) * 100) / 100;
   return {
     officeId: office.id,

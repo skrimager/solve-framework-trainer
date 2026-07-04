@@ -9,9 +9,11 @@ import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
   officeIsActive,
-  createManagerCheckoutSession,
+  createCheckoutSession,
   createBillingPortalSession,
   setSeatQuantity,
+  addDashboardItem,
+  removeDashboardItem,
   handleStripeEvent,
 } from "./billing";
 import { randomUUID, randomBytes } from "node:crypto";
@@ -120,10 +122,14 @@ export async function registerRoutes(
   });
 
   // --- Billing: manager-initiated Checkout + self-serve portal + seat purchase ---
-  // Create a Stripe Checkout Session for the manager's office subscription.
+  // Create a Stripe Checkout Session for the manager's office subscription. The
+  // Manager Dashboard is an optional add-on: the manager can activate with the
+  // dashboard, with seats only, or both. `withDashboard` defaults to true so the
+  // existing "Set up billing" button keeps working; pass `withDashboard: false`
+  // (with a seatQuantity) to subscribe to consultant seats only.
   app.post("/api/billing/checkout", async (req, res) => {
     if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
-    const { userId } = req.body ?? {};
+    const { userId, withDashboard, seatQuantity } = req.body ?? {};
     const user = await storage.getUser(Number(userId));
     if (!user || user.role !== "manager") {
       return res.status(403).json({ message: "Only a manager can start checkout" });
@@ -133,12 +139,48 @@ export async function registerRoutes(
     if (officeIsActive(office)) {
       return res.status(409).json({ message: "This office already has an active subscription" });
     }
+    const includeDashboard = withDashboard === undefined ? true : Boolean(withDashboard);
+    const seats = Math.max(0, Math.floor(Number(seatQuantity) || 0));
+    if (!includeDashboard && seats === 0) {
+      return res.status(400).json({ message: "Choose the dashboard add-on and/or at least one consultant seat" });
+    }
     try {
-      const url = await createManagerCheckoutSession(office, user.username);
+      const url = await createCheckoutSession(office, { includeDashboard, seatQuantity: seats }, user.username);
       res.json({ url });
     } catch (err: any) {
       console.error("Checkout session creation failed:", err);
       res.status(500).json({ message: err.message ?? "Could not start checkout" });
+    }
+  });
+
+  // Add or remove the optional Manager Dashboard add-on on an already-active
+  // subscription, independently of seat count. `action` is "add" or "remove".
+  app.post("/api/billing/dashboard", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const { userId, action } = req.body ?? {};
+    const user = await storage.getUser(Number(userId));
+    if (!user || user.role !== "manager") {
+      return res.status(403).json({ message: "Only a manager can change the dashboard add-on" });
+    }
+    const office = await storage.getOffice(user.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+    if (!officeIsActive(office)) {
+      return res.status(402).json({ message: "Your office subscription is not active" });
+    }
+    if (action !== "add" && action !== "remove") {
+      return res.status(400).json({ message: "action must be 'add' or 'remove'" });
+    }
+    try {
+      if (action === "add") {
+        await addDashboardItem(office);
+      } else {
+        await removeDashboardItem(office);
+      }
+      const updated = await storage.getOffice(office.id);
+      res.json({ office: updated });
+    } catch (err: any) {
+      console.error("Dashboard add-on change failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not update the dashboard add-on" });
     }
   });
 
