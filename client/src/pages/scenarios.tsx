@@ -10,7 +10,7 @@ import { useAuth } from "@/lib/auth";
 import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
 
 const LEVEL_LABELS: Record<Level, string> = {
@@ -19,11 +19,26 @@ const LEVEL_LABELS: Record<Level, string> = {
   advanced: "Advanced",
 };
 
+// Fixed display order for difficulty badges — always Beginner → Intermediate →
+// Advanced, regardless of the order scenarios come back from the API/DB.
+const DIFFICULTY_ORDER: Level[] = ["beginner", "intermediate", "advanced"];
+
 type Track = "consulting" | "leadership";
 
 const TRACK_LABELS: Record<Track, string> = {
   consulting: "Consulting",
   leadership: "Leadership / Conflict Management",
+};
+
+// One-line description shown on each track's picker card.
+const TRACK_DESCRIPTIONS: Record<Track, string> = {
+  consulting: "Discovery consultation practice across every vertical — uncover the real need behind what the customer opens with.",
+  leadership: "De-escalation and resolution practice for upset customers, employee grievances, and peer conflict.",
+};
+
+const TRACK_ICONS: Record<Track, typeof Handshake> = {
+  consulting: Handshake,
+  leadership: ShieldAlert,
 };
 
 // Named credential earned per track at the "advanced" ceiling. Distinct name
@@ -186,17 +201,19 @@ export default function Scenarios() {
   return (
     <AppShell title="Training scenarios">
       <div className="space-y-4">
-        {/* Track picker — filters the scenario list to one training track. Uses
-            the same orange accent as the level badges to stay on-brand. */}
+        {/* Track picker — two distinct, separately-selectable cards (not a
+            toggle). Each is its own square with its own icon, name, and
+            description so Consulting and Leadership read as separate
+            options rather than two states of one control. */}
         <div
-          className="inline-flex rounded-lg border-2 p-1"
-          style={{ borderColor: "#E06D00" }}
+          className="grid gap-3 sm:grid-cols-2"
           role="tablist"
           aria-label="Training track"
           data-testid="track-picker"
         >
           {(["consulting", "leadership"] as Track[]).map((t) => {
             const selected = track === t;
+            const Icon = TRACK_ICONS[t];
             return (
               <button
                 key={t}
@@ -204,11 +221,28 @@ export default function Scenarios() {
                 role="tab"
                 aria-selected={selected}
                 onClick={() => setTrack(t)}
-                className="text-sm font-semibold rounded-md px-3 py-1.5 transition-colors"
-                style={selected ? { backgroundColor: "#E06D00", color: "white" } : { color: "#E06D00" }}
+                className="relative flex flex-col items-start gap-2 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
+                style={
+                  selected
+                    ? { borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.08)" }
+                    : { borderColor: "var(--border)" }
+                }
                 data-testid={`track-option-${t}`}
               >
-                {TRACK_LABELS[t]}
+                {selected && (
+                  <span
+                    className="absolute top-3 right-3 flex items-center justify-center w-5 h-5 rounded-full"
+                    style={{ backgroundColor: "#E06D00" }}
+                    aria-hidden="true"
+                  >
+                    <Check className="w-3.5 h-3.5 text-white" />
+                  </span>
+                )}
+                <Icon className="w-6 h-6" style={{ color: "#E06D00" }} aria-hidden="true" />
+                <span className="text-base font-semibold" style={selected ? { color: "#E06D00" } : undefined}>
+                  {TRACK_LABELS[t]}
+                </span>
+                <span className="text-xs text-muted-foreground">{TRACK_DESCRIPTIONS[t]}</span>
               </button>
             );
           })}
@@ -301,7 +335,8 @@ export default function Scenarios() {
         <div className="grid gap-4 sm:grid-cols-2">
           {orderedVerticals.map((vertical) => {
             const pool = verticalGroups.get(vertical) ?? [];
-            const difficulties = Array.from(new Set(pool.map((s) => s.difficulty)));
+            const presentDifficulties = new Set(pool.map((s) => s.difficulty));
+            const difficulties = DIFFICULTY_ORDER.filter((d) => presentDifficulties.has(d));
             const avatarUrls = pool
               .map((s) => getAvatarUrl(s.slug))
               .filter((url): url is string => !!url)
@@ -336,7 +371,7 @@ export default function Scenarios() {
                           style={isCurrent ? { backgroundColor: "#E06D00", color: "white" } : undefined}
                           data-testid={`badge-difficulty-${vertical}-${d}`}
                         >
-                          {d}
+                          {LEVEL_LABELS[d] ?? d}
                         </Badge>
                       );
                     })}

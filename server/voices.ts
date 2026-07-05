@@ -86,6 +86,30 @@ export const PERSONA_VOICES: Record<string, string> = {
   "apartment-rental-family-more-space": "coral", // Rosa, 33 (f)
   "apartment-rental-remote-worker-noise": "echo", // Jordan, 31 (m)
   "apartment-rental-pet-owner-restrictions": "coral", // Sam, 35 (f) — was "onyx" (male), corrected
+
+  // Leadership — upset customer service
+  "upset-customer-late-delivery-refund": "coral", // Dana, 38 (f)
+  "upset-customer-damaged-item-replacement": "echo", // Marcus, 44 (m)
+  "upset-customer-repeat-failure-review-threat": "nova", // Priya, 41 (f)
+  "upset-customer-billing-overcharge-dispute": "onyx", // Terrence, 50 (m)
+  "upset-customer-demand-manager-legal-chargeback": "ash", // Victor, 55 (m)
+  "upset-customer-feels-lied-to-cancellation": "shimmer", // Aisha, 47 (f)
+
+  // Leadership — employee grievance
+  "employee-grievance-schedule-change-upset": "ash", // Kevin, 33 (m)
+  "employee-grievance-pto-denied-frustration": "coral", // Renee, 29 (f)
+  "employee-grievance-passed-over-promotion-defensive": "echo", // Brandon, 36 (m)
+  "employee-grievance-workload-burnout-complaint": "nova", // Sophia, 34 (f)
+  "employee-grievance-unfair-treatment-hr-sensitive": "shimmer", // Nia, 40 (f)
+  "employee-grievance-favoritism-discrimination-allegation": "onyx", // Darius, 43 (m)
+
+  // Leadership — peer conflict
+  "peer-conflict-shared-account-approach": "nova", // Hannah, 31 (f)
+  "peer-conflict-desk-space-noise-friction": "echo", // Tyler, 28 (m)
+  "peer-conflict-cross-department-missed-deadline-blame": "ash", // Raj, 39 (m)
+  "peer-conflict-credit-stealing-project": "coral", // Elena, 35 (f)
+  "peer-conflict-long-running-team-morale-mediation": "shimmer", // Monica, 45 (f)
+  "peer-conflict-senior-junior-power-struggle": "onyx", // Greg, 52 (m)
 };
 
 const DEFAULT_FEMALE_VOICE = "shimmer";
