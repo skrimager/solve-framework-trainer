@@ -58,7 +58,7 @@ export default function Results() {
           <CardHeader>
             <CardTitle className="text-lg flex items-center justify-between">
               Overall discovery score
-              <span className="text-2xl font-semibold" data-testid="text-overall-score">{session.score ?? "—"}</span>
+              <span className="text-2xl font-semibold" data-testid="text-overall-score">{session.score ?? "-"}</span>
             </CardTitle>
           </CardHeader>
           <CardContent>

@@ -514,7 +514,7 @@ export default function RolePlay() {
           <div className="flex justify-end items-center gap-3">
             {scoringFailed && (
               <p className="text-xs text-destructive" data-testid="text-scoring-error">
-                Scoring failed — your transcript is saved, try again.
+                Scoring failed, your transcript is saved, try again.
               </p>
             )}
             <Button
