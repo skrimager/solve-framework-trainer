@@ -95,7 +95,7 @@ Score each dimension 0-100:
 Return ONLY valid JSON matching this shape, no other text:
 {"needsDiscovery": number, "objectionPrevention": number, "trustBuilding": number, "naturalClose": number, "relationshipContinuity": number, "feedback": string}
 
-"feedback" should be 2-4 sentences of specific, constructive narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language).`;
+"feedback" should be 3-5 sentences of specific, constructive narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). Briefly acknowledge what the consultant did well or attempted, then give at least one concrete example of a specific question or phrase they could have used at a particular point in the conversation to score higher on the dimension(s) where they lost points — quote or closely paraphrase the moment in the transcript this applies to. This is discovery-skills coaching, not just a list of what was missing.`;
 
 // Per-difficulty scoring strictness so a higher-level scenario demands more
 // precision and completeness to earn the same score.
@@ -123,7 +123,7 @@ Score each dimension 0-100:
 Return ONLY valid JSON matching this shape, no other text:
 {"activeListening": number, "empathyAcknowledgment": number, "rootCauseDiscovery": number, "solutionVisualization": number, "blamelessResolution": number, "feedback": string}
 
-"feedback" should be 2-4 sentences of specific, constructive narrative feedback in a coaching tone, using conflict-management / de-escalation language (never "sales" or "closing" language).`;
+"feedback" should be 3-5 sentences of specific, constructive narrative feedback in a coaching tone, using conflict-management / de-escalation language (never "sales" or "closing" language). Briefly acknowledge what the consultant did well or attempted, then give at least one concrete example of a specific phrase or response they could have used at a particular point in the conversation to de-escalate or resolve more effectively — quote or closely paraphrase the moment in the transcript this applies to. This is conflict-resolution coaching, not just a list of what was missing.`;
 
 const LEADERSHIP_RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
   beginner:
