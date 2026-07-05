@@ -30,7 +30,7 @@ export function AppShell({
             </div>
             <div className="min-w-0">
               <h1 className="text-sm font-semibold leading-tight truncate" data-testid="text-page-title">{title}</h1>
-              {!compact && <p className="text-xs text-muted-foreground truncate">SOLVE Framework Trainer — discovery training</p>}
+              {!compact && <p className="text-xs text-muted-foreground truncate">SOLVE Framework Trainer - discovery training</p>}
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">

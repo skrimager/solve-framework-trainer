@@ -32,7 +32,7 @@ const TRACK_LABELS: Record<Track, string> = {
 
 // One-line description shown on each track's picker card.
 const TRACK_DESCRIPTIONS: Record<Track, string> = {
-  consulting: "Discovery consultation practice across every vertical — uncover the real need behind what the customer opens with.",
+  consulting: "Discovery consultation practice across every vertical: uncover the real need behind what the customer opens with.",
   leadership: "De-escalation and resolution practice for upset customers, employee grievances, and peer conflict.",
 };
 
@@ -255,7 +255,7 @@ export default function Scenarios() {
           >
             <Award className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
             <div className="flex-1">
-              <p className="text-xs text-muted-foreground">Your current level — {TRACK_LABELS[track]}</p>
+              <p className="text-xs text-muted-foreground">Your current level, {TRACK_LABELS[track]}</p>
               <p className="text-sm font-semibold" style={{ color: "#E06D00" }} data-testid="text-current-level">
                 {(activeLevel && LEVEL_LABELS[activeLevel]) ?? activeLevel}
               </p>
@@ -300,8 +300,8 @@ export default function Scenarios() {
         )}
         <p className="text-sm text-muted-foreground max-w-prose" data-testid="text-scenarios-intro">
           {track === "leadership"
-            ? "Pick a scenario and start the conversation cold — no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
-            : "Pick a scenario and start the conversation cold — no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
+            ? "Pick a scenario and start the conversation cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
+            : "Pick a scenario and start the conversation cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
@@ -310,7 +310,7 @@ export default function Scenarios() {
               {savedSessions.map((s) => (
                 <Card key={s.id} data-testid={`card-saved-session-${s.id}`}>
                   <CardContent className="flex items-center justify-between gap-3 py-3">
-                    <p className="text-sm text-muted-foreground">Session #{s.id} — paused, no recommendation yet</p>
+                    <p className="text-sm text-muted-foreground">Session #{s.id}, paused, no recommendation yet</p>
                     <Button
                       size="sm"
                       variant="outline"

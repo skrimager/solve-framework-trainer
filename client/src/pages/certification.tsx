@@ -147,7 +147,7 @@ export default function Certification() {
         title: "Couldn't grade your exam",
         description:
           serverMessage ??
-          "We hit a problem grading your answers. Your answers are still here — please try submitting again.",
+          "We hit a problem grading your answers. Your answers are still here, please try submitting again.",
         variant: "destructive",
       });
     },
@@ -315,7 +315,7 @@ function OverviewCard({
       <CardContent className="space-y-3">
         {(priorFailed || writtenFailed) && (
           <Badge variant="secondary" data-testid="badge-prior-attempt">
-            Previous attempt didn't pass — questions are re-drawn each attempt.
+            Previous attempt didn't pass. Questions are re-drawn each attempt.
           </Badge>
         )}
         <div>
@@ -351,7 +351,7 @@ function WrittenExam({
     <div className="space-y-4" data-testid="written-exam">
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">{exam.credential} — written test</CardTitle>
+          <CardTitle className="text-lg">{exam.credential} - written test</CardTitle>
           <CardDescription>
             {exam.total} questions. You need {exam.passMark} correct to pass. Answered {answeredCount} of {exam.total}.
           </CardDescription>

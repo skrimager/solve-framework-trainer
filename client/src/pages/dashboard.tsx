@@ -70,7 +70,7 @@ export default function Dashboard() {
               <CardTitle className="text-sm text-muted-foreground font-normal">Average discovery score</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-xl font-semibold" data-testid="text-avg-score">{avgScore ?? "—"}</p>
+              <p className="text-xl font-semibold" data-testid="text-avg-score">{avgScore ?? "-"}</p>
             </CardContent>
           </Card>
           <Card>

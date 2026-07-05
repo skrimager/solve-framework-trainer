@@ -191,7 +191,7 @@ function VisitorsTable({ rows }: { rows: any[] }) {
         {rows.map((r) => (
           <TableRow key={r.id} className="border-white/10" data-testid={`row-visitor-${r.id}`}>
             <TableCell className={cellCls}>{r.path}</TableCell>
-            <TableCell className={cellCls}>{r.referrer || "—"}</TableCell>
+            <TableCell className={cellCls}>{r.referrer || "-"}</TableCell>
             <TableCell className="text-white/50 font-mono text-xs">{(r.visitorToken || "").slice(0, 12)}</TableCell>
             <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
           </TableRow>
@@ -225,9 +225,9 @@ function LeadsTable({ rows, onChanged }: { rows: any[]; onChanged: () => void })
           <TableRow key={r.id} className="border-white/10" data-testid={`row-lead-${r.id}`}>
             <TableCell className={cellCls}>{r.name}</TableCell>
             <TableCell className={cellCls}>{r.email}</TableCell>
-            <TableCell className={cellCls}>{r.company || "—"}</TableCell>
-            <TableCell className="text-white/80 max-w-xs truncate" title={r.message}>{r.message || "—"}</TableCell>
-            <TableCell className="text-white/60 text-xs">{r.source || "—"}</TableCell>
+            <TableCell className={cellCls}>{r.company || "-"}</TableCell>
+            <TableCell className="text-white/80 max-w-xs truncate" title={r.message}>{r.message || "-"}</TableCell>
+            <TableCell className="text-white/60 text-xs">{r.source || "-"}</TableCell>
             <TableCell>
               <select
                 value={r.status}
