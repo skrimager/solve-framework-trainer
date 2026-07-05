@@ -119,8 +119,15 @@ Score each dimension 0-100:
 - naturalClose: If the conversation reached a close or next step, did it feel like a natural next step that referenced the customer's own words/needs, rather than a pressure-based push?
 - relationshipContinuity: Did the consultant establish a clear, low-pressure follow-up or next step that preserves the relationship regardless of outcome?
 
+Also classify how the consultation actually ended, from the CUSTOMER's perspective, into exactly one "closeOutcome" value:
+- "none": the consultant never proposed any recommendation, solution, product/option, or concrete next step.
+- "handoff_no_commitment": the consultant tried to wrap up with a soft handoff — handing over a business card, "call me when you're ready", "here's my info", "thanks, goodbye" — WITHOUT the customer agreeing to any concrete next step. Ending this way is an incomplete close, not a real one.
+- "recommendation_made": the consultant did propose a specific recommendation/solution, but the customer gave no clear buy-in signal (didn't ask about next steps and didn't explicitly agree).
+- "client_asked_next_steps": the customer themselves asked something like "what are the next steps?" / "where do we go from here?" — a strong signal the consultant earned enough trust to prompt forward motion.
+- "client_agreed": the customer explicitly agreed to / accepted the proposed recommendation or solution. This is the strongest outcome.
+
 Return ONLY valid JSON matching this shape, no other text:
-{"needsDiscovery": number, "objectionPrevention": number, "trustBuilding": number, "naturalClose": number, "relationshipContinuity": number, "feedback": string}
+{"needsDiscovery": number, "objectionPrevention": number, "trustBuilding": number, "naturalClose": number, "relationshipContinuity": number, "closeOutcome": string, "feedback": string}
 
 "feedback" should be 3-5 sentences of specific, constructive narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). Briefly acknowledge what the consultant did well or attempted, then give at least one concrete example of a specific question or phrase they could have used at a particular point in the conversation to score higher on the dimension(s) where they lost points — quote or closely paraphrase the moment in the transcript this applies to. This is discovery-skills coaching, not just a list of what was missing.`;
 
@@ -177,6 +184,117 @@ const LEADERSHIP_RUBRIC_KEYS = [
   "blamelessResolution",
 ] as const;
 
+// How a consulting consultation actually ended, from the customer's side. This
+// is the "client buy-in" signal the closing/outcome score is anchored to — a
+// recommendation being present is necessary but NOT sufficient (see
+// computeConsultingOverall).
+export type CloseOutcome =
+  | "none" // no recommendation/solution/next step ever proposed
+  | "handoff_no_commitment" // soft close (business card, "call me later") with no agreed next step
+  | "recommendation_made" // a recommendation was proposed, but the client gave no buy-in signal
+  | "client_asked_next_steps" // the client proactively asked "what are the next steps?"
+  | "client_agreed"; // the client explicitly agreed to the proposed recommendation
+
+export const CLOSE_OUTCOMES: readonly CloseOutcome[] = [
+  "none",
+  "handoff_no_commitment",
+  "recommendation_made",
+  "client_asked_next_steps",
+  "client_agreed",
+] as const;
+
+// The outcome/closing anchor each close tier contributes to the overall score.
+// Per the SOLVE product rubric: no-recommendation and handoff-without-commitment
+// closes are LOW; a client asking "what's next" anchors ~80; a client explicitly
+// agreeing anchors ~85. A bare recommendation with no buy-in signal sits in the
+// middle — proposed, but not yet landed.
+const CLOSE_OUTCOME_ANCHOR: Record<CloseOutcome, number> = {
+  none: 25,
+  handoff_no_commitment: 40,
+  recommendation_made: 65,
+  client_asked_next_steps: 80,
+  client_agreed: 85,
+};
+
+export function closeOutcomeAnchor(outcome: CloseOutcome): number {
+  return CLOSE_OUTCOME_ANCHOR[outcome] ?? CLOSE_OUTCOME_ANCHOR.recommendation_made;
+}
+
+export function normalizeCloseOutcome(raw: unknown): CloseOutcome {
+  const value = String(raw ?? "").trim().toLowerCase();
+  return (CLOSE_OUTCOMES as readonly string[]).includes(value)
+    ? (value as CloseOutcome)
+    : "recommendation_made";
+}
+
+// Discovery/rapport quality below this bar means the consultant didn't do enough
+// real discovery, so the attempt cannot pass no matter how the close looked.
+export const WEAK_PROCESS_THRESHOLD = 60;
+// Cap applied when discovery/rapport is weak: a recommendation (even one the
+// client agreed to) can't rescue an attempt with too-shallow discovery. Sits
+// safely below the 85 qualifying bar so such attempts clearly fail.
+export const WEAK_PROCESS_CAP = 64;
+// Cap applied to a soft close (no recommendation at all, or a handoff with no
+// committed next step) — this closing behavior specifically scores LOW.
+export const SOFT_CLOSE_CAP = 55;
+
+// Combines the discovery rubric sub-scores with the close/buy-in outcome into a
+// single overall score for a CONSULTING session. This is a genuine weighted
+// blend, not a binary "was a recommendation stated" gate:
+//   - process quality (discovery + objection-prevention + trust) is the heaviest weight,
+//   - the close/buy-in outcome anchors the closing dimension,
+//   - the close-execution sub-scores (naturalClose + relationshipContinuity) fine-tune.
+// Two hard rules encode "necessary but not sufficient": weak discovery/rapport
+// caps the score below passing, and a soft/no-commitment close caps it low.
+export function computeConsultingOverall(rubric: RubricScores, closeOutcome: CloseOutcome): number {
+  const process = (rubric.needsDiscovery + rubric.objectionPrevention + rubric.trustBuilding) / 3;
+  const closeExecution = (rubric.naturalClose + rubric.relationshipContinuity) / 2;
+  const anchor = closeOutcomeAnchor(closeOutcome);
+
+  let overall = 0.5 * process + 0.3 * anchor + 0.2 * closeExecution;
+
+  // Recommendation is necessary but not sufficient: too little discovery/rapport
+  // fails the attempt even when a recommendation (or agreement) was reached.
+  if (process < WEAK_PROCESS_THRESHOLD) {
+    overall = Math.min(overall, WEAK_PROCESS_CAP);
+  }
+  // A soft close is not an acceptable outcome — score it low for the closing dimension.
+  if (closeOutcome === "none" || closeOutcome === "handoff_no_commitment") {
+    overall = Math.min(overall, SOFT_CLOSE_CAP);
+  }
+
+  return Math.round(Math.max(0, Math.min(100, overall)));
+}
+
+// Deterministic detection of a consultant "wrap-up" / soft-close attempt: saying
+// goodbye, thanking off, handing over contact info, or promising to follow up.
+// Used to force an explicit clarifying checkpoint ("end and score now, or keep
+// going?") instead of silently holding the session open or guessing it's over.
+const CLOSE_INTENT_PATTERNS: RegExp[] = [
+  /\bgood\s?bye\b/,
+  /\bbye(?:\s+now)?\b/,
+  /\bsee you\b/,
+  /\btake care\b/,
+  /\bhave a (?:good|great|nice)\b/,
+  /\b(?:here'?s|take|leave you) my (?:card|number|info|contact|details)\b/,
+  /\bbusiness card\b/,
+  /\bcall me\b/,
+  /\bgive me a call\b/,
+  /\b(?:when|whenever) you'?re ready\b/,
+  /\bi'?ll (?:follow up|be in touch|let you go|check back|get back to you|leave you)\b/,
+  /\bfollow up with you\b/,
+  /\breach out\b/,
+  /\bthanks?(?: you)? (?:for your time|so much|again)\b/,
+  /\bthank you for your time\b/,
+  /\bappreciate your time\b/,
+];
+
+export function detectCloseIntent(text: string): boolean {
+  const normalized = (text ?? "").toLowerCase();
+  if (!normalized.trim()) return false;
+  return CLOSE_INTENT_PATTERNS.some((re) => re.test(normalized));
+}
+
 // Scores a completed session. Branches on the scenario's `track`: consulting
 // sessions use the discovery rubric (RubricScores); leadership sessions use the
 // conflict-management rubric (LeadershipRubricScores). Both are stored the same
@@ -212,9 +330,12 @@ export async function scoreTranscript(
     | RubricScores
     | LeadershipRubricScores;
 
-  const overall = Math.round(
-    keys.reduce((sum, k) => sum + (parsed[k] ?? 0), 0) / keys.length
-  );
+  // Consulting sessions use the tiered recommendation + client-buy-in weighting
+  // (see computeConsultingOverall). Leadership sessions keep the flat mean of
+  // their de-escalation dimensions.
+  const overall = isLeadership
+    ? Math.round(keys.reduce((sum, k) => sum + (parsed[k] ?? 0), 0) / keys.length)
+    : computeConsultingOverall(rubric as RubricScores, normalizeCloseOutcome(parsed.closeOutcome));
 
   return { rubric, feedback: parsed.feedback ?? "", overall };
 }

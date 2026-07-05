@@ -59,10 +59,15 @@ export default function RolePlay() {
       });
       return res.json();
     },
-    onSuccess: (updated: Session) => {
+    onSuccess: (updated: Session & { closeCheckpoint?: boolean }) => {
       queryClient.setQueryData(["/api/sessions", id], updated);
       voiceRef.current?.handleReply(JSON.parse(updated.transcript));
       setLastFailedMessage(null);
+      // The consultant appears to be wrapping up. Force an explicit choice rather
+      // than silently ending or silently holding the session open.
+      if (updated.closeCheckpoint) {
+        setShowCloseCheckpoint(true);
+      }
     },
     onError: (_err, variables) => {
       // Never lose what was typed — surface a retry instead of forcing a restart.
@@ -118,10 +123,11 @@ export default function RolePlay() {
 
   const [scoringFailed, setScoringFailed] = useState(false);
   const [showIncompleteModal, setShowIncompleteModal] = useState(false);
+  const [showCloseCheckpoint, setShowCloseCheckpoint] = useState(false);
 
   const completeSession = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/sessions/${id}/complete`, {});
+    mutationFn: async (opts?: { force?: boolean }) => {
+      const res = await apiRequest("POST", `/api/sessions/${id}/complete`, opts?.force ? { force: true } : {});
       return res.json();
     },
     onSuccess: (updatedSession) => {
@@ -349,7 +355,7 @@ export default function RolePlay() {
             )}
             <Button
               variant="secondary"
-              onClick={() => completeSession.mutate()}
+              onClick={() => completeSession.mutate(undefined)}
               disabled={transcript.length === 0 || completeSession.isPending}
               data-testid="button-complete-session"
             >
@@ -387,6 +393,38 @@ export default function RolePlay() {
               data-testid="button-save-for-later"
             >
               <Save className="w-4 h-4 mr-1.5" /> {saveForLater.isPending ? "Saving..." : "Save for Later"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showCloseCheckpoint} onOpenChange={setShowCloseCheckpoint}>
+        <DialogContent data-testid="dialog-close-checkpoint">
+          <DialogHeader>
+            <DialogTitle>Wrapping up?</DialogTitle>
+            <DialogDescription data-testid="text-close-checkpoint-message">
+              It looks like you might be ending the conversation. Do you want to end this
+              session and receive your score now, or continue the conversation?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setShowCloseCheckpoint(false)}
+              data-testid="button-continue-conversation"
+            >
+              Continue the conversation
+            </Button>
+            <Button
+              onClick={() => {
+                setShowCloseCheckpoint(false);
+                completeSession.mutate({ force: true });
+              }}
+              disabled={completeSession.isPending}
+              style={{ backgroundColor: "#E06D00", color: "white" }}
+              data-testid="button-end-and-score"
+            >
+              {completeSession.isPending ? "Scoring..." : "End & get my score now"}
             </Button>
           </DialogFooter>
         </DialogContent>
