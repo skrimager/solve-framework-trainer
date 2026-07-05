@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc } from "drizzle-orm";
@@ -80,6 +80,18 @@ export interface IStorage {
   getCertificationAttemptByScenarioSession(sessionId: number): Promise<CertificationAttempt | undefined>;
   updateCertificationAttempt(id: number, patch: Partial<InsertCertificationAttempt>): Promise<CertificationAttempt | undefined>;
   listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]>;
+
+  // Public "Free Voice Demo". Signups are keyed by email (one row per email, holds
+  // verification-code state + the all-time usage counter). Sessions are anonymous
+  // demo roleplays, kept fully separate from seat-gated `sessions`.
+  getDemoSignupByEmail(email: string): Promise<DemoSignup | undefined>;
+  createDemoSignup(signup: InsertDemoSignup): Promise<DemoSignup>;
+  updateDemoSignup(id: number, patch: Partial<InsertDemoSignup>): Promise<DemoSignup | undefined>;
+  listDemoSignups(): Promise<DemoSignup[]>;
+  createDemoSession(session: InsertDemoSession): Promise<DemoSession>;
+  getDemoSession(id: number): Promise<DemoSession | undefined>;
+  updateDemoSession(id: number, patch: Partial<InsertDemoSession>): Promise<DemoSession | undefined>;
+  listDemoSessions(): Promise<DemoSession[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -321,6 +333,44 @@ export class DatabaseStorage implements IStorage {
 
   async listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]> {
     return db.select().from(certificationAttempts).where(eq(certificationAttempts.userId, userId)).orderBy(desc(certificationAttempts.id));
+  }
+
+  async getDemoSignupByEmail(email: string): Promise<DemoSignup | undefined> {
+    const rows = await db.select().from(demoSignups).where(eq(demoSignups.email, email));
+    return rows[0];
+  }
+
+  async createDemoSignup(signup: InsertDemoSignup): Promise<DemoSignup> {
+    const rows = await db.insert(demoSignups).values(signup).returning();
+    return rows[0];
+  }
+
+  async updateDemoSignup(id: number, patch: Partial<InsertDemoSignup>): Promise<DemoSignup | undefined> {
+    const rows = await db.update(demoSignups).set(patch).where(eq(demoSignups.id, id)).returning();
+    return rows[0];
+  }
+
+  async listDemoSignups(): Promise<DemoSignup[]> {
+    return db.select().from(demoSignups).orderBy(desc(demoSignups.id));
+  }
+
+  async createDemoSession(session: InsertDemoSession): Promise<DemoSession> {
+    const rows = await db.insert(demoSessions).values(session).returning();
+    return rows[0];
+  }
+
+  async getDemoSession(id: number): Promise<DemoSession | undefined> {
+    const rows = await db.select().from(demoSessions).where(eq(demoSessions.id, id));
+    return rows[0];
+  }
+
+  async updateDemoSession(id: number, patch: Partial<InsertDemoSession>): Promise<DemoSession | undefined> {
+    const rows = await db.update(demoSessions).set(patch).where(eq(demoSessions.id, id)).returning();
+    return rows[0];
+  }
+
+  async listDemoSessions(): Promise<DemoSession[]> {
+    return db.select().from(demoSessions).orderBy(desc(demoSessions.id));
   }
 }
 

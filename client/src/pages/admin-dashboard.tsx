@@ -10,7 +10,7 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { adminApi, type AdminSection, type AdminContact, type ContactEvent } from "@/lib/adminApi";
-import { Download, LogOut, Users, FileText, Eye, DollarSign, X } from "lucide-react";
+import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic } from "lucide-react";
 
 const NAVY = "#0A1A30";
 const NAVY_DARK = "#05162D";
@@ -21,6 +21,7 @@ const SECTIONS: { key: AdminSection; label: string; icon: any }[] = [
   { key: "leads", label: "Contacts", icon: FileText },
   { key: "users", label: "All Users", icon: Users },
   { key: "sales", label: "Sales", icon: DollarSign },
+  { key: "demo", label: "Voice Demo", icon: Mic },
 ];
 
 const CONTACT_TYPES = ["speaking", "consulting", "book", "training", "role_play", "general"];
@@ -171,6 +172,7 @@ function GenericSectionView({ section }: { section: AdminSection }) {
             {section === "visitors" && <VisitorsTable rows={data.rows} />}
             {section === "users" && <UsersTable rows={data.rows} />}
             {section === "sales" && <SalesTable rows={data.rows} />}
+            {section === "demo" && <DemoTable rows={data.rows} />}
           </>
         )}
       </div>
@@ -570,6 +572,36 @@ function UsersTable({ rows }: { rows: any[] }) {
             <TableCell className={cellCls}>{r.currentLevel}</TableCell>
             <TableCell className={cellCls}>{r.seatActive}{r.isDemoAccount === "yes" ? " (demo)" : ""}</TableCell>
             <TableCell className={cellCls}>{r.subscriptionStatus}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function DemoTable({ rows }: { rows: any[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow className="hover:bg-transparent border-white/10">
+          <TableHead className={headCls}>Email</TableHead>
+          <TableHead className={headCls}>Verified</TableHead>
+          <TableHead className={headCls}>Sessions Used</TableHead>
+          <TableHead className={headCls}>Completed</TableHead>
+          <TableHead className={headCls}>First Seen</TableHead>
+          <TableHead className={headCls}>Last Code Sent</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.length === 0 && <EmptyRow span={6} />}
+        {rows.map((r) => (
+          <TableRow key={r.id} className="border-white/10" data-testid={`row-demo-${r.id}`}>
+            <TableCell className={cellCls}>{r.email}</TableCell>
+            <TableCell className={cellCls}>{r.verified}</TableCell>
+            <TableCell className={cellCls}>{r.sessionsUsed} / {r.maxSessions}</TableCell>
+            <TableCell className={cellCls}>{r.completedSessions}</TableCell>
+            <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
+            <TableCell className="text-white/60 text-xs">{r.lastSentAt || "-"}</TableCell>
           </TableRow>
         ))}
       </TableBody>

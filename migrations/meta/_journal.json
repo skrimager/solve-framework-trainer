@@ -57,6 +57,13 @@
       "when": 1783106654000,
       "tag": "0007_contacts_crm",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783106655000,
+      "tag": "0008_demo",
+      "breakpoints": true
     }
   ]
 }
