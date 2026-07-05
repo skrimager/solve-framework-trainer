@@ -50,6 +50,13 @@
       "when": 1783106653000,
       "tag": "0006_certification",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783106654000,
+      "tag": "0007_contacts_crm",
+      "breakpoints": true
     }
   ]
 }
