@@ -17,6 +17,7 @@ import {
   type Track,
 } from "./certification";
 import { getVoiceForScenario } from "./voices";
+import { sendLeadNotification } from "./notifications";
 import { transcriptMessageSchema, type TranscriptMessage, type User } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
@@ -938,6 +939,9 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       status: "new",
       createdAt: new Date().toISOString(),
     });
+    // Best-effort notification email. sendLeadNotification never throws, so a
+    // failure here must never block or fail the lead-capture response.
+    void sendLeadNotification(lead);
     res.status(201).json({ ok: true, id: lead.id });
   });
 
