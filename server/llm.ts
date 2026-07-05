@@ -62,18 +62,45 @@ const DIFFICULTY_BEHAVIOR: Record<string, string> = {
     "Difficulty calibration (ADVANCED): Be markedly more skeptical and less immediately cooperative. Keep your real needs and priorities well hidden behind your stated request, and reveal them only when the consultant earns it with layered, insightful discovery questions. Push back hard on price and value, surface multiple objections, test whether the consultant is really listening, and stay non-committal until they clearly demonstrate they understand your underlying situation. Do not make it easy.",
 };
 
+// Conversation-progression rules layered onto every customer reply. Without
+// these the model tends to restate the same objection in slightly reworded form
+// turn after turn (and, when asked to clarify, paraphrase itself instead of
+// giving new information), which destroys the realism of the roleplay. These
+// rules make the simulated customer track what they've already said, add NEW
+// detail when pressed, and move on once a concern has actually been addressed.
+// Correctness/realism is deliberately prioritized over token economy here.
+export const CONVERSATION_REALISM_RULES = `Conversation realism (follow on EVERY turn — this is critical):
+- You are a real person in a live, moving conversation, not a script on a loop. Keep the conversation moving FORWARD.
+- Keep a running mental note of every concern, objection, question, or need you have ALREADY raised earlier in this conversation. Do NOT bring up a concern you have already voiced a second time — not even reworded, rephrased, or from a slightly different angle — UNLESS the consultant's most recent reply genuinely failed to address it. Restating the same point over and over makes you sound like a broken record and is never how a real person talks.
+- When the consultant asks you to clarify, explain, or say more about something, respond with GENUINELY NEW, specific information: a concrete number, a dollar amount, a timeframe, a name, a specific past experience, or a fresh reason. NEVER just paraphrase or restate the same sentence you already said. Real people add detail and context when asked; they do not repeat themselves.
+- The moment the consultant has adequately addressed, answered, or eased a concern, briefly acknowledge it in your own words (e.g. "Okay, that actually makes sense" or "Alright, that helps") and MOVE ON — raise your next underlying concern, ask a question of your own, or let the conversation advance to a new topic. Do not keep relitigating a point that has already been handled.
+- It is realistic to hold firm on a concern the consultant has NOT actually resolved — but express that by adding a new angle, a new detail, or a pointed follow-up question, not by repeating the same statement.
+- Keep each reply short and conversational — usually one to three sentences, the way people actually speak out loud.`;
+
+// Builds the full prompt sent to the model for the customer's next reply. Kept
+// as a separate pure function (like buildWrittenGradingPrompt) so the prompt —
+// especially the anti-looping realism rules — can be unit-tested without
+// hitting the network.
+export function buildCustomerReplyPrompt(
+  customerPersona: string,
+  transcript: TranscriptMessage[],
+  difficulty: string = "intermediate"
+): string {
+  const history = transcript
+    .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
+    .join("\n");
+
+  const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
+  return `${customerPersona}\n\n${behavior}\n\n${CONVERSATION_REALISM_RULES}\n\nConversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character, following the conversation realism rules above. Output ONLY the spoken line, no labels or narration.`;
+}
+
 // Generates the simulated customer's next reply in a discovery-training role-play.
 export async function getCustomerReply(
   customerPersona: string,
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate"
 ): Promise<string> {
-  const history = transcript
-    .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
-    .join("\n");
-
-  const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
-  const input = `${customerPersona}\n\n${behavior}\n\nConversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character. Output ONLY the spoken line, no labels or narration.`;
+  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty);
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
