@@ -18,6 +18,7 @@ import { AppShell } from "@/components/app-shell";
 import { useViewportHeight } from "@/hooks/use-viewport-height";
 import { apiRequest } from "@/lib/queryClient";
 import { getAvatarUrl } from "@/lib/avatars";
+import { voiceTransition, type VoiceState, type VoiceEvent, type VoiceEffect } from "@/lib/voiceMachine";
 import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Save, XCircle } from "lucide-react";
 import type { Session, Scenario, TranscriptMessage } from "@shared/schema";
 
@@ -49,16 +50,28 @@ declare global {
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
+// A near-empty silent clip used to "unlock" audio playback on the first user
+// gesture. Mobile browsers (notably iOS Safari) only allow programmatic
+// audio.play() after a user has interacted with a given media element, so we
+// prime one reusable element the moment voice mode is switched on.
+const SILENT_AUDIO =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
 export default function RolePlay() {
   const { id } = useParams<{ id: string }>();
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
-  const [voiceOn, setVoiceOn] = useState(true);
-  const [handsFreeOn, setHandsFreeOn] = useState(false);
+  // A single "Voice mode" toggle governs the whole experience. ON = fully
+  // automatic phone-call-style conversation (auto TTS + auto listen). OFF =
+  // text-only, with the mic available only for optional one-shot dictation.
+  const [voiceMode, setVoiceMode] = useState(false);
+  const voiceModeRef = useRef(voiceMode);
+  useEffect(() => {
+    voiceModeRef.current = voiceMode;
+  }, [voiceMode]);
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Guards against auto-send firing twice for the same recognized utterance.
 
   const [pendingAudioIds, setPendingAudioIds] = useState<Set<string>>(new Set());
   const playedAudioIds = useRef<Set<string>>(new Set());
@@ -94,28 +107,157 @@ export default function RolePlay() {
   });
   const avatarUrl = getAvatarUrl(scenario?.slug);
 
-  // --- Voice input (Web Speech API) ---
-  const [isListening, setIsListening] = useState(false);
+  // --- Voice conversation loop (Web Speech API + a deterministic state machine) ---
+  // `phase` is driven exclusively by voiceMachine. voiceMode ON keeps it cycling
+  // idle -> listening -> processing -> ai_speaking -> listening; voiceMode OFF
+  // holds it at idle. Text-mode mic dictation is tracked separately by
+  // isDictating and never touches the machine.
+  const [phase, setPhase] = useState<VoiceState>("idle");
+  const phaseRef = useRef<VoiceState>("idle");
+  const [isDictating, setIsDictating] = useState(false);
+  const isDictatingRef = useRef(false);
+  useEffect(() => {
+    isDictatingRef.current = isDictating;
+  }, [isDictating]);
   const [speechSupported, setSpeechSupported] = useState(true);
+  const speechSupportedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
   const draftBeforeListening = useRef("");
-  // Hands-free: after the consultant stops talking for this long, auto-send.
+  // After the consultant stops talking for this long in voice mode, auto-send.
   // Tight enough to feel responsive, but long enough to ride over natural
   // mid-sentence pauses so it doesn't cut the consultant off.
   const SILENCE_AUTOSEND_MS = 1100;
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handsFreeOnRef = useRef(handsFreeOn);
-  useEffect(() => {
-    handsFreeOnRef.current = handsFreeOn;
-  }, [handsFreeOn]);
-  // handleSend is defined later in the component; keep a ref so the recognition
-  // callback (created once on mount) always calls the latest version.
+  // handleSend and dispatch are defined below; keep refs so the recognition
+  // callbacks (created once on mount) always call the latest versions.
   const handleSendRef = useRef<() => void>(() => {});
+  const dispatchRef = useRef<(event: VoiceEvent, audioUrl?: string) => void>(() => {});
+
+  const getAudioEl = useCallback(() => {
+    if (!audioElRef.current) audioElRef.current = new Audio();
+    return audioElRef.current;
+  }, []);
+
+  // Prime the reusable audio element on a user gesture so later programmatic
+  // playback is allowed on mobile. Safe to call repeatedly.
+  const unlockAudio = useCallback(() => {
+    const el = getAudioEl();
+    try {
+      el.muted = true;
+      el.src = SILENT_AUDIO;
+      const p = el.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          el.pause();
+          el.muted = false;
+        }).catch(() => {
+          el.muted = false;
+        });
+      } else {
+        el.muted = false;
+      }
+    } catch {
+      el.muted = false;
+    }
+  }, [getAudioEl]);
+
+  const stopAudio = useCallback(() => {
+    const el = audioElRef.current;
+    if (!el) return;
+    el.onended = null;
+    el.pause();
+    try {
+      el.currentTime = 0;
+    } catch {
+      // Some browsers throw on currentTime before metadata loads; ignore.
+    }
+  }, []);
+
+  const playAudio = useCallback(
+    (url: string) => {
+      const el = getAudioEl();
+      el.onended = () => dispatchRef.current({ type: "AUDIO_ENDED" });
+      el.src = `${API_BASE}${url}`;
+      el.muted = false;
+      el.play().catch(() => dispatchRef.current({ type: "AUDIO_FAILED" }));
+    },
+    [getAudioEl]
+  );
+
+  const stopRecognition = useCallback(() => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // Ignore stop() before start().
+    }
+  }, []);
+
+  // fresh=true starts a brand-new utterance (voice loop, previous reply already
+  // sent); fresh=false keeps whatever is already drafted (text-mode dictation).
+  const startRecognition = useCallback(
+    (fresh = true) => {
+      const recognition = recognitionRef.current;
+      if (!recognition) return;
+      // Voice loop keeps the mic open continuously; text dictation captures a
+      // single utterance then stops on its own.
+      recognition.continuous = voiceModeRef.current;
+      if (fresh) {
+        draftBeforeListening.current = "";
+        setDraft("");
+      } else {
+        draftBeforeListening.current = draft.trim();
+      }
+      try {
+        recognition.start();
+      } catch {
+        // Ignore "already started" errors from rapid restarts.
+      }
+    },
+    [draft]
+  );
+
+  const runEffect = useCallback(
+    (effect: VoiceEffect, audioUrl?: string) => {
+      switch (effect) {
+        case "START_LISTENING":
+          startRecognition(true);
+          break;
+        case "STOP_LISTENING":
+          stopRecognition();
+          break;
+        case "PLAY_AUDIO":
+          if (audioUrl) playAudio(audioUrl);
+          break;
+        case "STOP_AUDIO":
+          stopAudio();
+          break;
+      }
+    },
+    [startRecognition, stopRecognition, playAudio, stopAudio]
+  );
+
+  const dispatch = useCallback(
+    (event: VoiceEvent, audioUrl?: string) => {
+      const result = voiceTransition(phaseRef.current, event, {
+        speechSupported: speechSupportedRef.current,
+      });
+      phaseRef.current = result.state;
+      setPhase(result.state);
+      for (const effect of result.effects) runEffect(effect, audioUrl);
+    },
+    [runEffect]
+  );
+  useEffect(() => {
+    dispatchRef.current = dispatch;
+  });
 
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognitionCtor) {
       setSpeechSupported(false);
+      speechSupportedRef.current = false;
       return;
     }
     const recognition = new SpeechRecognitionCtor();
@@ -141,9 +283,9 @@ export default function RolePlay() {
         draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
       }
 
-      // Hands-free mode: restart a silence timer on every new result. If the
-      // consultant stops speaking for SILENCE_AUTOSEND_MS, auto-send what's drafted.
-      if (handsFreeOnRef.current) {
+      // Voice loop only: after a silent gap, auto-send so the consultant can
+      // just keep talking. Text-mode dictation never auto-sends.
+      if (phaseRef.current === "listening") {
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = setTimeout(() => {
           if (draftBeforeListening.current.trim()) {
@@ -152,65 +294,78 @@ export default function RolePlay() {
         }, SILENCE_AUTOSEND_MS);
       }
     };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => {
+      if (voiceModeRef.current) {
+        dispatchRef.current({ type: "RECOGNITION_ERROR" });
+      } else {
+        setIsDictating(false);
+      }
+    };
+    recognition.onend = () => {
+      if (voiceModeRef.current) {
+        // In listening state this restarts the mic (mobile ends it
+        // spontaneously); in any other state the machine ignores it.
+        dispatchRef.current({ type: "RECOGNITION_ENDED" });
+      } else {
+        setIsDictating(false);
+      }
+    };
     recognitionRef.current = recognition;
 
     return () => {
-      recognition.stop();
+      try {
+        recognition.stop();
+      } catch {
+        // ignore
+      }
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startListening = useCallback(() => {
-    const recognition = recognitionRef.current;
-    if (!recognition || isListening) return;
-    draftBeforeListening.current = "";
-    setDraft("");
-    try {
-      recognition.start();
-      setIsListening(true);
-    } catch {
-      // Ignore "already started" errors from rapid auto-restarts.
+  // Tap the mic. In voice mode this feeds the machine (interrupt / resume /
+  // barge-in). In text mode it's a one-shot dictation toggle.
+  const handleMicTap = useCallback(() => {
+    if (voiceModeRef.current) {
+      dispatch({ type: "MIC_TAP" });
+      return;
     }
-  }, [isListening]);
-
-  const toggleListening = useCallback(() => {
-    const recognition = recognitionRef.current;
-    if (!recognition) return;
-    if (isListening) {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      recognition.stop();
-      setIsListening(false);
+    if (isDictatingRef.current) {
+      stopRecognition();
+      setIsDictating(false);
     } else {
-      draftBeforeListening.current = draft.trim();
-      recognition.start();
-      setIsListening(true);
+      startRecognition(false);
+      setIsDictating(true);
     }
-  }, [isListening, draft]);
+  }, [dispatch, startRecognition, stopRecognition]);
 
-  // Plays a customer voice reply. In hands-free mode, automatically starts
-  // listening again once the audio finishes so the conversation can continue
-  // without the consultant touching anything.
-  const playAudioUrl = useCallback(
-    (url: string) => {
-      const audio = new Audio(`${API_BASE}${url}`);
-      if (handsFreeOnRef.current) {
-        audio.onended = () => {
-          startListening();
-        };
+  const handleVoiceModeToggle = useCallback(
+    (checked: boolean) => {
+      setVoiceMode(checked);
+      voiceModeRef.current = checked;
+      if (checked) {
+        // Any in-flight text dictation is superseded by the voice loop.
+        if (isDictatingRef.current) {
+          stopRecognition();
+          setIsDictating(false);
+        }
+        // Unlock audio inside this user gesture so later replies can auto-play
+        // on mobile.
+        unlockAudio();
+        dispatch({ type: "TOGGLE_VOICE_MODE", on: true });
+      } else {
+        stopAudio();
+        dispatch({ type: "TOGGLE_VOICE_MODE", on: false });
       }
-      audio.play().catch(() => {});
     },
-    [startListening]
+    [dispatch, stopAudio, stopRecognition, unlockAudio]
   );
 
   const sendMessage = useMutation({
     mutationFn: async (content: string) => {
       const res = await apiRequest("POST", `/api/sessions/${id}/message`, {
         content,
-        withAudio: voiceOn,
+        withAudio: voiceMode,
       });
       return res.json();
     },
@@ -220,12 +375,19 @@ export default function RolePlay() {
       const last = transcript[transcript.length - 1];
       if (last?.msgId && last.audioStatus === "pending") {
         setPendingAudioIds((prev) => new Set(prev).add(last.msgId!));
-      } else if (voiceOn && last?.audioUrl && last.msgId && !playedAudioIds.current.has(last.msgId)) {
+        if (voiceModeRef.current) dispatchRef.current({ type: "REPLY_AUDIO_PENDING" });
+      } else if (
+        voiceModeRef.current &&
+        last?.audioUrl &&
+        last.audioStatus === "ready" &&
+        last.msgId &&
+        !playedAudioIds.current.has(last.msgId)
+      ) {
         playedAudioIds.current.add(last.msgId);
-        playAudioUrl(last.audioUrl);
-      } else if (!voiceOn && handsFreeOnRef.current) {
-        // No audio to wait for (voice off) — still resume listening immediately.
-        startListening();
+        dispatchRef.current({ type: "REPLY_AUDIO_READY" }, last.audioUrl);
+      } else if (voiceModeRef.current) {
+        // Reply arrived with no audio to play — keep the loop moving.
+        dispatchRef.current({ type: "REPLY_NO_AUDIO" });
       }
       setLastFailedMessage(null);
     },
@@ -246,17 +408,43 @@ export default function RolePlay() {
       if (msg.msgId && next.has(msg.msgId) && msg.audioStatus !== "pending") {
         next.delete(msg.msgId);
         changed = true;
+        if (!voiceModeRef.current) continue;
         if (msg.audioStatus === "ready" && msg.audioUrl && !playedAudioIds.current.has(msg.msgId)) {
           playedAudioIds.current.add(msg.msgId);
-          playAudioUrl(msg.audioUrl);
-        } else if (msg.audioStatus === "failed" && handsFreeOnRef.current) {
-          // TTS failed — don't strand hands-free mode waiting forever, resume listening.
-          startListening();
+          dispatchRef.current({ type: "REPLY_AUDIO_READY" }, msg.audioUrl);
+        } else if (msg.audioStatus === "failed") {
+          // TTS generation failed — keep the loop moving instead of stranding it.
+          dispatchRef.current({ type: "REPLY_NO_AUDIO" });
         }
       }
     }
     if (changed) setPendingAudioIds(next);
-  }, [session, pendingAudioIds, playAudioUrl, startListening]);
+  }, [session, pendingAudioIds]);
+
+  const isListening = phase === "listening";
+  const micActive = isListening || isDictating;
+  const voiceStatus = !voiceMode
+    ? null
+    : phase === "listening"
+      ? "Listening — just keep talking."
+      : phase === "processing"
+        ? "Customer is thinking..."
+        : phase === "ai_speaking"
+          ? "Customer is speaking — tap the mic to jump in."
+          : phase === "awaiting_user"
+            ? speechSupported
+              ? "Tap the mic to continue the conversation."
+              : "Type your reply to continue."
+            : null;
+  const micLabel = voiceMode
+    ? phase === "ai_speaking"
+      ? "Interrupt and speak"
+      : isListening
+        ? "Stop listening"
+        : "Start listening"
+    : isDictating
+      ? "Stop voice input"
+      : "Start voice input";
 
   const [scoringFailed, setScoringFailed] = useState(false);
   const [showIncompleteModal, setShowIncompleteModal] = useState(false);
@@ -310,9 +498,12 @@ export default function RolePlay() {
   function handleSend() {
     if (!draft.trim() || sendMessage.isPending) return;
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
+    if (voiceModeRef.current) {
+      // Moves the machine to processing and stops the mic deterministically.
+      dispatch({ type: "SEND" });
+    } else if (isDictatingRef.current) {
+      stopRecognition();
+      setIsDictating(false);
     }
     sendMessage.mutate(draft.trim());
     setDraft("");
@@ -365,31 +556,14 @@ export default function RolePlay() {
           <div className="flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-2">
               <Volume2 className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
-              <Label htmlFor="voice-toggle" className="text-xs text-muted-foreground">Voice</Label>
-              <Switch id="voice-toggle" checked={voiceOn} onCheckedChange={setVoiceOn} data-testid="switch-voice" />
+              <Label htmlFor="voice-toggle" className="text-xs text-muted-foreground">Voice mode</Label>
+              <Switch
+                id="voice-toggle"
+                checked={voiceMode}
+                onCheckedChange={handleVoiceModeToggle}
+                data-testid="switch-voice"
+              />
             </div>
-            {speechSupported && (
-              <div className="flex items-center gap-2">
-                <Mic className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
-                <Label htmlFor="handsfree-toggle" className="text-xs text-muted-foreground">Hands-free</Label>
-                <Switch
-                  id="handsfree-toggle"
-                  checked={handsFreeOn}
-                  onCheckedChange={(checked) => {
-                    setHandsFreeOn(checked);
-                    if (checked) {
-                      if (!voiceOn) setVoiceOn(true);
-                      startListening();
-                    } else if (isListening) {
-                      recognitionRef.current?.stop();
-                      setIsListening(false);
-                      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-                    }
-                  }}
-                  data-testid="switch-handsfree"
-                />
-              </div>
-            )}
           </div>
         </div>
 
@@ -473,6 +647,11 @@ export default function RolePlay() {
         </div>
 
         <div className="border-t p-3 space-y-3 shrink-0">
+          {voiceStatus && (
+            <p className="text-xs text-muted-foreground" data-testid="text-voice-status">
+              {voiceStatus}
+            </p>
+          )}
           <div className="flex gap-2">
             <Textarea
               value={draft}
@@ -483,22 +662,22 @@ export default function RolePlay() {
                   handleSend();
                 }
               }}
-              placeholder={isListening ? "Listening..." : speechSupported ? "Type or tap the mic to speak..." : "Type what you'd say to the customer..."}
+              placeholder={micActive ? "Listening..." : speechSupported ? "Type or tap the mic to speak..." : "Type what you'd say to the customer..."}
               className="min-h-[44px] max-h-32 resize-none"
               data-testid="input-message"
             />
             {speechSupported && (
               <Button
-                onClick={toggleListening}
+                onClick={handleMicTap}
                 disabled={sendMessage.isPending}
                 size="icon"
-                variant={isListening ? "default" : "outline"}
-                aria-label={isListening ? "Stop voice input" : "Start voice input"}
-                aria-pressed={isListening}
-                className={isListening ? "animate-pulse" : undefined}
+                variant={micActive ? "default" : "outline"}
+                aria-label={micLabel}
+                aria-pressed={micActive}
+                className={micActive ? "animate-pulse" : undefined}
                 data-testid="button-mic"
               >
-                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                {micActive ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
               </Button>
             )}
             <Button
