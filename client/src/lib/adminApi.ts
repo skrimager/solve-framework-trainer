@@ -14,7 +14,7 @@ async function request(method: string, url: string, body?: unknown): Promise<Res
   return res;
 }
 
-export type AdminSection = "visitors" | "leads" | "users" | "sales";
+export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo";
 
 export type AdminContact = {
   id: number;

@@ -17,7 +17,20 @@ import {
   type Track,
 } from "./certification";
 import { getVoiceForScenario } from "./voices";
-import { sendLeadNotification } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode } from "./notifications";
+import {
+  MAX_DEMO_SESSIONS,
+  DEMO_SCENARIO_SLUG,
+  normalizeEmail,
+  generateVerificationCode,
+  codeExpiryFrom,
+  isCodeValid,
+  isSessionLimitReached,
+  remainingSessions,
+  signDemoToken,
+  verifyDemoToken,
+  ctaSeatQuestion,
+} from "./demo";
 import {
   contactTypeSchema,
   contactPatchSchema,
@@ -95,6 +108,7 @@ function clientIp(req: Request): string {
 
 const leadsLimiter = new RateLimiter(5, 60 * 1000); // 5 lead submissions / IP / minute
 const visitsLimiter = new RateLimiter(60, 60 * 1000); // 60 page-views / IP / minute
+const demoLimiter = new RateLimiter(20, 60 * 1000); // 20 demo actions / IP / minute (code requests, verify, turns)
 
 const AUDIO_DIR = path.join(process.cwd(), "audio_cache");
 if (!fsSync.existsSync(AUDIO_DIR)) fsSync.mkdirSync(AUDIO_DIR, { recursive: true });
@@ -990,6 +1004,332 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   });
 
   // ===========================================================================
+  // Public "Free Voice Demo" (no auth, no seat; the email+code IS the auth)
+  // ===========================================================================
+  // Reuses the EXACT existing roleplay pipeline: getCustomerOpening /
+  // getCustomerReply / scoreTranscript / synthesizeAudio / getVoiceForScenario.
+  // Anonymous demo traffic lives in demo_signups/demo_sessions and never touches
+  // the seat-gated users/sessions tables, office analytics, or level progression.
+
+  // Load the fixed demo scenario (by slug). It's seeded active:false so it never
+  // appears in the trainee picker; the demo reaches it by slug only.
+  async function getDemoScenario() {
+    return storage.getScenarioBySlug(DEMO_SCENARIO_SLUG);
+  }
+
+  // Resolve the caller's verified signup from the signed token in the body.
+  async function requireDemoSignup(
+    req: Request,
+    res: Response,
+  ): Promise<import("@shared/schema").DemoSignup | null> {
+    const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
+    if (!payload) {
+      res.status(401).json({ message: "Your demo session has expired. Please verify your email again." });
+      return null;
+    }
+    const signup = await storage.getDemoSignupByEmail(payload.email);
+    if (!signup || !signup.verified) {
+      res.status(401).json({ message: "Please verify your email to start the demo." });
+      return null;
+    }
+    return signup;
+  }
+
+  function publicDemoSession(s: import("@shared/schema").DemoSession) {
+    return {
+      id: s.id,
+      scenarioId: s.scenarioId,
+      status: s.status,
+      transcript: s.transcript,
+      score: s.score,
+      rubricScores: s.rubricScores,
+      feedback: s.feedback,
+    };
+  }
+
+  // Step 1: visitor submits their email; we email a 6-digit code. If the email
+  // has already used all its free sessions, we short-circuit (no code sent) so
+  // the client can show the "used all 3" message + signup CTA.
+  app.post("/api/demo/request-code", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({ email: z.string().trim().email("A valid email is required").max(200) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid email" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const now = new Date();
+
+    let signup = await storage.getDemoSignupByEmail(email);
+    if (signup && isSessionLimitReached(signup.sessionsUsed)) {
+      return res.json({ ok: true, limitReached: true, remaining: 0 });
+    }
+
+    const code = generateVerificationCode();
+    const patch = { code, codeExpiresAt: codeExpiryFrom(now.getTime()), lastSentAt: now.toISOString() };
+    if (!signup) {
+      signup = await storage.createDemoSignup({
+        email,
+        code: patch.code,
+        codeExpiresAt: patch.codeExpiresAt,
+        verified: false,
+        sessionsUsed: 0,
+        createdAt: now.toISOString(),
+        lastSentAt: patch.lastSentAt,
+      });
+    } else {
+      await storage.updateDemoSignup(signup.id, patch);
+    }
+
+    const sent = await sendDemoVerificationCode(email, code);
+    if (!sent) {
+      return res.status(502).json({ message: "We couldn't send your code just now. Please try again in a moment.", retryable: true });
+    }
+    res.json({ ok: true, remaining: remainingSessions(signup.sessionsUsed) });
+  });
+
+  // Step 2: visitor submits the code. On success we consume the code, mark the
+  // email verified, and (unless the limit is already reached) issue a signed
+  // demo token that authorizes starting roleplay sessions.
+  app.post("/api/demo/verify", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      email: z.string().trim().email("A valid email is required").max(200),
+      code: z.string().trim().min(4).max(10),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const signup = await storage.getDemoSignupByEmail(email);
+    if (!signup || !isCodeValid(signup, parsed.data.code)) {
+      return res.status(400).json({ message: "That code is incorrect or has expired. Please try again." });
+    }
+
+    // Consume the code (single-use) and mark verified.
+    await storage.updateDemoSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
+
+    if (isSessionLimitReached(signup.sessionsUsed)) {
+      return res.json({ verified: true, limitReached: true, remaining: 0 });
+    }
+    const token = signDemoToken(email);
+    res.json({ verified: true, token, remaining: remainingSessions(signup.sessionsUsed) });
+  });
+
+  // Step 3: start a demo roleplay. Usage is incremented AT START (before the
+  // session row is created) so refreshing mid-session can't yield a 4th free run.
+  app.post("/api/demo/session", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const signup = await requireDemoSignup(req, res);
+    if (!signup) return;
+    if (isSessionLimitReached(signup.sessionsUsed)) {
+      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0 });
+    }
+    const scenario = await getDemoScenario();
+    if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
+
+    // Increment usage FIRST so a failure after this point can't grant a free retry.
+    const updatedSignup = await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
+
+    let openingTranscript = "[]";
+    try {
+      const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
+      if (openingText) {
+        const openingMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: openingText,
+          audioStatus: "none",
+          msgId: randomUUID(),
+          timestamp: new Date().toISOString(),
+        });
+        openingTranscript = JSON.stringify([openingMsg]);
+      }
+    } catch (err) {
+      console.error("Demo opening generation failed; starting empty:", err);
+    }
+
+    const session = await storage.createDemoSession({
+      signupId: signup.id,
+      email: signup.email,
+      scenarioId: scenario.id,
+      status: "in_progress",
+      transcript: openingTranscript,
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    });
+
+    res.json({
+      session: publicDemoSession(session),
+      remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1),
+      scenario: {
+        id: scenario.id,
+        slug: scenario.slug,
+        title: scenario.title,
+        briefing: scenario.briefing,
+        track: scenario.track,
+        gender: scenario.gender,
+      },
+    });
+  });
+
+  // Fetch a demo session's current state (used to poll for background audio).
+  app.get("/api/demo/session/:id", async (req, res) => {
+    const signup = await requireDemoSignup(req, res);
+    if (!signup) return;
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session || session.signupId !== signup.id) {
+      return res.status(404).json({ message: "Session not found" });
+    }
+    res.json({ session: publicDemoSession(session) });
+  });
+
+  // A conversational turn in the demo — mirrors POST /api/sessions/:id/message.
+  app.post("/api/demo/session/:id/message", async (req, res) => {
+    try {
+      if (!demoLimiter.check(clientIp(req))) {
+        return res.status(429).json({ message: "Too many requests. Please slow down." });
+      }
+      const signup = await requireDemoSignup(req, res);
+      if (!signup) return;
+      const session = await storage.getDemoSession(Number(req.params.id));
+      if (!session || session.signupId !== signup.id) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+      const scenario = await storage.getScenario(session.scenarioId);
+      if (!scenario) return res.status(404).json({ message: "Scenario not found" });
+
+      const { content, withAudio } = req.body ?? {};
+      const transcript = JSON.parse(session.transcript);
+      const consultantMsg = transcriptMessageSchema.parse({
+        role: "consultant",
+        content,
+        timestamp: new Date().toISOString(),
+      });
+      transcript.push(consultantMsg);
+
+      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty);
+      const msgId = randomUUID();
+      const customerMsg = transcriptMessageSchema.parse({
+        role: "customer",
+        content: customerReplyText,
+        audioStatus: withAudio ? "pending" : "none",
+        msgId,
+        timestamp: new Date().toISOString(),
+      });
+      transcript.push(customerMsg);
+
+      const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
+      res.json({ session: publicDemoSession(updated!) });
+
+      if (withAudio) {
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender))
+          .then(async (audioUrl) => {
+            const latest = await storage.getDemoSession(session.id);
+            if (!latest) return;
+            const t: TranscriptMessage[] = JSON.parse(latest.transcript);
+            const idx = t.findIndex((m) => m.msgId === msgId);
+            if (idx !== -1) {
+              t[idx] = { ...t[idx], audioUrl, audioStatus: "ready" };
+              await storage.updateDemoSession(session.id, { transcript: JSON.stringify(t) });
+            }
+          })
+          .catch(async (err) => {
+            console.error("Demo background TTS failed:", err);
+            const latest = await storage.getDemoSession(session.id);
+            if (!latest) return;
+            const t: TranscriptMessage[] = JSON.parse(latest.transcript);
+            const idx = t.findIndex((m) => m.msgId === msgId);
+            if (idx !== -1) {
+              t[idx] = { ...t[idx], audioStatus: "failed" };
+              await storage.updateDemoSession(session.id, { transcript: JSON.stringify(t) });
+            }
+          });
+      }
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to process message" });
+    }
+  });
+
+  // End & score a demo session with the SAME rubric as real sessions. The demo
+  // ends naturally (no time limit, no incomplete-consultation gate).
+  app.post("/api/demo/session/:id/complete", async (req, res) => {
+    try {
+      const signup = await requireDemoSignup(req, res);
+      if (!signup) return;
+      const session = await storage.getDemoSession(Number(req.params.id));
+      if (!session || session.signupId !== signup.id) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+      const transcript = JSON.parse(session.transcript);
+      const scenario = await storage.getScenario(session.scenarioId);
+      const track = scenarioTrack(scenario?.track);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track);
+      const updated = await storage.updateDemoSession(session.id, {
+        status: "completed",
+        score: overall,
+        rubricScores: JSON.stringify(rubric),
+        feedback,
+        completedAt: new Date().toISOString(),
+      });
+      res.json({ session: publicDemoSession(updated!) });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to score session" });
+    }
+  });
+
+  // Post-demo CTA lead capture. Reuses the existing contact/lead flow (creates a
+  // contact + fires the same best-effort notification email). The team-size
+  // answer is folded into the message so it shows in the admin CRM.
+  app.post("/api/demo/lead", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      name: z.string().trim().min(1, "Name is required").max(200),
+      email: z.string().trim().email("A valid email is required").max(200),
+      company: z.string().trim().max(200).optional().or(z.literal("")),
+      teamSize: z.string().trim().max(200).optional().or(z.literal("")),
+      message: z.string().trim().max(2000).optional().or(z.literal("")),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { name, email, company, teamSize, message } = parsed.data;
+    const scenario = await getDemoScenario();
+    const question = ctaSeatQuestion(scenario?.track);
+    const noteParts = [
+      teamSize ? `${question} — ${teamSize}` : "",
+      message || "",
+    ].filter(Boolean);
+    const lead = await storage.createLead({
+      name,
+      email: normalizeEmail(email),
+      company: company || null,
+      message: noteParts.join("\n\n") || null,
+      source: "role_play",
+      type: "consulting",
+      priority: DEFAULT_PRIORITY,
+      status: "new",
+      createdAt: new Date().toISOString(),
+    });
+    void sendLeadNotification(lead);
+    res.status(201).json({ ok: true, id: lead.id });
+  });
+
+  // ===========================================================================
   // Admin: top-level Solve Admin account (separate cookie/session from users)
   // ===========================================================================
 
@@ -1259,6 +1599,41 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       ], csvRows);
     }
     res.json({ rows, totalMrr, activeOffices });
+  });
+
+  // Free Voice Demo usage: one row per email with verification state, all-time
+  // sessions used (capped at 3), and how many of those were completed/scored.
+  app.get("/api/admin/demo", requireAdmin, async (req, res) => {
+    const [signups, sessions] = await Promise.all([
+      storage.listDemoSignups(),
+      storage.listDemoSessions(),
+    ]);
+    const completedByEmail = new Map<string, number>();
+    for (const s of sessions) {
+      if (s.status === "completed") {
+        completedByEmail.set(s.email, (completedByEmail.get(s.email) ?? 0) + 1);
+      }
+    }
+    const rows = signups.map((s) => ({
+      id: s.id,
+      email: s.email,
+      verified: s.verified ? "yes" : "no",
+      sessionsUsed: s.sessionsUsed,
+      maxSessions: MAX_DEMO_SESSIONS,
+      completedSessions: completedByEmail.get(s.email) ?? 0,
+      createdAt: s.createdAt,
+      lastSentAt: s.lastSentAt ?? "",
+    }));
+    sendData(req, res, "demo.csv", [
+      { key: "id", header: "ID" },
+      { key: "email", header: "Email" },
+      { key: "verified", header: "Verified" },
+      { key: "sessionsUsed", header: "Sessions Used" },
+      { key: "maxSessions", header: "Max" },
+      { key: "completedSessions", header: "Completed" },
+      { key: "createdAt", header: "First Seen" },
+      { key: "lastSentAt", header: "Last Code Sent" },
+    ], rows);
   });
 }
 

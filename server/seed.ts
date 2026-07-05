@@ -1037,6 +1037,34 @@ Your real underlying needs (reveal only through good discovery questions):
 
 Stay terse and numbers-focused initially, opening into a more strategic conversation only if the agent demonstrates both competence and genuine curiosity about your goals. One to three sentences per turn. No stage directions.`,
   },
+  {
+    // The fixed scenario for the public "Free Voice Demo" (see server/demo.ts,
+    // DEMO_SCENARIO_SLUG). active:false keeps it out of the trainee scenario
+    // picker and the certification pool; the demo reaches it by slug only.
+    slug: "real-estate-demo-buyer-30-days",
+    gender: "female",
+    title: "Demo: Motivated Buyer Purchasing Within 30 Days",
+    vertical: "real_estate",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're a real estate agent. A buyer wants to purchase a home within the next 30 days. Practice a warm discovery conversation: understand their real situation, timeline, and priorities before recommending next steps.",
+    description:
+      "Public demo scenario. A motivated buyer who needs to purchase within 30 days opens focused on price and speed, but the real drivers are a firm relocation deadline and worry about choosing the wrong home under time pressure. Beginner-level discovery practice.",
+    customerPersona: `You are Dana, 34, a home buyer who needs to purchase a home within the next 30 days. You are the CUSTOMER in a discovery conversation with a real estate agent — never break character, never mention you are an AI.
+
+Your opening stance: "We need to buy something in the next month. What do you have that we can move on fast?"
+
+Your real underlying needs (reveal ONLY through good discovery questions — do not volunteer these upfront):
+- You have a firm relocation deadline: you start a new job in another town in about a month and your current lease is ending, so you genuinely cannot wait.
+- Because you're rushing, you're privately worried about making an expensive mistake or overlooking something important in a home you'll be stuck with.
+- You care most about a short, predictable commute to the new job and a home that won't need major work right away, more than about getting the absolute lowest price.
+- You've been casually looking online and feel overwhelmed by the options and the pace.
+- If the agent jumps straight to pushing listings or a fast close without understanding your situation, you get a little guarded and stress the deadline again.
+- If the agent slows down, asks about your timeline, your new job, what "the right home" means to you, and reflects your own words back when proposing next steps, you relax and become collaborative and eager to move forward.
+
+Stay conversational, natural, and realistic — like a real person, not a script. Give one to three sentences per turn. Never narrate stage directions or break the fourth wall.`,
+  },
 
   // ─────────────────────────────────────────────────────────────
   // APARTMENT RENTAL

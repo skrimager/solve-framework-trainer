@@ -268,6 +268,49 @@ export const insertVisitorPageViewSchema = createInsertSchema(visitorPageViews).
 export type InsertVisitorPageView = z.infer<typeof insertVisitorPageViewSchema>;
 export type VisitorPageView = typeof visitorPageViews.$inferSelect;
 
+// A public "Free Voice Demo" signup, keyed by email. One row per email captures
+// the email-verification state AND the all-time usage counter that enforces the
+// 3-free-sessions-per-email limit. This is intentionally separate from the
+// seat-gated `users` table: demo visitors are anonymous and never become users,
+// so they must not touch office/seat billing. The email+6-digit-code
+// verification IS the auth for the demo (no shared login).
+export const demoSignups = pgTable("demo_signups", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  code: text("code"), // current 6-digit verification code (nullable once consumed/expired)
+  codeExpiresAt: text("code_expires_at"), // ISO timestamp; code is invalid past this
+  verified: boolean("verified").notNull().default(false), // flips true once any code is confirmed
+  sessionsUsed: integer("sessions_used").notNull().default(0), // all-time started demo sessions; capped at 3
+  createdAt: text("created_at").notNull(),
+  lastSentAt: text("last_sent_at"), // ISO timestamp of the most recent code email (for resend cadence/visibility)
+});
+
+export const insertDemoSignupSchema = createInsertSchema(demoSignups).omit({ id: true });
+export type InsertDemoSignup = z.infer<typeof insertDemoSignupSchema>;
+export type DemoSignup = typeof demoSignups.$inferSelect;
+
+// A single public demo roleplay attempt. Mirrors the fields of `sessions` that
+// the shared voice pipeline + scoring rubric touch (transcript/score/rubric/
+// feedback), but lives in its own table so anonymous demo traffic never mixes
+// with real trainee sessions, office analytics, or level progression.
+export const demoSessions = pgTable("demo_sessions", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").notNull().references(() => demoSignups.id),
+  email: text("email").notNull(), // denormalized for simple admin listing/filtering
+  scenarioId: integer("scenario_id").notNull(),
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed'
+  transcript: text("transcript").notNull().default("[]"), // same JSON shape as sessions.transcript
+  score: integer("score"),
+  rubricScores: text("rubric_scores"),
+  feedback: text("feedback"),
+  createdAt: text("created_at").notNull(),
+  completedAt: text("completed_at"),
+});
+
+export const insertDemoSessionSchema = createInsertSchema(demoSessions).omit({ id: true });
+export type InsertDemoSession = z.infer<typeof insertDemoSessionSchema>;
+export type DemoSession = typeof demoSessions.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request

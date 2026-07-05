@@ -1,4 +1,5 @@
 import type { Lead } from "@shared/schema";
+import { buildVerificationEmail } from "./demo";
 
 // Lead-notification emails via the Resend HTTP API. No SDK dependency: we POST
 // directly to https://api.resend.com/emails with a plain fetch.
@@ -116,5 +117,45 @@ export async function sendLeadNotification(lead: Lead): Promise<void> {
       `[notifications] Failed to send lead notification email for lead ${lead.id}:`,
       err,
     );
+  }
+}
+
+// Sends a public demo's 6-digit verification code to the visitor's own email,
+// reusing the exact same Resend transport as sendLeadNotification. Unlike the
+// best-effort lead email, the code IS the demo's auth, so this returns whether
+// the send succeeded — the caller surfaces a retry to the visitor on false.
+export async function sendDemoVerificationCode(email: string, code: string): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn(
+      "[notifications] RESEND_API_KEY is not set; cannot send demo verification code.",
+    );
+    return false;
+  }
+
+  try {
+    const { subject, html } = buildVerificationEmail(code);
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_ADDRESS,
+        to: [email],
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} for demo code to ${email}: ${detail}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to send demo verification code to ${email}:`, err);
+    return false;
   }
 }
