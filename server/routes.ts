@@ -18,7 +18,18 @@ import {
 } from "./certification";
 import { getVoiceForScenario } from "./voices";
 import { sendLeadNotification } from "./notifications";
-import { transcriptMessageSchema, type TranscriptMessage, type User } from "@shared/schema";
+import {
+  contactTypeSchema,
+  contactPatchSchema,
+  normalizeContactPatch,
+  buildContactUpdateEvents,
+  isFollowUpDue,
+  DEFAULT_TYPE,
+  DEFAULT_SOURCE,
+  DEFAULT_PRIORITY,
+  type ContactFilters,
+} from "./contacts";
+import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
@@ -924,18 +935,24 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       company: z.string().trim().max(200).optional().or(z.literal("")),
       message: z.string().trim().max(2000).optional().or(z.literal("")),
       source: z.string().trim().max(100).optional().or(z.literal("")),
+      // Optional CRM tag. The marketing forms don't send this yet (Phase 2), so
+      // it defaults to "general"; a caller may specify any contact type.
+      type: contactTypeSchema.optional(),
     });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
-    const { name, email, company, message, source } = parsed.data;
+    const { name, email, company, message, source, type } = parsed.data;
     const lead = await storage.createLead({
       name,
       email,
       company: company || null,
       message: message || null,
-      source: source || null,
+      // Default to the marketing-site origin/tag unless the caller specifies.
+      source: source || DEFAULT_SOURCE,
+      type: type || DEFAULT_TYPE,
+      priority: DEFAULT_PRIORITY,
       status: "new",
       createdAt: new Date().toISOString(),
     });
@@ -1096,6 +1113,95 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     const updated = await storage.updateLeadStatus(Number(req.params.id), parsed.data.status);
     if (!updated) return res.status(404).json({ message: "Lead not found" });
     res.json(updated);
+  });
+
+  // ---- Unified CRM contacts (evolved leads) --------------------------------
+
+  // Serialize a contact for the admin UI, adding the derived `followUpDue` flag.
+  function serializeContact(c: Contact): Record<string, unknown> {
+    return {
+      id: c.id,
+      name: c.name,
+      email: c.email,
+      company: c.company ?? "",
+      message: c.message ?? "",
+      status: c.status,
+      type: c.type,
+      source: c.source,
+      priority: c.priority,
+      owner: c.owner ?? "",
+      followUpDate: c.followUpDate ?? "",
+      followUpDue: isFollowUpDue(c.followUpDate),
+      createdAt: c.createdAt,
+    };
+  }
+
+  // List contacts with optional filters (type, priority, status, owner) and an
+  // optional sort=followUp (soonest/most-overdue first). Supports ?format=csv.
+  app.get("/api/admin/contacts", requireAdmin, async (req, res) => {
+    const q = req.query;
+    const filters: ContactFilters = {
+      type: typeof q.type === "string" && q.type ? q.type : undefined,
+      priority: typeof q.priority === "string" && q.priority ? q.priority : undefined,
+      status: typeof q.status === "string" && q.status ? q.status : undefined,
+      owner: typeof q.owner === "string" && q.owner ? q.owner : undefined,
+    };
+    const sort = q.sort === "followUp" ? "followUp" : undefined;
+    const list = await storage.listContacts(filters, sort);
+    const rows = list.map(serializeContact);
+    sendData(req, res, "contacts.csv", [
+      { key: "id", header: "ID" },
+      { key: "name", header: "Name" },
+      { key: "email", header: "Email" },
+      { key: "company", header: "Company" },
+      { key: "type", header: "Type" },
+      { key: "source", header: "Source" },
+      { key: "priority", header: "Priority" },
+      { key: "status", header: "Status" },
+      { key: "owner", header: "Owner" },
+      { key: "followUpDate", header: "Follow-up" },
+      { key: "message", header: "Message" },
+      { key: "createdAt", header: "Created" },
+    ], rows);
+  });
+
+  // Full timeline for one contact, newest first.
+  app.get("/api/admin/contacts/:id/events", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const contact = await storage.getContact(id);
+    if (!contact) return res.status(404).json({ message: "Contact not found" });
+    const events = await storage.listContactEvents(id);
+    res.json({ rows: events });
+  });
+
+  // Update any of status/priority/owner/followUpDate and/or append a note. Each
+  // real change (and every note) is logged as a timeline event automatically.
+  app.patch("/api/admin/contacts/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const parsed = contactPatchSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const existing = await storage.getContact(id);
+    if (!existing) return res.status(404).json({ message: "Contact not found" });
+
+    const admin = (req as any).admin;
+    const actor = admin?.username ? String(admin.username) : "admin";
+    const now = new Date().toISOString();
+    const events = buildContactUpdateEvents(existing, parsed.data, { actor, now });
+
+    const columnPatch = normalizeContactPatch(parsed.data);
+    const updated = Object.keys(columnPatch).length
+      ? (await storage.updateContact(id, columnPatch)) ?? existing
+      : existing;
+
+    for (const event of events) {
+      await storage.createContactEvent(event);
+    }
+
+    res.json({ contact: serializeContact(updated), events });
   });
 
   app.get("/api/admin/users", requireAdmin, async (req, res) => {

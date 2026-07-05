@@ -23,6 +23,10 @@ const FIELD_LABELS: Record<string, string> = {
   message: "Message",
   source: "Source form",
   status: "Status",
+  type: "Type",
+  priority: "Priority",
+  owner: "Owner",
+  followUpDate: "Follow-up date",
   createdAt: "Timestamp",
 };
 

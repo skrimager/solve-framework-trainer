@@ -1,8 +1,9 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, leads, visitorPageViews, certificationAttempts } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc } from "drizzle-orm";
+import { filterContacts, sortByFollowUp, type ContactFilters } from "./contacts";
 
 const { Pool } = pg;
 
@@ -54,6 +55,16 @@ export interface IStorage {
 
   getAdminByUsername(username: string): Promise<AdminUser | undefined>;
   createAdmin(admin: InsertAdminUser): Promise<AdminUser>;
+
+  // Contact CRM. `createLead`/`listLeads`/`updateLeadStatus` are retained as
+  // backward-compatible aliases for the public /api/leads flow and the legacy
+  // /api/admin/leads routes (a Lead is a Contact).
+  createContact(contact: InsertContact): Promise<Contact>;
+  listContacts(filters?: ContactFilters, sort?: "followUp"): Promise<Contact[]>;
+  getContact(id: number): Promise<Contact | undefined>;
+  updateContact(id: number, patch: Partial<Contact>): Promise<Contact | undefined>;
+  createContactEvent(event: InsertContactEvent): Promise<ContactEvent>;
+  listContactEvents(contactId: number): Promise<ContactEvent[]>;
 
   createLead(lead: InsertLead): Promise<Lead>;
   listLeads(): Promise<Lead[]>;
@@ -213,17 +224,62 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
-  async createLead(lead: InsertLead): Promise<Lead> {
-    const rows = await db.insert(leads).values(lead).returning();
+  async createContact(contact: InsertContact): Promise<Contact> {
+    const rows = await db.insert(contacts).values(contact).returning();
+    const created = rows[0];
+    // Every contact starts its timeline with a "created" event so no history is empty.
+    await db.insert(contactEvents).values({
+      contactId: created.id,
+      eventType: "created",
+      description: "Lead created",
+      actor: "system",
+      createdAt: created.createdAt,
+    });
+    return created;
+  }
+
+  async listContacts(filters: ContactFilters = {}, sort?: "followUp"): Promise<Contact[]> {
+    const all = await db.select().from(contacts).orderBy(desc(contacts.id));
+    const filtered = filterContacts(all, filters);
+    return sort === "followUp" ? sortByFollowUp(filtered, "asc") : filtered;
+  }
+
+  async getContact(id: number): Promise<Contact | undefined> {
+    const rows = await db.select().from(contacts).where(eq(contacts.id, id));
     return rows[0];
   }
 
+  async updateContact(id: number, patch: Partial<Contact>): Promise<Contact | undefined> {
+    const { id: _ignore, ...rest } = patch as Partial<Contact> & { id?: number };
+    const rows = await db.update(contacts).set(rest).where(eq(contacts.id, id)).returning();
+    return rows[0];
+  }
+
+  async createContactEvent(event: InsertContactEvent): Promise<ContactEvent> {
+    const rows = await db.insert(contactEvents).values(event).returning();
+    return rows[0];
+  }
+
+  async listContactEvents(contactId: number): Promise<ContactEvent[]> {
+    // Newest first — most useful ordering for the dashboard timeline.
+    return db
+      .select()
+      .from(contactEvents)
+      .where(eq(contactEvents.contactId, contactId))
+      .orderBy(desc(contactEvents.id));
+  }
+
+  // --- Backward-compatible lead aliases ---
+  async createLead(lead: InsertLead): Promise<Lead> {
+    return this.createContact(lead);
+  }
+
   async listLeads(): Promise<Lead[]> {
-    return db.select().from(leads).orderBy(desc(leads.id));
+    return db.select().from(contacts).orderBy(desc(contacts.id));
   }
 
   async updateLeadStatus(id: number, status: string): Promise<Lead | undefined> {
-    const rows = await db.update(leads).set({ status }).where(eq(leads.id, id)).returning();
+    const rows = await db.update(contacts).set({ status }).where(eq(contacts.id, id)).returning();
     return rows[0];
   }
 

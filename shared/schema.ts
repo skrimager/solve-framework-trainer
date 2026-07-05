@@ -190,25 +190,65 @@ export const insertAdminUserSchema = createInsertSchema(adminUsers).omit({
 export type InsertAdminUser = z.infer<typeof insertAdminUserSchema>;
 export type AdminUser = typeof adminUsers.$inferSelect;
 
-// A lead captured from the marketing site's "Request Access" form (replaces the
-// old mailto: CTA). status is admin-updatable inline: new | contacted | converted.
-export const leads = pgTable("leads", {
+// The unified CRM contact table (evolved from the original marketing-site
+// `leads` table — see migration 0007). EVERY contact, regardless of source
+// (website, book, speaking, consulting, referral, role-play, manual entry),
+// lives here tagged by `type`, with full history in `contact_events`.
+// The public marketing "Request Access" form still POSTs to /api/leads and
+// creates a row here with type "general" / source "website".
+export const contacts = pgTable("contacts", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull(),
   company: text("company"), // office / company name (optional)
-  message: text("message"), // optional free-text
-  status: text("status").notNull().default("new"), // 'new' | 'contacted' | 'converted'
-  source: text("source"), // which CTA/plan the lead came from (optional)
+  message: text("message"), // optional free-text from the submitter
+  status: text("status").notNull().default("new"), // pipeline stage: 'new' | 'contacted' | 'converted'
+  // What kind of contact this is. Drives future routing/forms (Phase 2+):
+  // 'speaking' | 'consulting' | 'book' | 'training' | 'role_play' | 'general'.
+  type: text("type").notNull().default("general"),
+  // Where the contact originated: 'website' | 'book' | 'speaking' | 'referral'
+  // | 'role_play' | 'manual' (extensible). Existing/marketing rows -> 'website'.
+  source: text("source").notNull().default("website"),
+  priority: text("priority").notNull().default("medium"), // 'high' | 'medium' | 'low'
+  owner: text("owner"), // team member handling it (nullable; one admin today, designed for many)
+  followUpDate: text("follow_up_date"), // ISO timestamp of the next scheduled follow-up (nullable)
   createdAt: text("created_at").notNull(),
 });
 
-export const insertLeadSchema = createInsertSchema(leads).omit({
+export const insertContactSchema = createInsertSchema(contacts).omit({
   id: true,
 });
 
-export type InsertLead = z.infer<typeof insertLeadSchema>;
-export type Lead = typeof leads.$inferSelect;
+export type InsertContact = z.infer<typeof insertContactSchema>;
+export type Contact = typeof contacts.$inferSelect;
+
+// Backward-compatible aliases. The public lead-capture endpoint and the
+// notification email module still speak in terms of "Lead"; a Lead is simply a
+// Contact. Kept so those call sites need no churn during this phase.
+export type Lead = Contact;
+export type InsertLead = InsertContact;
+export const leads = contacts;
+export const insertLeadSchema = insertContactSchema;
+
+// Append-only timeline of every meaningful change to a contact (created, status
+// changed, note added, priority/owner/follow-up changed). Populated automatically
+// by the admin API — see server/contacts.ts. `actor` is who made the change
+// ("admin"/"system" for now; designed for named team members later).
+export const contactEvents = pgTable("contact_events", {
+  id: serial("id").primaryKey(),
+  contactId: integer("contact_id").notNull().references(() => contacts.id),
+  eventType: text("event_type").notNull(), // 'created' | 'status_changed' | 'priority_changed' | 'owner_changed' | 'follow_up_changed' | 'note'
+  description: text("description").notNull(), // human readable, e.g. "Status changed from new to contacted"
+  actor: text("actor"), // who performed the change (nullable)
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertContactEventSchema = createInsertSchema(contactEvents).omit({
+  id: true,
+});
+
+export type InsertContactEvent = z.infer<typeof insertContactEventSchema>;
+export type ContactEvent = typeof contactEvents.$inferSelect;
 
 // An anonymous page-view logged by the marketing site's tracking snippet. No PII,
 // no cookies/fingerprinting — visitorToken is a fresh random per page load.

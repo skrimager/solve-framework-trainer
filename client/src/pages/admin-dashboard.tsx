@@ -9,8 +9,8 @@ import {
   TableRow,
   TableCell,
 } from "@/components/ui/table";
-import { adminApi, type AdminSection } from "@/lib/adminApi";
-import { Download, LogOut, Users, FileText, Eye, DollarSign } from "lucide-react";
+import { adminApi, type AdminSection, type AdminContact, type ContactEvent } from "@/lib/adminApi";
+import { Download, LogOut, Users, FileText, Eye, DollarSign, X } from "lucide-react";
 
 const NAVY = "#0A1A30";
 const NAVY_DARK = "#05162D";
@@ -18,10 +18,18 @@ const ORANGE = "#E06D00";
 
 const SECTIONS: { key: AdminSection; label: string; icon: any }[] = [
   { key: "visitors", label: "Visitors", icon: Eye },
-  { key: "leads", label: "Leads", icon: FileText },
+  { key: "leads", label: "Contacts", icon: FileText },
   { key: "users", label: "All Users", icon: Users },
   { key: "sales", label: "Sales", icon: DollarSign },
 ];
+
+const CONTACT_TYPES = ["speaking", "consulting", "book", "training", "role_play", "general"];
+const CONTACT_PRIORITIES = ["high", "medium", "low"];
+const CONTACT_STATUSES = ["new", "contacted", "converted"];
+
+function priorityColor(p: string): string {
+  return p === "high" ? "#E0483C" : p === "medium" ? "#E0A800" : "#3CA0E0";
+}
 
 export default function AdminDashboard() {
   const [, navigate] = useLocation();
@@ -99,6 +107,15 @@ export default function AdminDashboard() {
 }
 
 function SectionView({ section }: { section: AdminSection }) {
+  // The Leads tab is now the full CRM Contacts view, which manages its own
+  // filters/fetching/detail panel independently of the generic table sections.
+  if (section === "leads") {
+    return <ContactsSection />;
+  }
+  return <GenericSectionView section={section} />;
+}
+
+function GenericSectionView({ section }: { section: AdminSection }) {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -152,7 +169,6 @@ function SectionView({ section }: { section: AdminSection }) {
         {!loading && !error && data && (
           <>
             {section === "visitors" && <VisitorsTable rows={data.rows} />}
-            {section === "leads" && <LeadsTable rows={data.rows} onChanged={load} />}
             {section === "users" && <UsersTable rows={data.rows} />}
             {section === "sales" && <SalesTable rows={data.rows} />}
           </>
@@ -201,50 +217,331 @@ function VisitorsTable({ rows }: { rows: any[] }) {
   );
 }
 
-function LeadsTable({ rows, onChanged }: { rows: any[]; onChanged: () => void }) {
-  async function change(id: number, status: string) {
-    await adminApi.updateLeadStatus(id, status);
-    onChanged();
-  }
+const selectCls = "bg-white/10 text-white text-sm rounded px-2 py-1 border border-white/20";
+
+function Tag({ label }: { label: string }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow className="hover:bg-transparent border-white/10">
-          <TableHead className={headCls}>Name</TableHead>
-          <TableHead className={headCls}>Email</TableHead>
-          <TableHead className={headCls}>Company</TableHead>
-          <TableHead className={headCls}>Message</TableHead>
-          <TableHead className={headCls}>Source</TableHead>
-          <TableHead className={headCls}>Status</TableHead>
-          <TableHead className={headCls}>Submitted</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 && <EmptyRow span={7} />}
-        {rows.map((r) => (
-          <TableRow key={r.id} className="border-white/10" data-testid={`row-lead-${r.id}`}>
-            <TableCell className={cellCls}>{r.name}</TableCell>
-            <TableCell className={cellCls}>{r.email}</TableCell>
-            <TableCell className={cellCls}>{r.company || "-"}</TableCell>
-            <TableCell className="text-white/80 max-w-xs truncate" title={r.message}>{r.message || "-"}</TableCell>
-            <TableCell className="text-white/60 text-xs">{r.source || "-"}</TableCell>
-            <TableCell>
-              <select
-                value={r.status}
-                onChange={(e) => change(r.id, e.target.value)}
-                data-testid={`select-lead-status-${r.id}`}
-                className="bg-white/10 text-white text-sm rounded px-2 py-1 border border-white/20"
-              >
-                <option value="new">new</option>
-                <option value="contacted">contacted</option>
-                <option value="converted">converted</option>
-              </select>
-            </TableCell>
-            <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <span className="inline-block rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-white/10 text-white/70 border border-white/15">
+      {label}
+    </span>
+  );
+}
+
+function ContactsSection() {
+  const [rows, setRows] = useState<AdminContact[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [filters, setFilters] = useState<{ type: string; priority: string; status: string }>({
+    type: "",
+    priority: "",
+    status: "",
+  });
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await adminApi.listContacts({ ...filters, sort: "followUp" });
+      setRows(res.rows);
+    } catch {
+      setError("Failed to load data.");
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const patch = useCallback(
+    async (id: number, p: Parameters<typeof adminApi.updateContact>[1]) => {
+      await adminApi.updateContact(id, p);
+      load();
+    },
+    [load],
+  );
+
+  const selected = rows?.find((r) => r.id === selectedId) ?? null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Contacts</h1>
+          {rows && <p className="text-white/60 text-sm mt-1">{rows.length} contact(s)</p>}
+        </div>
+        <Button
+          onClick={() => adminApi.downloadContactsCsv(filters)}
+          style={{ backgroundColor: ORANGE, color: "white" }}
+          data-testid="button-export-contacts"
+        >
+          <Download className="w-4 h-4 mr-2" />
+          Export CSV
+        </Button>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="text-white/60 text-xs">Type</label>
+        <select
+          className={selectCls}
+          value={filters.type}
+          data-testid="filter-contact-type"
+          onChange={(e) => setFilters((f) => ({ ...f, type: e.target.value }))}
+        >
+          <option value="">all</option>
+          {CONTACT_TYPES.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <label className="text-white/60 text-xs">Priority</label>
+        <select
+          className={selectCls}
+          value={filters.priority}
+          data-testid="filter-contact-priority"
+          onChange={(e) => setFilters((f) => ({ ...f, priority: e.target.value }))}
+        >
+          <option value="">all</option>
+          {CONTACT_PRIORITIES.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+        <label className="text-white/60 text-xs">Status</label>
+        <select
+          className={selectCls}
+          value={filters.status}
+          data-testid="filter-contact-status"
+          onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+        >
+          <option value="">all</option>
+          {CONTACT_STATUSES.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY }}>
+        {loading && <p className="p-6 text-white/50">Loading…</p>}
+        {error && <p className="p-6 text-red-300" data-testid="text-section-error">{error}</p>}
+        {!loading && !error && rows && (
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent border-white/10">
+                <TableHead className={headCls}>Name</TableHead>
+                <TableHead className={headCls}>Email</TableHead>
+                <TableHead className={headCls}>Tags</TableHead>
+                <TableHead className={headCls}>Priority</TableHead>
+                <TableHead className={headCls}>Owner</TableHead>
+                <TableHead className={headCls}>Follow-up</TableHead>
+                <TableHead className={headCls}>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 && <EmptyRow span={7} />}
+              {rows.map((r) => (
+                <TableRow
+                  key={r.id}
+                  className="border-white/10 cursor-pointer hover:bg-white/5"
+                  data-testid={`row-contact-${r.id}`}
+                  onClick={() => setSelectedId(r.id)}
+                >
+                  <TableCell className={cellCls}>{r.name}</TableCell>
+                  <TableCell className={cellCls}>{r.email}</TableCell>
+                  <TableCell>
+                    <div className="flex gap-1">
+                      <Tag label={r.type} />
+                      <Tag label={r.source} />
+                    </div>
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-full"
+                        style={{ backgroundColor: priorityColor(r.priority) }}
+                      />
+                      <select
+                        value={r.priority}
+                        onChange={(e) => patch(r.id, { priority: e.target.value })}
+                        data-testid={`select-contact-priority-${r.id}`}
+                        className={selectCls}
+                      >
+                        {CONTACT_PRIORITIES.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <input
+                      defaultValue={r.owner}
+                      placeholder="unassigned"
+                      data-testid={`input-contact-owner-${r.id}`}
+                      onBlur={(e) => {
+                        if (e.target.value !== r.owner) patch(r.id, { owner: e.target.value });
+                      }}
+                      className={`${selectCls} w-28`}
+                    />
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        defaultValue={(r.followUpDate || "").slice(0, 10)}
+                        data-testid={`input-contact-followup-${r.id}`}
+                        onChange={(e) => patch(r.id, { followUpDate: e.target.value })}
+                        className={selectCls}
+                      />
+                      {r.followUpDue && (
+                        <span
+                          className="text-[10px] uppercase font-semibold text-red-300"
+                          data-testid={`badge-followup-due-${r.id}`}
+                        >
+                          Due
+                        </span>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <select
+                      value={r.status}
+                      onChange={(e) => patch(r.id, { status: e.target.value })}
+                      data-testid={`select-contact-status-${r.id}`}
+                      className={selectCls}
+                    >
+                      {CONTACT_STATUSES.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {selected && (
+        <ContactDetail
+          contact={selected}
+          onClose={() => setSelectedId(null)}
+          onChanged={load}
+        />
+      )}
+    </div>
+  );
+}
+
+function ContactDetail({
+  contact,
+  onClose,
+  onChanged,
+}: {
+  contact: AdminContact;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [events, setEvents] = useState<ContactEvent[] | null>(null);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const loadEvents = useCallback(async () => {
+    try {
+      const res = await adminApi.listContactEvents(contact.id);
+      setEvents(res.rows);
+    } catch {
+      setEvents([]);
+    }
+  }, [contact.id]);
+
+  useEffect(() => {
+    loadEvents();
+  }, [loadEvents]);
+
+  async function addNote() {
+    const text = note.trim();
+    if (!text) return;
+    setSaving(true);
+    try {
+      await adminApi.updateContact(contact.id, { note: text });
+      setNote("");
+      await loadEvents();
+      onChanged();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/50"
+      onClick={onClose}
+      data-testid="contact-detail-overlay"
+    >
+      <div
+        className="w-full max-w-md h-full overflow-auto p-6 border-l border-white/10"
+        style={{ backgroundColor: NAVY }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white">{contact.name}</h2>
+            <p className="text-white/60 text-sm">{contact.email}</p>
+          </div>
+          <button onClick={onClose} data-testid="button-close-detail" className="text-white/60 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Tag label={contact.type} />
+          <Tag label={contact.source} />
+          <Tag label={`priority: ${contact.priority}`} />
+          <Tag label={`status: ${contact.status}`} />
+          {contact.owner && <Tag label={`owner: ${contact.owner}`} />}
+          {contact.followUpDate && <Tag label={`follow-up: ${contact.followUpDate.slice(0, 10)}`} />}
+        </div>
+        {contact.message && <p className="mt-3 text-white/70 text-sm whitespace-pre-wrap">{contact.message}</p>}
+
+        <div className="mt-6">
+          <label className="text-white/80 text-sm font-semibold">Add note</label>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            data-testid="input-add-note"
+            rows={3}
+            className="mt-1 w-full bg-white/10 text-white text-sm rounded px-3 py-2 border border-white/20"
+            placeholder="Log a call, email, or context…"
+          />
+          <Button
+            onClick={addNote}
+            disabled={saving || !note.trim()}
+            data-testid="button-add-note"
+            className="mt-2"
+            style={{ backgroundColor: ORANGE, color: "white" }}
+          >
+            {saving ? "Saving…" : "Add note"}
+          </Button>
+        </div>
+
+        <div className="mt-6">
+          <h3 className="text-white/80 text-sm font-semibold mb-2">Timeline</h3>
+          {events === null && <p className="text-white/50 text-sm">Loading…</p>}
+          {events && events.length === 0 && <p className="text-white/40 text-sm">No events yet.</p>}
+          <ul className="space-y-3">
+            {events?.map((ev) => (
+              <li key={ev.id} className="border-l-2 border-white/15 pl-3" data-testid={`event-${ev.id}`}>
+                <p className="text-white/90 text-sm">{ev.description}</p>
+                <p className="text-white/40 text-xs">
+                  {ev.eventType} · {ev.actor || "system"} · {ev.createdAt.slice(0, 19).replace("T", " ")}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
   );
 }
 
