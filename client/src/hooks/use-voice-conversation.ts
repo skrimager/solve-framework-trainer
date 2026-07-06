@@ -37,9 +37,13 @@ const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 const SILENT_AUDIO =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
-// After the speaker stops talking for this long in voice mode, auto-send. Tight
-// enough to feel responsive, long enough to ride over natural mid-sentence pauses.
-const SILENCE_AUTOSEND_MS = 1100;
+// After the speaker stops talking for this long in voice mode, auto-send.
+// Deliberately on the forgiving side: people pause naturally mid-thought
+// ("I just... don't want any increases in lot rent"), and cutting them off there
+// submits a broken half-sentence to the AI. This must ride over those pauses
+// while still feeling responsive. Overridable per-caller via
+// `UseVoiceConversationOptions.silenceAutoSendMs`.
+const DEFAULT_SILENCE_AUTOSEND_MS = 1500;
 
 export interface UseVoiceConversationOptions {
   // Send one turn. `withAudio` reflects whether voice mode is on so the caller's
@@ -47,6 +51,9 @@ export interface UseVoiceConversationOptions {
   send: (content: string, withAudio: boolean) => void;
   // Whether a send is currently in flight (disables the mic / re-entrancy).
   isSending: boolean;
+  // How long (ms) of continuous silence auto-submits the current utterance in
+  // voice mode. Higher = more forgiving of natural mid-sentence pauses.
+  silenceAutoSendMs?: number;
 }
 
 // The complete, self-contained voice roleplay engine (Web Speech API + the
@@ -55,7 +62,17 @@ export interface UseVoiceConversationOptions {
 // there is no parallel/forked voice system. The caller owns transport (which
 // endpoint to POST to and how to store the session) and feeds replies back in
 // via handleReply()/syncPendingAudio().
-export function useVoiceConversation({ send, isSending }: UseVoiceConversationOptions) {
+export function useVoiceConversation({
+  send,
+  isSending,
+  silenceAutoSendMs = DEFAULT_SILENCE_AUTOSEND_MS,
+}: UseVoiceConversationOptions) {
+  // Keep the latest threshold in a ref so the recognition callback (created once
+  // on mount) always reads the current value without being re-registered.
+  const silenceAutoSendMsRef = useRef(silenceAutoSendMs);
+  useEffect(() => {
+    silenceAutoSendMsRef.current = silenceAutoSendMs;
+  }, [silenceAutoSendMs]);
   const [draft, setDraft] = useState("");
   // A single "Voice mode" toggle governs the whole experience. ON = fully
   // automatic phone-call-style conversation (auto TTS + auto listen). OFF =
@@ -249,7 +266,7 @@ export function useVoiceConversation({ send, isSending }: UseVoiceConversationOp
           if (draftBeforeListening.current.trim()) {
             handleSendRef.current();
           }
-        }, SILENCE_AUTOSEND_MS);
+        }, silenceAutoSendMsRef.current);
       }
     };
     recognition.onerror = () => {
