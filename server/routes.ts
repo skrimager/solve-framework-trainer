@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   normalizeTrack,
   drawExam,
@@ -494,6 +494,13 @@ export async function registerRoutes(
       });
       transcript.push(consultantMsg);
 
+      // If the consultant appears to be wrapping up (goodbye, "here's my card",
+      // "I'll follow up", etc.), we do NOT silently end the session or silently
+      // keep it open. We still let the persona reply naturally, but flag the turn
+      // so the client can raise an explicit checkpoint asking whether to end and
+      // score now or continue the conversation.
+      const closeCheckpoint = detectCloseIntent(content);
+
       const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty);
 
       const msgId = randomUUID();
@@ -510,7 +517,7 @@ export async function registerRoutes(
       const updated = await storage.updateSession(session.id, {
         transcript: JSON.stringify(transcript),
       });
-      res.json(updated);
+      res.json({ ...updated, closeCheckpoint });
 
       // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
       if (withAudio) {
