@@ -1,7 +1,19 @@
+import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores } from "@shared/schema";
 
 const client = new OpenAI();
+
+// Derives a stable `prompt_cache_key` from the unchanging prefix of a prompt.
+// OpenAI's Responses API caches prompts >=1024 tokens automatically by hashing
+// the request prefix; `prompt_cache_key` is an optional routing hint that keeps
+// requests sharing the same stable prefix on the same cache, improving hit
+// rates. Keying on a hash of the stable prefix means every turn of the same
+// session (same persona/difficulty, same rubric) routes together while distinct
+// prefixes stay isolated. It never affects model output — purely cache routing.
+function cacheKeyForPrefix(stablePrefix: string): string {
+  return createHash("sha256").update(stablePrefix).digest("hex").slice(0, 32);
+}
 // Uses a real OpenAI model name for production (Render). In the Perplexity
 // sandbox dev environment, the proxy also accepts this and routes it through
 // the injected llm-api:website credential.
@@ -39,11 +51,14 @@ export async function getCustomerOpening(customerPersona: string, track: string 
     track === "leadership"
       ? `You are starting the conversation already frustrated, upset, or in conflict about something. Open with a short, natural line that introduces yourself by first name and makes your annoyance/complaint clear in one or two sentences (for example: "I'm Dana, and honestly I'm pretty frustrated right now — this is the second time this has happened"). Do NOT calmly explain the full root cause or what would satisfy you; the consultant has to draw that out. Output ONLY the spoken line, no labels or narration.`
       : `You are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
+  // Persona (stable across a session) leads; the per-track opening instruction
+  // follows. Ordering the stable persona first lets the provider cache it.
   const input = `${customerPersona}\n\n${openingInstruction}`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
     input,
+    prompt_cache_key: cacheKeyForPrefix(customerPersona),
   });
 
   return (response.output_text || "").trim();
@@ -77,21 +92,39 @@ export const CONVERSATION_REALISM_RULES = `Conversation realism (follow on EVERY
 - It is realistic to hold firm on a concern the consultant has NOT actually resolved — but express that by adding a new angle, a new detail, or a pointed follow-up question, not by repeating the same statement.
 - Keep each reply short and conversational — usually one to three sentences, the way people actually speak out loud.`;
 
+// The stable, session-invariant prefix of a customer-reply prompt: the persona,
+// the difficulty calibration, and the realism rules. These do NOT change from
+// turn to turn within a session (as long as persona/difficulty are unchanged),
+// so keeping them assembled as one byte-identical block that PRECEDES the
+// growing transcript lets OpenAI's automatic prefix caching serve them from
+// cache on turns 2, 3, 4, ... instead of re-billing them at full input rate.
+export function buildCustomerReplyStablePrefix(
+  customerPersona: string,
+  difficulty: string = "intermediate"
+): string {
+  const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
+  return `${customerPersona}\n\n${behavior}\n\n${CONVERSATION_REALISM_RULES}`;
+}
+
 // Builds the full prompt sent to the model for the customer's next reply. Kept
 // as a separate pure function (like buildWrittenGradingPrompt) so the prompt —
 // especially the anti-looping realism rules — can be unit-tested without
-// hitting the network.
+// hitting the network. Structure is STABLE-PREFIX-FIRST: the invariant
+// persona/difficulty/rules block, then the volatile transcript and per-turn
+// output instruction, so the prefix stays cacheable across turns.
 export function buildCustomerReplyPrompt(
   customerPersona: string,
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate"
 ): string {
+  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty);
+
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
+  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character, following the conversation realism rules above. Output ONLY the spoken line, no labels or narration.`;
 
-  const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
-  return `${customerPersona}\n\n${behavior}\n\n${CONVERSATION_REALISM_RULES}\n\nConversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character, following the conversation realism rules above. Output ONLY the spoken line, no labels or narration.`;
+  return `${stablePrefix}\n\n${volatile}`;
 }
 
 // Generates the simulated customer's next reply in a discovery-training role-play.
@@ -105,6 +138,7 @@ export async function getCustomerReply(
   const response = await client.responses.create({
     model: CHAT_MODEL,
     input,
+    prompt_cache_key: cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty)),
   });
 
   return (response.output_text || "").trim();
@@ -314,9 +348,15 @@ export async function scoreTranscript(
   const calibration = calibrationMap[difficulty] ?? calibrationMap.intermediate;
   const keys = isLeadership ? LEADERSHIP_RUBRIC_KEYS : CONSULTING_RUBRIC_KEYS;
 
+  // Stable rubric + calibration lead; the volatile transcript comes last so the
+  // rubric prefix (identical for every session at the same track/difficulty)
+  // can be served from cache.
+  const stablePrefix = `${system}\n\n${calibration}`;
+
   const response = await client.responses.create({
     model: CHAT_MODEL,
-    input: `${system}\n\n${calibration}\n\nTranscript:\n${transcriptText}`,
+    input: `${stablePrefix}\n\nTranscript:\n${transcriptText}`,
+    prompt_cache_key: cacheKeyForPrefix(stablePrefix),
   });
 
   const raw = (response.output_text || "").trim();
@@ -352,20 +392,37 @@ const defaultWrittenGradeResponder: WrittenGradeResponder = async (input) => {
   const response = await client.responses.create({
     model: CHAT_MODEL,
     input,
+    prompt_cache_key: cacheKeyForPrefix(buildWrittenGradingStablePrefix(input)),
   });
   return response.output_text || "";
 };
 
-export function buildWrittenGradingPrompt(prompt: string, rubric: string, answer: string): string {
+// The stable, per-question prefix of a grading prompt: the grading instruction,
+// the question, the rubric, and the output-format instruction. Only the
+// candidate's answer varies between submissions for the same question, so
+// placing the answer LAST keeps this prefix cacheable across candidates.
+export function buildWrittenGradingStablePrefix(prompt: string, rubric?: string): string {
+  // Called two ways: (prompt, rubric) when building, or (fullPrompt) to derive a
+  // cache key from an already-built prompt. When only one arg is given we key on
+  // everything up to the candidate's answer.
+  if (rubric === undefined) {
+    const marker = "\n\nCandidate's answer:";
+    const idx = prompt.indexOf(marker);
+    return idx === -1 ? prompt : prompt.slice(0, idx);
+  }
   return `You are grading a single free-text answer on a professional certification exam. Decide whether the candidate's answer satisfies the rubric.
 
 Question: ${prompt}
 
 Rubric for a correct answer: ${rubric}
 
-Candidate's answer: ${answer || "(no answer provided)"}
-
 Respond with ONLY valid JSON, no other text: {"correct": boolean, "reason": string}. Mark "correct" true only if the answer substantively meets the rubric.`;
+}
+
+export function buildWrittenGradingPrompt(prompt: string, rubric: string, answer: string): string {
+  return `${buildWrittenGradingStablePrefix(prompt, rubric)}
+
+Candidate's answer: ${answer || "(no answer provided)"}`;
 }
 
 // Retries a flaky async call a few times with a short backoff before giving
@@ -435,9 +492,14 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
     .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
     .join("\n");
 
+  // Stable instruction leads; the volatile transcript comes last so the
+  // instruction prefix is cacheable across calls.
+  const stablePrefix = `Read this discovery-training role-play transcript. Has the consultant proposed ANY recommendation, solution, product/option, or next step/close to the customer yet — even a tentative or partial one? Answer with ONLY the single word "yes" or "no".`;
+
   const response = await client.responses.create({
     model: CHAT_MODEL,
-    input: `Read this discovery-training role-play transcript. Has the consultant proposed ANY recommendation, solution, product/option, or next step/close to the customer yet — even a tentative or partial one? Answer with ONLY the single word "yes" or "no".\n\nTranscript:\n${transcriptText}`,
+    input: `${stablePrefix}\n\nTranscript:\n${transcriptText}`,
+    prompt_cache_key: cacheKeyForPrefix(stablePrefix),
   });
 
   const raw = (response.output_text || "").trim().toLowerCase();

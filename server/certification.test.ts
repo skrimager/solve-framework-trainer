@@ -251,6 +251,20 @@ describe("gradeWrittenAnswer (mocked responder)", () => {
     assert.ok(prompt.includes("(no answer provided)"));
   });
 
+  test("buildWrittenGradingPrompt places the volatile candidate answer LAST (after the stable question + rubric)", () => {
+    const prompt = buildWrittenGradingPrompt("What is discovery?", "Mentions uncovering needs", "You ask questions");
+    const questionIdx = prompt.indexOf("What is discovery?");
+    const rubricIdx = prompt.indexOf("Mentions uncovering needs");
+    const answerIdx = prompt.indexOf("Candidate's answer:");
+    assert.ok(questionIdx >= 0 && rubricIdx >= 0 && answerIdx >= 0);
+    // The stable per-question prefix (question + rubric + output format) must
+    // precede the candidate's answer so it can be cached across submissions.
+    assert.ok(questionIdx < answerIdx, "question should precede the candidate answer");
+    assert.ok(rubricIdx < answerIdx, "rubric should precede the candidate answer");
+    // The candidate answer must be the trailing content of the prompt.
+    assert.ok(prompt.trimEnd().endsWith("You ask questions"), "prompt must end with the candidate answer");
+  });
+
   test("a transient responder failure is retried and succeeds without surfacing an error", async () => {
     let calls = 0;
     const flakyThenOk = async () => {
