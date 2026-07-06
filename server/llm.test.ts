@@ -1,7 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildCustomerReplyPrompt, CONVERSATION_REALISM_RULES } from "./llm";
+import {
+  buildCustomerReplyPrompt,
+  buildCustomerReplyStablePrefix,
+  CONVERSATION_REALISM_RULES,
+} from "./llm";
 import type { TranscriptMessage } from "@shared/schema";
 
 const PERSONA = "You are Denise, 52, looking at a home in a manufactured-housing community.";
@@ -58,6 +62,53 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
   test("handles an empty transcript with a sensible placeholder", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, [], "beginner");
     assert.ok(prompt.includes("The consultant is about to greet you"));
+  });
+});
+
+describe("buildCustomerReplyPrompt - prompt-cache ordering (stable prefix first)", () => {
+  const transcript = [
+    msg("customer", "I just don't want any increases in lot rent."),
+    msg("consultant", "Can you tell me more about that?"),
+  ];
+
+  test("the stable prefix (persona + difficulty + rules) precedes the volatile transcript", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "advanced");
+    const personaIdx = prompt.indexOf(PERSONA);
+    const rulesIdx = prompt.indexOf(CONVERSATION_REALISM_RULES);
+    const transcriptIdx = prompt.indexOf("Conversation so far:");
+    // persona -> difficulty behavior -> realism rules must all come before the
+    // growing transcript so the prefix stays byte-identical (and cacheable)
+    // across turns.
+    assert.ok(personaIdx >= 0 && rulesIdx >= 0 && transcriptIdx >= 0);
+    assert.ok(personaIdx < rulesIdx, "persona should precede the realism rules");
+    assert.ok(rulesIdx < transcriptIdx, "realism rules should precede the transcript");
+  });
+
+  test("the prompt begins with the exact stable prefix block", () => {
+    const stable = buildCustomerReplyStablePrefix(PERSONA, "advanced");
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "advanced");
+    assert.ok(prompt.startsWith(stable), "prompt must start with the stable prefix");
+  });
+
+  test("the stable prefix is byte-identical across turns when persona/difficulty are unchanged", () => {
+    // The prefix must not vary as the transcript grows — that byte-identity is
+    // exactly what lets OpenAI serve it from cache on turns 2, 3, 4...
+    const turn1 = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const turn5 = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    assert.equal(turn1, turn5);
+
+    // And it is genuinely the leading substring of prompts built at different
+    // conversation lengths.
+    const shortPrompt = buildCustomerReplyPrompt(PERSONA, [], "intermediate");
+    const longPrompt = buildCustomerReplyPrompt(PERSONA, transcript, "intermediate");
+    assert.ok(shortPrompt.startsWith(turn1));
+    assert.ok(longPrompt.startsWith(turn1));
+  });
+
+  test("the stable prefix contains no volatile transcript content", () => {
+    const stable = buildCustomerReplyStablePrefix(PERSONA, "advanced");
+    assert.ok(!stable.includes("lot rent"));
+    assert.ok(!stable.includes("Conversation so far:"));
   });
 });
 
