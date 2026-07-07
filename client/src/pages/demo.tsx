@@ -291,10 +291,14 @@ function CodeStep({
             autoComplete="one-time-code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            placeholder="123456"
+            placeholder="Enter your 6-digit code"
             maxLength={6}
             data-testid="input-demo-code"
           />
+          <p className="text-sm text-muted-foreground" data-testid="text-code-help">
+            Check your email for your verification code. If it's not in your
+            inbox, look in your spam or junk folder.
+          </p>
         </div>
         {error && (
           <p className="text-sm text-destructive" data-testid="text-code-error">
@@ -308,7 +312,9 @@ function CodeStep({
         )}
         <Button
           type="submit"
-          className="w-full"
+          className={`w-full transition-shadow ${
+            code.trim().length === 6 ? "shadow-md" : ""
+          }`}
           disabled={!code.trim() || verify.isPending}
           data-testid="button-verify-code"
         >
