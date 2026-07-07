@@ -11,6 +11,11 @@ interface SpeechRecognitionEventLike extends Event {
   resultIndex: number;
   results: ArrayLike<SpeechRecognitionResultLike>;
 }
+// The error event carries an `error` code (e.g. "no-speech", "aborted",
+// "not-allowed") that lets us tell transient hiccups apart from fatal ones.
+interface SpeechRecognitionErrorEventLike extends Event {
+  error: string;
+}
 interface SpeechRecognitionLike extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
@@ -18,15 +23,23 @@ interface SpeechRecognitionLike extends EventTarget {
   start: () => void;
   stop: () => void;
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: Event) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
   onend: (() => void) | null;
 }
 declare global {
   interface Window {
     SpeechRecognition?: new () => SpeechRecognitionLike;
     webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitAudioContext?: typeof AudioContext;
   }
 }
+
+// Speech-recognition error codes that genuinely require the user to intervene
+// (the browser blocked the mic). Everything else — most importantly "no-speech"
+// and "aborted", which fire routinely during hands-free listening whenever the
+// speaker pauses before replying — is transient and must NOT strand the loop in
+// a tap-to-continue fallback, or the conversation stops being hands-free.
+const FATAL_RECOGNITION_ERRORS = new Set(["not-allowed", "service-not-allowed"]);
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
@@ -36,6 +49,15 @@ const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 // prime one reusable element the moment voice mode is switched on.
 const SILENT_AUDIO =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
+// gpt-4o-mini-tts renders the customer's voice at a conservative loudness, so
+// even at the element's maximum (element.volume caps at 1.0) she comes through
+// faint on phones at normal system volume. We route playback through a Web Audio
+// gain stage to lift it to a clearly audible level; a value >1 amplifies BEYOND
+// the source, which element.volume alone cannot do. If Web Audio is unavailable
+// or blocked we fall back to plain element playback at volume 1.0 — never louder,
+// but never silent either.
+const TTS_GAIN = 2.0;
 
 // After the speaker stops talking for this long in voice mode, auto-send.
 // Deliberately on the forgiving side: people pause naturally mid-thought
@@ -101,6 +123,13 @@ export function useVoiceConversation({
   const speechSupportedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  // Web Audio gain stage used to boost the (quiet) TTS playback above the
+  // element's own ceiling. Created lazily inside a user gesture so browsers
+  // allow it; if setup ever fails we leave these null and play the element
+  // directly (unboosted but still audible).
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const audioBoostConnectedRef = useRef(false);
   const draftBeforeListening = useRef("");
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // handleSend and dispatch are defined below; keep refs so the recognition
@@ -117,10 +146,41 @@ export function useVoiceConversation({
     return audioElRef.current;
   }, []);
 
+  // Wire the reusable audio element through a Web Audio gain node so replies
+  // play louder than the raw TTS. Must run inside a user gesture (browsers
+  // suspend AudioContexts created otherwise). Safe to call repeatedly — it wires
+  // the graph once, then just resumes the context. Any failure is swallowed and
+  // leaves playback on the plain element path.
+  const setupAudioBoost = useCallback(() => {
+    if (audioBoostConnectedRef.current) {
+      audioContextRef.current?.resume?.().catch(() => {});
+      return;
+    }
+    try {
+      const Ctor = window.AudioContext ?? window.webkitAudioContext;
+      if (!Ctor) return;
+      const ctx = audioContextRef.current ?? new Ctor();
+      audioContextRef.current = ctx;
+      ctx.resume?.().catch(() => {});
+      const source = ctx.createMediaElementSource(getAudioEl());
+      const gain = ctx.createGain();
+      gain.gain.value = TTS_GAIN;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      gainNodeRef.current = gain;
+      audioBoostConnectedRef.current = true;
+    } catch {
+      // Web Audio unavailable/blocked (or source already created) — fall back to
+      // plain element playback, which still works at the element's own volume.
+    }
+  }, [getAudioEl]);
+
   // Prime the reusable audio element on a user gesture so later programmatic
   // playback is allowed on mobile. Safe to call repeatedly.
   const unlockAudio = useCallback(() => {
     const el = getAudioEl();
+    // Same gesture also unlocks/creates the gain stage used to boost loudness.
+    setupAudioBoost();
     try {
       el.muted = true;
       el.src = SILENT_AUDIO;
@@ -138,7 +198,7 @@ export function useVoiceConversation({
     } catch {
       el.muted = false;
     }
-  }, [getAudioEl]);
+  }, [getAudioEl, setupAudioBoost]);
 
   const stopAudio = useCallback(() => {
     const el = audioElRef.current;
@@ -155,9 +215,15 @@ export function useVoiceConversation({
   const playAudio = useCallback(
     (url: string) => {
       const el = getAudioEl();
+      // Keep the gain-boosted graph running (contexts can auto-suspend); harmless
+      // when no boost is wired.
+      if (audioBoostConnectedRef.current) audioContextRef.current?.resume?.().catch(() => {});
       el.onended = () => dispatchRef.current({ type: "AUDIO_ENDED" });
       el.src = `${API_BASE}${url}`;
       el.muted = false;
+      // Element is already at its ceiling; the audible loudness lift comes from
+      // the Web Audio gain stage, not from this property.
+      el.volume = 1.0;
       el.play().catch(() => dispatchRef.current({ type: "AUDIO_FAILED" }));
     },
     [getAudioEl]
@@ -269,11 +335,18 @@ export function useVoiceConversation({
         }, silenceAutoSendMsRef.current);
       }
     };
-    recognition.onerror = () => {
-      if (voiceModeRef.current) {
-        dispatchRef.current({ type: "RECOGNITION_ERROR" });
-      } else {
+    recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
+      if (!voiceModeRef.current) {
         setIsDictating(false);
+        return;
+      }
+      // Only a genuinely fatal error (mic blocked) drops the loop into the
+      // tap-to-continue fallback. Transient errors like "no-speech"/"aborted"
+      // fire constantly while listening hands-free between the user's turns;
+      // ignoring them here lets the subsequent onend restart the mic so the
+      // conversation keeps flowing without the user tapping every turn.
+      if (FATAL_RECOGNITION_ERRORS.has(event.error)) {
+        dispatchRef.current({ type: "RECOGNITION_ERROR" });
       }
     };
     recognition.onend = () => {
