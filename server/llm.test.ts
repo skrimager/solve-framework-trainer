@@ -124,6 +124,7 @@ import {
   WEAK_PROCESS_CAP,
   SOFT_CLOSE_CAP,
   PREMATURE_REFERRAL_CAP,
+  CONSTRAINED_DEFERRAL_CAP,
   REFERRAL_MIN_EFFORT_THRESHOLD,
   MAX_ESCALATION_TIER,
   type CloseOutcome,
@@ -422,6 +423,129 @@ describe("computeConsultingOverall - graceful referral path", () => {
     const earned = computeConsultingOverall(atBar, "graceful_referral", "advanced");
     assert.ok(earned > PREMATURE_REFERRAL_CAP, `at-threshold referral should clear the cap, got ${earned}`);
     assert.ok(earned - below > 15, `expected a clear cliff between insufficient and good-faith effort`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Constrained-close tiers — when a REAL scheduling constraint (vacation,
+// installer availability, materials lead-time) legitimately prevents a same-day
+// signature, the score must reflect how well the trainee ENGINEERED a solution
+// around the constraint, NOT whether a contract was physically signed. Founder's
+// calibration case (windows client going on vacation Wednesday, back in a week):
+//   Tier A: "we'll call you when we're back" — vague, nothing locked in (lowest)
+//   Tier B: agreed install timeline for the week they return (higher)
+//   Tier C: deposit + windows ordered before they leave (highest, ~ same-day)
+// ---------------------------------------------------------------------------
+
+describe("computeConsultingOverall - constrained-close tiers", () => {
+  // Tier A: real constraint surfaced (decent discovery) but the consultant let it
+  // end on a vague deferral with a weak close — a solution-engineering miss.
+  const tierA = rubric({
+    needsDiscovery: 78,
+    objectionPrevention: 72,
+    trustBuilding: 76,
+    naturalClose: 55,
+    relationshipContinuity: 50,
+  });
+  // Tier B: concrete timeline the client committed to, strong close execution.
+  const tierB = rubric({
+    needsDiscovery: 85,
+    objectionPrevention: 82,
+    trustBuilding: 85,
+    naturalClose: 85,
+    relationshipContinuity: 85,
+  });
+  // Tier C: deposit + proactive logistics secured before the constraint window.
+  const tierC = rubric({
+    needsDiscovery: 88,
+    objectionPrevention: 85,
+    trustBuilding: 88,
+    naturalClose: 90,
+    relationshipContinuity: 90,
+  });
+
+  test("(a) a vague deferral despite a real constraint scores lower-middle — above a total failure, below tiers B/C", () => {
+    const deferral = computeConsultingOverall(tierA, "constrained_deferral", "intermediate");
+    // A genuine total discovery failure (weak process, no close at all).
+    const totalFailure = computeConsultingOverall(
+      rubric({ needsDiscovery: 40, objectionPrevention: 35, trustBuilding: 45, naturalClose: 40, relationshipContinuity: 40 }),
+      "none",
+      "intermediate"
+    );
+    assert.ok(deferral <= CONSTRAINED_DEFERRAL_CAP, `expected <= ${CONSTRAINED_DEFERRAL_CAP}, got ${deferral}`);
+    assert.ok(deferral < ADVANCE_THRESHOLD, `Tier A must not qualify, got ${deferral}`);
+    assert.ok(deferral > totalFailure + 15, `Tier A ${deferral} should clearly beat a total failure ${totalFailure}`);
+    // A vague deferral is NOT nuked to the soft-close floor: the constraint is real.
+    assert.ok(deferral > SOFT_CLOSE_CAP, `Tier A ${deferral} should exceed the soft-close cap ${SOFT_CLOSE_CAP}`);
+  });
+
+  test("(b) a concrete timeline-lock around the constraint scores well (no payment needed)", () => {
+    const planned = computeConsultingOverall(tierB, "constrained_plan_committed", "intermediate");
+    assert.ok(planned >= 80, `Tier B should score well, got ${planned}`);
+  });
+
+  test("(c) a deposit-plus-logistics close scores at or near the top tier", () => {
+    const deposit = computeConsultingOverall(tierC, "constrained_deposit_secured", "intermediate");
+    assert.ok(deposit >= ADVANCE_THRESHOLD, `Tier C should reach the top tier, got ${deposit}`);
+  });
+
+  test("the three tiers are strictly, meaningfully ordered A < B < C on identical logic", () => {
+    // Hold the rubric constant so ONLY the outcome tier moves the score.
+    const r = rubric({ needsDiscovery: 85, objectionPrevention: 85, trustBuilding: 85, naturalClose: 85, relationshipContinuity: 85 });
+    const a = computeConsultingOverall(r, "constrained_deferral", "intermediate");
+    const b = computeConsultingOverall(r, "constrained_plan_committed", "intermediate");
+    const c = computeConsultingOverall(r, "constrained_deposit_secured", "intermediate");
+    assert.ok(a < b, `Tier A ${a} should be below Tier B ${b}`);
+    assert.ok(b < c, `Tier B ${b} should be below Tier C ${c}`);
+    assert.ok(b - a >= 5, `A→B gap should be meaningful, got ${b - a}`);
+  });
+
+  test("(d) a normal same-day close (no constraint) is UNAFFECTED and still tops out", () => {
+    // Tier C anchors alongside a full same-day agreement — neither is downgraded.
+    const sameDay = computeConsultingOverall(
+      rubric({ needsDiscovery: 88, objectionPrevention: 85, trustBuilding: 88, naturalClose: 90, relationshipContinuity: 90 }),
+      "client_agreed",
+      "intermediate"
+    );
+    assert.ok(sameDay >= ADVANCE_THRESHOLD, `same-day close should stay top-tier, got ${sameDay}`);
+    const tierCScore = computeConsultingOverall(tierC, "constrained_deposit_secured", "intermediate");
+    assert.equal(sameDay, tierCScore, "Tier C and a full same-day agreement should be scored alike on identical sub-scores");
+  });
+
+  test("(e) constrained tiers and the graceful_referral path are independent and don't interfere", () => {
+    // Same strong sub-scores routed through each path land where each path dictates.
+    const strong = rubric({ needsDiscovery: 85, objectionPrevention: 82, trustBuilding: 85, naturalClose: 85, relationshipContinuity: 85 });
+    const referral = computeConsultingOverall(strong, "graceful_referral", "advanced");
+    const deposit = computeConsultingOverall(strong, "constrained_deposit_secured", "advanced");
+    // Both are legitimate strong outcomes, scored by their OWN logic.
+    assert.ok(referral >= 80, `earned referral path should score well, got ${referral}`);
+    assert.ok(deposit >= 80, `deposit tier should score well, got ${deposit}`);
+    // A constrained deferral is NOT routed through the referral cap: it can exceed
+    // PREMATURE_REFERRAL_CAP, proving the two paths are distinct.
+    const deferral = computeConsultingOverall(tierA, "constrained_deferral", "advanced");
+    assert.ok(deferral > PREMATURE_REFERRAL_CAP, `Tier A ${deferral} should not be capped as a premature referral`);
+  });
+
+  test("beginner leniency never rescues a Tier A (constrained deferral) miss to the bar", () => {
+    const beginner = computeConsultingOverall(tierA, "constrained_deferral", "beginner");
+    assert.ok(beginner < ADVANCE_THRESHOLD, `Tier A must not qualify even at beginner, got ${beginner}`);
+    assert.ok(beginner <= CONSTRAINED_DEFERRAL_CAP, `Tier A cap must hold at beginner, got ${beginner}`);
+  });
+
+  test("weak discovery still caps a constrained tier — a deposit can't rescue shallow discovery", () => {
+    const weak = rubric({ needsDiscovery: 40, objectionPrevention: 35, trustBuilding: 45, naturalClose: 80, relationshipContinuity: 80 });
+    const deposit = computeConsultingOverall(weak, "constrained_deposit_secured", "intermediate");
+    assert.ok(deposit <= WEAK_PROCESS_CAP, `weak process should still cap Tier C, got ${deposit}`);
+  });
+
+  test("all constrained outcomes normalize and stay within 0..100", () => {
+    for (const o of ["constrained_deferral", "constrained_plan_committed", "constrained_deposit_secured"] as const) {
+      assert.equal(normalizeCloseOutcome(o), o);
+      const hi = computeConsultingOverall(rubric({ needsDiscovery: 100, objectionPrevention: 100, trustBuilding: 100, naturalClose: 100, relationshipContinuity: 100 }), o);
+      const lo = computeConsultingOverall(rubric({ needsDiscovery: 0, objectionPrevention: 0, trustBuilding: 0, naturalClose: 0, relationshipContinuity: 0 }), o);
+      assert.ok(hi >= 0 && hi <= 100);
+      assert.ok(lo >= 0 && lo <= 100);
+    }
   });
 });
 

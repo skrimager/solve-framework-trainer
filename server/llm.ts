@@ -201,10 +201,16 @@ Also classify how the consultation actually ended, from the CUSTOMER's perspecti
 - "client_agreed": the customer explicitly agreed to / accepted the proposed recommendation or solution. This is the strongest "moving forward together" outcome.
 - "graceful_referral": the consultant, AFTER a genuine, competent discovery effort (real open questions, real rapport-building, adequate time invested), recognized that the customer cannot or will not articulate a clear vision, goal, or motivation — so there is no real basis to engineer a solution — and gracefully referred them elsewhere ("I don't think we're the best fit here; let me point you to someone who may serve you better") instead of forcing a close. This is a LEGITIMATE, professional outcome, NOT a failed close. Classify an ending as "graceful_referral" ONLY when the discovery effort was genuine; if the consultant bailed early, asked shallow questions, or referred out to avoid doing the work, do NOT use this value — classify by what actually happened (usually "none" or "handoff_no_commitment") and let the low discovery scores reflect the weak effort.
 
+CONSTRAINED-CLOSE TIERS (use these when a REAL scheduling constraint legitimately prevented a same-day signature/deposit): Many real products (real estate, windows, kitchen remodels, pools, etc.) genuinely cannot close same-day because of real logistics — the client is going on vacation, an installer/contractor isn't available yet, materials must be ordered. In those cases do NOT treat "no contract signed today" as a failure. What matters is how well the consultant ENGINEERED A CONCRETE SOLUTION around the constraint. Infer this ONLY from the conversation itself (a constraint being mentioned + what the consultant actually secured in response); it is never a property of the scenario, and even the same product can close same-day OR legitimately be delayed depending on circumstances. Classify into exactly one of:
+- "constrained_deferral": a real, legitimate scheduling constraint surfaced (vacation, installer availability, materials lead-time, "we're not ready to decide today" for genuine logistics reasons) AND the consultant let the conversation end on a VAGUE deferral with nothing concrete locked in ("let me think about it," "we'll call you when we're back") — no timeline, no next step, no commitment. The constraint is real, but the trainee engineered no solution around it. This is a solution-engineering MISS: it scores below the two stronger tiers below and clearly below a normal close, but it is NOT a total discovery failure (the constraint is genuine).
+- "constrained_plan_committed": a real scheduling constraint surfaced AND the consultant engineered a concrete plan around it that the customer agreed to — a specific timeline, date/week, or explicit next-step commitment (e.g. "let's get you on the install calendar for the week you're back, and I'll have everything queued up") — even though no payment changed hands. Real forward motion locked in around the constraint.
+- "constrained_deposit_secured": a real scheduling constraint surfaced AND the consultant secured a financial commitment (a deposit) and/or proactive logistics (ordering materials, starting paperwork) BEFORE the constraint window, so everything is ready the moment the customer is available. This is the strongest constrained outcome — real commitment plus proactive readiness — and is scored alongside a full same-day agreement.
+IMPORTANT: only use the constrained_* values when a genuine scheduling constraint is actually present in the conversation. When NO such constraint exists and the customer simply agreed (or asked next steps) same-day, use the ordinary "client_agreed" / "client_asked_next_steps" values — a real same-day close remains a top-tier outcome and must NOT be downgraded.
+
 Return ONLY valid JSON matching this shape, no other text:
 {"needsDiscovery": number, "objectionPrevention": number, "trustBuilding": number, "naturalClose": number, "relationshipContinuity": number, "closeOutcome": string, "feedback": string}
 
-"feedback" should be 3-5 sentences of specific, DIAGNOSTIC narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). It must do three things: (1) acknowledge specifically what the consultant did well or attempted, quoting or closely paraphrasing a real moment from the transcript; (2) where they lost points, give at least one concrete example of a specific question or phrase they could have used at a particular point to score higher — again tied to a real moment; (3) when a topic (for example budget/financing) was handled well but raised LATER rather than earlier, do NOT treat that as a failure — acknowledge that they handled it competently when it came up, and explain WHY raising it earlier generally helps (e.g. it lets you shape options to fit from the start and prevents surprises), framed as forward-looking coaching rather than punishment for a good outcome. This is diagnostic discovery-skills coaching, not just a list of what was missing.`;
+"feedback" should be 3-5 sentences of specific, DIAGNOSTIC narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). It must do three things: (1) acknowledge specifically what the consultant did well or attempted, quoting or closely paraphrasing a real moment from the transcript; (2) where they lost points, give at least one concrete example of a specific question or phrase they could have used at a particular point to score higher — again tied to a real moment; (3) when a topic (for example budget/financing) was handled well but raised LATER rather than earlier, do NOT treat that as a failure — acknowledge that they handled it competently when it came up, and explain WHY raising it earlier generally helps (e.g. it lets you shape options to fit from the start and prevents surprises), framed as forward-looking coaching rather than punishment for a good outcome; and (4) when a REAL scheduling constraint made a same-day signature impossible or inappropriate (the customer is traveling, materials must be ordered, an installer must be scheduled), do NOT frame "no signature today" as a failure — instead evaluate how well they engineered a concrete solution around the constraint: praise locking in a specific timeline/next step, or securing a deposit and proactive logistics before the constraint window; and if they let it end on a vague "we'll call you," coach them on the specific commitment or timeline they could have proposed to keep momentum. It's not about the close — it's about finding out what the client truly needs and engineering a solution they feel good enough about to move forward and refer their friends and family, even if they can't sign or pay in the room that day. This is diagnostic discovery-skills coaching, not just a list of what was missing.`;
 
 // Per-difficulty scoring strictness so a higher-level scenario demands more
 // precision and completeness to earn the same score.
@@ -269,7 +275,15 @@ export type CloseOutcome =
   | "recommendation_made" // a recommendation was proposed, but the client gave no buy-in signal
   | "client_asked_next_steps" // the client proactively asked "what are the next steps?"
   | "client_agreed" // the client explicitly agreed to the proposed recommendation
-  | "graceful_referral"; // the consultant, after genuine discovery, judged the customer a poor fit and gracefully referred them elsewhere instead of forcing a close
+  | "graceful_referral" // the consultant, after genuine discovery, judged the customer a poor fit and gracefully referred them elsewhere instead of forcing a close
+  // Constrained-close tiers. A REAL scheduling constraint (vacation, installer
+  // availability, materials lead-time, etc.) legitimately prevented a same-day
+  // signature — so what matters is how well the consultant engineered a concrete
+  // solution AROUND the constraint, not whether a contract was physically signed.
+  // These are inferred from the conversation, never tagged on the scenario.
+  | "constrained_deferral" // Tier A: real constraint, but the consultant let it end on a vague "we'll call you" — no plan engineered
+  | "constrained_plan_committed" // Tier B: real constraint, concrete timeline/next-step locked in around it (no payment yet)
+  | "constrained_deposit_secured"; // Tier C: real constraint, deposit and/or proactive logistics secured before the constraint window
 
 export const CLOSE_OUTCOMES: readonly CloseOutcome[] = [
   "none",
@@ -278,6 +292,9 @@ export const CLOSE_OUTCOMES: readonly CloseOutcome[] = [
   "client_asked_next_steps",
   "client_agreed",
   "graceful_referral",
+  "constrained_deferral",
+  "constrained_plan_committed",
+  "constrained_deposit_secured",
 ] as const;
 
 // The outcome/closing anchor each close tier contributes to the overall score.
@@ -296,6 +313,17 @@ const CLOSE_OUTCOME_ANCHOR: Record<CloseOutcome, number> = {
   // agreement. This anchor only applies once the good-faith effort gate is met
   // (see computeConsultingOverall); a premature/lazy referral is capped low.
   graceful_referral: 85,
+  // Constrained-close tiers. A real scheduling constraint prevented a same-day
+  // signature, so these are scored on how well the consultant engineered around
+  // it — NOT penalized for the lack of a contract. Tier A (vague deferral) is a
+  // solution-engineering miss and anchors low (but above a bare soft close — the
+  // constraint is real and discovery surfaced it). Tier B (a concrete timeline
+  // the client committed to) anchors alongside a client asking "what's next?".
+  // Tier C (deposit / proactive logistics secured before the constraint window)
+  // anchors alongside a full same-day agreement — the strongest outcome.
+  constrained_deferral: 50,
+  constrained_plan_committed: 80,
+  constrained_deposit_secured: 85,
 };
 
 export function closeOutcomeAnchor(outcome: CloseOutcome): number {
@@ -345,6 +373,16 @@ export const REFERRAL_MIN_EFFORT_THRESHOLD = 70;
 // to end the conversation.
 export const PREMATURE_REFERRAL_CAP = 55;
 
+// Constrained-close (Tier A) cap. When a real scheduling constraint was present
+// but the consultant let the conversation end on a vague deferral ("we'll call
+// you when we're back") with nothing concrete locked in, that is a
+// solution-engineering MISS: the trainee didn't engineer around a real, workable
+// constraint. It is scored notably below the two stronger constrained tiers and
+// cannot reach the qualifying bar — but the cap sits ABOVE the soft-close cap
+// because the constraint is legitimate and discovery genuinely surfaced it, so
+// this is not as bad as a bare walk-away with no reason at all.
+export const CONSTRAINED_DEFERRAL_CAP = 72;
+
 // Combines the discovery rubric sub-scores with the close/buy-in outcome into a
 // single overall score for a CONSULTING session. This is a genuine weighted
 // blend, not a binary "was a recommendation stated" gate:
@@ -392,6 +430,18 @@ export function computeConsultingOverall(
   // giving up — cap it low so lazy/premature referrals never score well.
   if (closeOutcome === "graceful_referral" && !isEarnedReferral) {
     overall = Math.min(overall, PREMATURE_REFERRAL_CAP);
+    capped = true;
+  }
+  // Tier A of the constrained-close ladder: a real scheduling constraint was
+  // present but the consultant let it end on a vague deferral with nothing
+  // concrete secured. This is a solution-engineering miss — capped notably below
+  // the stronger constrained tiers (and below the qualifying bar) so it can't
+  // pass, but deliberately NOT nuked to the soft-close floor: the constraint is
+  // real and discovery surfaced it, so it outranks a bare no-reason walk-away.
+  // Tiers B/C (plan committed, deposit secured) are legitimate strong outcomes
+  // and are intentionally NOT capped here — they blend like any earned close.
+  if (closeOutcome === "constrained_deferral") {
+    overall = Math.min(overall, CONSTRAINED_DEFERRAL_CAP);
     capped = true;
   }
 
