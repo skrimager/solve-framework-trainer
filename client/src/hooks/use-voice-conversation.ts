@@ -59,6 +59,30 @@ const SILENT_AUDIO =
 // but never silent either.
 const TTS_GAIN = 2.0;
 
+// iOS Safari (and, less consistently, Android Chrome) will not reliably
+// re-`.start()` a SpeechRecognition instance that has already been used and
+// stopped: the call throws nothing, fires no `onresult`/`onend`/`onerror`, and
+// silently captures no audio — while our state machine still reports
+// "listening". The robust, widely-documented cure is to instantiate a BRAND-NEW
+// SpeechRecognition for every listening turn instead of reusing one long-lived
+// instance. We only need to know we're on such a platform to arm the extra
+// safety watchdog below; the fresh-instance strategy itself runs everywhere.
+function isMobileSpeechPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+}
+
+// Safety net for the silent-start failure above. If, after we enter `listening`
+// on a mobile device, the freshly created recognizer produces NO sign of life
+// (no result, no end, no error) within this window, we assume the native
+// recognizer silently failed and surface a visible "tap to continue" affordance
+// instead of stranding the user in a fake listening state where they talk and
+// nothing happens. On a healthy device `onend` fires spontaneously well within
+// this window (and simply restarts the loop, re-arming the watchdog), so this
+// never trips during normal hands-free use. Mobile-only so it can't regress
+// desktop, where continuous recognition legitimately stays open silently.
+const MOBILE_LISTEN_WATCHDOG_MS = 12000;
+
 // After the speaker stops talking for this long in voice mode, auto-send.
 // Deliberately on the forgiving side: people pause naturally mid-thought
 // ("I just... don't want any increases in lot rent"), and cutting them off there
@@ -122,6 +146,11 @@ export function useVoiceConversation({
   const [speechSupported, setSpeechSupported] = useState(true);
   const speechSupportedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const SpeechRecognitionCtorRef = useRef<(new () => SpeechRecognitionLike) | null>(null);
+  const isMobileRef = useRef(false);
+  // Fires only if a mobile listening turn shows no sign of life (see
+  // MOBILE_LISTEN_WATCHDOG_MS). Cleared by any recognizer event or a stop.
+  const listenWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   // Web Audio gain stage used to boost the (quiet) TTS playback above the
   // element's own ceiling. Created lazily inside a user gesture so browsers
@@ -229,35 +258,153 @@ export function useVoiceConversation({
     [getAudioEl]
   );
 
-  const stopRecognition = useCallback(() => {
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      // Ignore stop() before start().
+  const clearListenWatchdog = useCallback(() => {
+    if (listenWatchdogRef.current) {
+      clearTimeout(listenWatchdogRef.current);
+      listenWatchdogRef.current = null;
     }
   }, []);
 
-  // fresh=true starts a brand-new utterance (voice loop, previous reply already
-  // sent); fresh=false keeps whatever is already drafted (text-mode dictation).
-  const startRecognition = useCallback((fresh = true) => {
+  // Tear down the current recognizer: detach handlers first so its trailing
+  // `onend` can't fire a stray restart, then stop it. We discard the instance
+  // rather than reuse it (the whole point of the mobile fix).
+  const disposeRecognition = useCallback(() => {
     const recognition = recognitionRef.current;
     if (!recognition) return;
-    // Voice loop keeps the mic open continuously; text dictation captures a
-    // single utterance then stops on its own.
-    recognition.continuous = voiceModeRef.current;
-    if (fresh) {
-      draftBeforeListening.current = "";
-      setDraft("");
-    } else {
-      draftBeforeListening.current = draftRef.current.trim();
-    }
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
     try {
-      recognition.start();
+      recognition.stop();
     } catch {
-      // Ignore "already started" errors from rapid restarts.
+      // Ignore stop() before start() / on an already-stopped instance.
     }
+    recognitionRef.current = null;
   }, []);
+
+  const stopRecognition = useCallback(() => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    clearListenWatchdog();
+    disposeRecognition();
+  }, [clearListenWatchdog, disposeRecognition]);
+
+  // Build a fresh, fully-wired SpeechRecognition. A NEW instance per listening
+  // turn is the core mobile fix: reusing one long-lived instance is what makes
+  // iOS Safari silently fail to capture on the 2nd+ `.start()`.
+  const createRecognition = useCallback((): SpeechRecognitionLike | null => {
+    const Ctor = SpeechRecognitionCtorRef.current;
+    if (!Ctor) return null;
+    const recognition = new Ctor();
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEventLike) => {
+      clearListenWatchdog(); // proof of life: the recognizer is really capturing
+      let finalTranscript = "";
+      let interimTranscript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+      const base = draftBeforeListening.current;
+      const spoken = (finalTranscript + interimTranscript).trim();
+      setDraft(spoken ? `${base}${base ? " " : ""}${spoken}` : base);
+      if (finalTranscript) {
+        draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
+      }
+
+      // Voice loop only: after a silent gap, auto-send so the speaker can just
+      // keep talking. Text-mode dictation never auto-sends.
+      if (phaseRef.current === "listening") {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          if (draftBeforeListening.current.trim()) {
+            handleSendRef.current();
+          }
+        }, silenceAutoSendMsRef.current);
+      }
+    };
+    recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
+      clearListenWatchdog();
+      if (!voiceModeRef.current) {
+        setIsDictating(false);
+        return;
+      }
+      // Only a genuinely fatal error (mic blocked) drops the loop into the
+      // tap-to-continue fallback. Transient errors like "no-speech"/"aborted"
+      // fire constantly while listening hands-free between the user's turns;
+      // ignoring them here lets the subsequent onend restart the mic so the
+      // conversation keeps flowing without the user tapping every turn.
+      if (FATAL_RECOGNITION_ERRORS.has(event.error)) {
+        dispatchRef.current({ type: "RECOGNITION_ERROR" });
+      }
+    };
+    recognition.onend = () => {
+      clearListenWatchdog();
+      if (voiceModeRef.current) {
+        // In listening state this restarts the mic (mobile ends it
+        // spontaneously); in any other state the machine ignores it.
+        dispatchRef.current({ type: "RECOGNITION_ENDED" });
+      } else {
+        setIsDictating(false);
+      }
+    };
+    return recognition;
+  }, [clearListenWatchdog]);
+
+  // fresh=true starts a brand-new utterance (voice loop, previous reply already
+  // sent); fresh=false keeps whatever is already drafted (text-mode dictation).
+  const startRecognition = useCallback(
+    (fresh = true) => {
+      if (!speechSupportedRef.current) return;
+      // Always tear down any prior instance and build a new one — see
+      // createRecognition. This is what makes turn 2+ reliably capture on mobile.
+      clearListenWatchdog();
+      disposeRecognition();
+      const recognition = createRecognition();
+      if (!recognition) return;
+      recognitionRef.current = recognition;
+      // Voice loop keeps the mic open continuously; text dictation captures a
+      // single utterance then stops on its own.
+      recognition.continuous = voiceModeRef.current;
+      if (fresh) {
+        draftBeforeListening.current = "";
+        setDraft("");
+      } else {
+        draftBeforeListening.current = draftRef.current.trim();
+      }
+      try {
+        recognition.start();
+      } catch {
+        // A fresh instance shouldn't throw "already started", but if start()
+        // fails outright in voice mode, surface the tap-to-continue fallback
+        // rather than sitting in a listening state that never captures.
+        recognitionRef.current = null;
+        if (voiceModeRef.current) {
+          dispatchRef.current({ type: "RECOGNITION_ERROR" });
+        } else {
+          setIsDictating(false);
+        }
+        return;
+      }
+      // Arm the mobile silent-start watchdog only for the hands-free loop.
+      if (voiceModeRef.current && isMobileRef.current) {
+        listenWatchdogRef.current = setTimeout(() => {
+          listenWatchdogRef.current = null;
+          if (phaseRef.current === "listening") {
+            // Native recognizer never came alive — recover with a visible tap.
+            disposeRecognition();
+            dispatchRef.current({ type: "RECOGNITION_ERROR" });
+          }
+        }, MOBILE_LISTEN_WATCHDOG_MS);
+      }
+    },
+    [clearListenWatchdog, disposeRecognition, createRecognition]
+  );
 
   const runEffect = useCallback(
     (effect: VoiceEffect, audioUrl?: string) => {
@@ -301,71 +448,14 @@ export function useVoiceConversation({
       speechSupportedRef.current = false;
       return;
     }
-    const recognition = new SpeechRecognitionCtor();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-
-    recognition.onresult = (event: SpeechRecognitionEventLike) => {
-      let finalTranscript = "";
-      let interimTranscript = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          finalTranscript += result[0].transcript;
-        } else {
-          interimTranscript += result[0].transcript;
-        }
-      }
-      const base = draftBeforeListening.current;
-      const spoken = (finalTranscript + interimTranscript).trim();
-      setDraft(spoken ? `${base}${base ? " " : ""}${spoken}` : base);
-      if (finalTranscript) {
-        draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
-      }
-
-      // Voice loop only: after a silent gap, auto-send so the speaker can just
-      // keep talking. Text-mode dictation never auto-sends.
-      if (phaseRef.current === "listening") {
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = setTimeout(() => {
-          if (draftBeforeListening.current.trim()) {
-            handleSendRef.current();
-          }
-        }, silenceAutoSendMsRef.current);
-      }
-    };
-    recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
-      if (!voiceModeRef.current) {
-        setIsDictating(false);
-        return;
-      }
-      // Only a genuinely fatal error (mic blocked) drops the loop into the
-      // tap-to-continue fallback. Transient errors like "no-speech"/"aborted"
-      // fire constantly while listening hands-free between the user's turns;
-      // ignoring them here lets the subsequent onend restart the mic so the
-      // conversation keeps flowing without the user tapping every turn.
-      if (FATAL_RECOGNITION_ERRORS.has(event.error)) {
-        dispatchRef.current({ type: "RECOGNITION_ERROR" });
-      }
-    };
-    recognition.onend = () => {
-      if (voiceModeRef.current) {
-        // In listening state this restarts the mic (mobile ends it
-        // spontaneously); in any other state the machine ignores it.
-        dispatchRef.current({ type: "RECOGNITION_ENDED" });
-      } else {
-        setIsDictating(false);
-      }
-    };
-    recognitionRef.current = recognition;
+    // Stash the constructor; each listening turn builds its own instance via
+    // createRecognition (fresh-instance-per-turn is the mobile capture fix).
+    SpeechRecognitionCtorRef.current = SpeechRecognitionCtor;
+    isMobileRef.current = isMobileSpeechPlatform();
 
     return () => {
-      try {
-        recognition.stop();
-      } catch {
-        // ignore
-      }
+      clearListenWatchdog();
+      disposeRecognition();
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

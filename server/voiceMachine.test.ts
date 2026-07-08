@@ -161,3 +161,44 @@ describe("voiceTransition - manual mic taps", () => {
     assert.deepEqual(r.effects, []);
   });
 });
+
+// The hook creates a brand-new SpeechRecognition per listening turn (iOS Safari
+// silently fails to re-capture on a reused instance). When even a fresh start
+// shows no sign of life, a mobile watchdog / a thrown start() feeds
+// RECOGNITION_ERROR so the loop drops to a visible "tap to continue" affordance
+// instead of a silent dead end. These assert that machine-level escape+recovery.
+describe("voiceTransition - mobile silent-start recovery", () => {
+  test("a silent/failed listening start recovers to a tap-to-continue affordance", () => {
+    const r = run("listening", { type: "RECOGNITION_ERROR" });
+    assert.equal(r.state, "awaiting_user");
+    assert.deepEqual(r.effects, []);
+  });
+
+  test("tapping to continue then restarts a fresh listening turn", () => {
+    let s: VoiceState = "listening";
+    s = run(s, { type: "RECOGNITION_ERROR" }).state;
+    assert.equal(s, "awaiting_user");
+    const resume = run(s, { type: "MIC_TAP" });
+    assert.equal(resume.state, "listening");
+    // START_LISTENING is what the hook turns into a NEW recognizer instance.
+    assert.deepEqual(resume.effects, ["START_LISTENING"]);
+  });
+
+  test("every resumed turn re-issues START_LISTENING (fresh instance per turn)", () => {
+    for (const trigger of [
+      { type: "AUDIO_ENDED" } as VoiceEvent,
+      { type: "REPLY_NO_AUDIO" } as VoiceEvent,
+      { type: "RECOGNITION_ENDED" } as VoiceEvent,
+    ]) {
+      const from: VoiceState =
+        trigger.type === "AUDIO_ENDED"
+          ? "ai_speaking"
+          : trigger.type === "REPLY_NO_AUDIO"
+            ? "processing"
+            : "listening";
+      const r = run(from, trigger);
+      assert.equal(r.state, "listening");
+      assert.deepEqual(r.effects, ["START_LISTENING"]);
+    }
+  });
+});
