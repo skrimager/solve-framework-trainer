@@ -64,6 +64,20 @@
       "when": 1783106655000,
       "tag": "0008_demo",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783106656000,
+      "tag": "0009_home_improvement_consolidation",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783106657000,
+      "tag": "0010_scenario_transaction_type",
+      "breakpoints": true
     }
   ]
 }

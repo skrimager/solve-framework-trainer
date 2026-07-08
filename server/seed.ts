@@ -85,6 +85,7 @@ export const scenarios: InsertScenario[] = [
     gender: "female",
     title: "First-Time Buyer, Budget-Conscious",
     vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
     difficulty: "beginner",
     briefing:
       "You're a sales consultant at a manufactured housing dealership. A young couple has walked onto the lot to shop for their first home. Key terms: 'manufactured home' (factory-built housing set on a permanent chassis, distinct from a mobile home or site-built house), 'single-wide' vs. 'double-wide' (one vs. two factory-built sections joined on site), 'lot rent' (monthly land-lease fee if the home sits in a community rather than on owned land).",
@@ -111,6 +112,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     gender: "female",
     title: "Retiree Downsizing",
     vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
     difficulty: "intermediate",
     briefing:
       "You're a sales consultant at a manufactured housing dealership. A retiree is considering downsizing into a manufactured home. Key terms: 'single-wide' vs. 'double-wide' (one vs. two factory-built sections joined on site), 'age-restricted community' (55+ community with its own rules), 'HOA/community fees' (recurring dues separate from any mortgage).",
@@ -137,6 +139,7 @@ Stay conversational and human — warm but a little guarded at first. One to thr
     gender: "female",
     title: "Single Parent Relocating for Work",
     vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
     difficulty: "intermediate",
     briefing:
       "You're a sales consultant at a manufactured housing dealership. A single parent relocating for a new job is shopping under time pressure. Key terms: 'manufactured home' (factory-built, distinct from site-built), 'in-stock/spec home' (already built and ready for quick move-in vs. a custom order), 'setup and delivery timeline' (time from purchase to move-in-ready).",
@@ -162,6 +165,7 @@ Stay natural and a little rushed/stressed in tone, but warm up as trust builds. 
     gender: "male",
     title: "Investor Buying for a Rental",
     vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
     difficulty: "advanced",
     briefing:
       "You're a sales consultant at a manufactured housing dealership. An investor is exploring a manufactured home purchase as a rental property. Key terms: 'cap rate' (annual return on investment as a percentage of purchase price), 'chattel loan' (a loan secured by the home itself rather than the land, common when the home isn't on owned land), 'turnkey' (move-in ready with no additional work needed).",
@@ -191,6 +195,7 @@ Stay clipped, businesslike, mildly impatient at first, softening only when the c
     gender: "female",
     title: "Prospective Resident Sticker-Shocked by Lot Rent",
     vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
     difficulty: "beginner",
     briefing:
       "You're a leasing consultant at a manufactured housing community. A prospective resident is reacting to the monthly lot rent. Key terms: 'lot rent' (the monthly fee to lease the land under a resident-owned home), 'community amenities' (shared features like clubhouses, pools, or maintained grounds bundled into that fee), 'space lease agreement' (the contract governing the land lease, separate from home ownership).",
@@ -216,6 +221,7 @@ Stay guarded and price-focused at first, softening into genuine engagement once 
     gender: "male",
     title: "Retiree Worried About Community Fit",
     vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
     difficulty: "intermediate",
     briefing:
       "You're a leasing consultant at a manufactured housing community. A retiree is deciding whether the community is the right social and lifestyle fit. Key terms: 'age-restricted' or '55+ community' (age-qualified community with its own occupancy rules), 'lot rent' (monthly land-lease fee), 'community rules/covenants' (governing standards for home upkeep and conduct).",
@@ -241,6 +247,7 @@ Stay terse and matter-of-fact at first, like a man not used to talking about fee
     gender: "female",
     title: "Existing Resident Considering Not Renewing",
     vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
     difficulty: "advanced",
     briefing:
       "You're a community manager at a manufactured housing community. An existing resident is weighing whether to renew their lease. Key terms: 'space lease renewal' (the annual or multi-year renewal of the land-lease agreement), 'lot rent increase' (an adjustment to the monthly land fee), 'resident retention' (community's effort to keep existing residents rather than lose them to a competing community or sale).",
@@ -266,6 +273,7 @@ Stay frustrated and a little sharp at first, softening as you feel truly listene
     gender: "male",
     title: "Investor Asking About Multiple Lots",
     vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
     difficulty: "advanced",
     briefing:
       "You're a community manager or sales consultant at a manufactured housing community. An investor is asking about acquiring multiple lots. Key terms: 'bulk lot lease' (leasing several vacant home sites at once), 'occupancy rate' (percentage of the community's lots currently leased), 'turn time' (how long a vacant lot typically takes to be re-leased).",
@@ -942,6 +950,7 @@ Stay guarded and a little short with responses initially, opening up once the co
     gender: "male",
     title: "Relocating Professional, Says Just Needs Square Footage",
     vertical: "real_estate",
+    transactionType: "re_buyer_agent",
     difficulty: "beginner",
     briefing:
       "You're a real estate agent working with a professional relocating for a new job. Key terms: 'contingency' (a condition that must be met for a sale to close, e.g. financing or inspection contingencies), 'closing costs' (fees due at closing beyond the purchase price, e.g. title, escrow, and lender fees), 'comps' (comparable recently-sold properties used to help price or evaluate an offer).",
@@ -967,6 +976,7 @@ Stay brisk and businesslike at first, warming into more personal territory once 
     gender: "female",
     title: "Empty Nesters Selling the Family Home",
     vertical: "real_estate",
+    transactionType: "re_listing_agent",
     difficulty: "intermediate",
     briefing:
       "You're a real estate agent working with empty nesters selling their family home. Key terms: 'net proceeds' (what a seller walks away with after paying off the mortgage, agent commissions, and closing costs), 'staging' (preparing a home's presentation to appeal to buyers), 'contingent offer' (an offer that depends on the buyer selling their own home first).",
@@ -992,6 +1002,7 @@ Stay a little brisk and guarded early, softening as the conversation acknowledge
     gender: "female",
     title: "First-Time Buyer Overwhelmed by the Process",
     vertical: "real_estate",
+    transactionType: "re_buyer_agent",
     difficulty: "beginner",
     briefing:
       "You're a real estate agent working with a first-time buyer who feels overwhelmed by the process. Key terms: 'pre-approval' (a lender's conditional commitment to loan a buyer a certain amount, distinct from pre-qualification), 'earnest money' (a good-faith deposit made with an offer to show serious intent), 'escrow' (a neutral third party holding funds and documents until closing conditions are met).",
@@ -1017,6 +1028,7 @@ Stay a little clipped and deflecting about the "boring" parts of the process at 
     gender: "male",
     title: "Investor Evaluating a Multi-Unit Property",
     vertical: "real_estate",
+    transactionType: "re_buyer_agent",
     difficulty: "advanced",
     briefing:
       "You're a real estate agent working with an investor evaluating a multi-unit property. Key terms: 'cap rate' (a property's annual net operating income divided by its purchase price, a key investment metric), 'cash-on-cash return' (annual cash flow relative to the actual cash invested, accounting for financing), 'NOI' (net operating income — rental income minus operating expenses, before debt service).",
@@ -1051,6 +1063,7 @@ Stay terse and numbers-focused initially, opening into a more strategic conversa
     gender: "male",
     title: "Aimless Browser With No Real Goal (Referral Candidate)",
     vertical: "real_estate",
+    transactionType: "re_buyer_agent",
     difficulty: "advanced",
     briefing:
       "You're a real estate agent and a walk-in wants to 'just look around.' Practice advanced discovery — and recognizing when there is genuinely no vision to work with. Sometimes the highest-skill move is a graceful referral rather than forcing a fit. Key terms: 'pre-approval' (a lender's conditional loan commitment), 'buyer's agreement' (a contract to represent a buyer), 'motivation' (the underlying reason and timeline driving a purchase).",
@@ -1082,6 +1095,7 @@ Stay friendly, relaxed, and honestly aimless throughout. One to three sentences 
     gender: "female",
     title: "Demo: Motivated Buyer Purchasing Within 30 Days",
     vertical: "real_estate",
+    transactionType: "re_buyer_agent",
     difficulty: "beginner",
     active: false,
     briefing:
@@ -1233,13 +1247,15 @@ Stay demanding, comparison-focused, and skeptical of any upsell, revealing the t
   },
 
   // ─────────────────────────────────────────────────────────────
-  // KITCHEN REMODEL
+  // HOME IMPROVEMENT (consolidated: kitchen, bathroom, and any other
+  // home-improvement project type live under one "home_improvement" vertical.
+  // Each specific situation stays a distinct scenario within it.)
   // ─────────────────────────────────────────────────────────────
   {
     slug: "kitchen-remodel-outdated-layout-frustration",
     gender: "female",
     title: "Wants New Countertops, Needs a New Layout",
-    vertical: "kitchen_remodel",
+    vertical: "home_improvement",
     difficulty: "beginner",
     briefing:
       "You're a kitchen remodel design consultant meeting with a homeowner in their home. Key terms: 'work triangle' (the layout relationship between sink, stove, and refrigerator that governs how efficiently a kitchen functions), 'allowance' (a budgeted placeholder amount for fixtures/materials not yet selected, e.g. a countertop allowance), 'change order' (a documented, priced adjustment to the agreed scope once work is underway).",
@@ -1264,7 +1280,7 @@ Stay pleasant and a little modest about your budget early, warming into enthusia
     slug: "kitchen-remodel-overwhelmed-first-timer",
     gender: "male",
     title: "Overwhelmed First-Time Remodeler",
-    vertical: "kitchen_remodel",
+    vertical: "home_improvement",
     difficulty: "beginner",
     briefing:
       "You're a kitchen remodel design consultant. A first-time remodeler is overwhelmed by the number of decisions. Key terms: 'design-build' (a single firm that handles both design and construction, vs. hiring a separate designer and general contractor), 'allowance' (a budgeted placeholder for materials not yet selected), 'scope of work' (the documented list of exactly what the project includes).",
@@ -1289,7 +1305,7 @@ Stay a little sheepish and decision-averse early, growing more confident and par
     slug: "kitchen-remodel-couple-conflicting-budgets",
     gender: "female",
     title: "Couple Split on Budget vs. Luxury",
-    vertical: "kitchen_remodel",
+    vertical: "home_improvement",
     difficulty: "intermediate",
     briefing:
       "You're a kitchen remodel design consultant on a call with one half of a couple; the other spouse is the co-decision-maker and isn't on the line. Key terms: 'allowance' (a budgeted placeholder for not-yet-selected materials), 'value engineering' (adjusting materials/scope to hit a target budget without gutting the design intent), 'change order' (a priced scope change mid-project).",
@@ -1314,7 +1330,7 @@ Stay enthusiastic about the vision early, revealing the budget friction and the 
     slug: "kitchen-remodel-burned-by-change-orders",
     gender: "male",
     title: "Burned by Change Orders, Anchored on Price",
-    vertical: "kitchen_remodel",
+    vertical: "home_improvement",
     difficulty: "advanced",
     briefing:
       "You're a kitchen remodel design consultant meeting a homeowner who already has a cheap competing quote. Key terms: 'change order' (a priced mid-project scope change — the mechanism that blew up his last remodel), 'allowance' (a budgeted placeholder for unselected materials; too-low allowances are a common way a quote looks cheap then balloons), 'fixed-price vs. cost-plus' (a locked total vs. billing actual costs plus a markup), 'scope of work' (the documented, itemized definition of what's included).",
@@ -1336,14 +1352,12 @@ Your real underlying needs (reveal only through good discovery questions):
 Stay guarded, blunt, and price-anchored, revealing the change-order wound only when genuinely drawn out — reward transparency and a firmly-defined scope, punish capitulation and evasion. One to three sentences per turn. No stage directions.`,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // BATHROOM REMODEL
-  // ─────────────────────────────────────────────────────────────
+  // ── Home improvement (bathroom projects) ──
   {
     slug: "bathroom-remodel-aging-in-place-unspoken",
     gender: "female",
     title: "Just Want It Updated (Aging-in-Place)",
-    vertical: "bathroom_remodel",
+    vertical: "home_improvement",
     difficulty: "beginner",
     briefing:
       "You're a bathroom remodel design consultant. A homeowner frames the job as a cosmetic update, but there may be an unspoken safety/mobility need. Key terms: 'aging-in-place' (design that lets someone stay safely in their home as they age — grab bars, curbless showers, comfort-height fixtures), 'curbless / zero-threshold shower' (a walk-in shower with no lip to step over), 'comfort-height toilet' (a taller fixture that's easier to sit and stand from).",
@@ -1368,7 +1382,7 @@ Stay upbeat and a little deflective about the 'just cosmetic' framing early, ope
     slug: "bathroom-remodel-quick-refresh-home-sale",
     gender: "male",
     title: "Quick Refresh Before Selling",
-    vertical: "bathroom_remodel",
+    vertical: "home_improvement",
     difficulty: "beginner",
     briefing:
       "You're a bathroom remodel design consultant. A homeowner wants a fast, cheap refresh, but the driver is an upcoming sale. Key terms: 'ROI / return on investment' (how much of a remodel's cost is recouped in sale price — bathrooms are among the higher-ROI rooms), 'buyer-neutral finishes' (broadly appealing, safe choices that don't turn off prospective buyers), 'scope of work' (the documented list of exactly what's included).",
@@ -1394,7 +1408,7 @@ Stay brisk and cost-focused early, warming into pragmatic interest once the conv
     slug: "bathroom-remodel-landlord-rental-durability",
     gender: "male",
     title: "Landlord Under Tenant Pressure",
-    vertical: "bathroom_remodel",
+    vertical: "home_improvement",
     difficulty: "intermediate",
     briefing:
       "You're a bathroom remodel design consultant working with a landlord on a rental unit. Key terms: 'durability / commercial-grade finishes' (materials chosen to survive tenant turnover, not for high-end looks), 'habitability' (a landlord's legal duty to keep essential systems functional for tenants), 'change order' (a priced mid-project scope change), 'tenant turnover cost' (the expense and vacancy loss when a unit sits empty between renters).",
@@ -1419,7 +1433,7 @@ Stay brisk, transactional, and cost-conscious, revealing the tenant pressure and
     slug: "bathroom-remodel-botched-prior-job-distrust",
     gender: "female",
     title: "Distrustful After a Botched Job",
-    vertical: "bathroom_remodel",
+    vertical: "home_improvement",
     difficulty: "advanced",
     briefing:
       "You're a bathroom remodel design consultant meeting a homeowner whose previous contractor left the job unfinished and defective. Key terms: 'remediation / rework' (correcting defective or unfinished prior work, which can cost more than a fresh install), 'waterproofing / substrate' (the hidden layers behind tile that, if done wrong, cause leaks and mold — often the real damage from a botched job), 'scope of work' (the documented definition of exactly what's included), 'lien / final payment' (contract mechanics she may be wary of after being burned).",
@@ -1443,13 +1457,14 @@ Stay guarded, sharp, and quick to suspect a sales angle, revealing the hurt and 
   },
 
   // ─────────────────────────────────────────────────────────────
-  // POOL INSTALLATION
+  // POOL & LANDSCAPING (its own distinct vertical, kept separate from Home
+  // Improvement — pool + landscaping projects share one "pool_landscaping" topic)
   // ─────────────────────────────────────────────────────────────
   {
     slug: "pool-installation-family-kids-maintenance-blind",
     gender: "female",
     title: "A Pool for the Kids",
-    vertical: "pool_installation",
+    vertical: "pool_landscaping",
     difficulty: "beginner",
     briefing:
       "You're a pool installation design consultant meeting a homeowner about a backyard pool. Key terms: 'gunite vs. fiberglass vs. vinyl-liner' (three pool construction types with different cost, install time, and upkeep profiles), 'total cost of ownership' (ongoing chemicals, energy, cleaning, and maintenance beyond the install price), 'variable-speed pump' (an energy-efficient pump that meaningfully lowers running costs).",
@@ -1475,7 +1490,7 @@ Stay upbeat and enthusiastic early, becoming more thoughtful and appreciative as
     slug: "pool-installation-retiree-therapy-unspoken",
     gender: "male",
     title: "Something Small (Retiree)",
-    vertical: "pool_installation",
+    vertical: "pool_landscaping",
     difficulty: "beginner",
     briefing:
       "You're a pool installation design consultant meeting a retiree who wants 'something small.' Key terms: 'lap pool / plunge pool' (compact pool styles suited to exercise or relaxation rather than recreation), 'therapy / resistance jets and heating' (features supporting low-impact exercise and warm-water therapy), 'zero-entry / beach entry' (a gradual sloped entry with no steps, easier on joints).",
@@ -1501,7 +1516,7 @@ Stay understated and a little private early, opening up once the consultant earn
     slug: "pool-installation-hoa-permit-frustration",
     gender: "female",
     title: "Frustrated by HOA & Permits",
-    vertical: "pool_installation",
+    vertical: "pool_landscaping",
     difficulty: "intermediate",
     briefing:
       "You're a pool installation design consultant. A homeowner in an HOA-governed community is frustrated by red tape. Key terms: 'setback requirements' (minimum distances a pool must sit from property lines/structures), 'HOA architectural review / ARC approval' (the community board's sign-off required before building), 'permitting and variance' (municipal approval, and the exception process when a plan doesn't meet a rule), 'easement' (a portion of the lot others have rights to, where you often can't build).",
@@ -1527,7 +1542,7 @@ Stay impatient and a little prickly early, easing into cooperation once the cons
     slug: "pool-installation-lowest-bid-steamroller",
     gender: "male",
     title: "Lowest-Bid Steamroller",
-    vertical: "pool_installation",
+    vertical: "pool_landscaping",
     difficulty: "advanced",
     briefing:
       "You're a pool installation design consultant meeting a homeowner comparing several bids purely on price. Key terms: 'total cost of ownership' (lifetime cost — energy, chemicals, repairs — not just install price), 'variable-speed pump / energy cost' (equipment choices that dramatically change monthly running cost), 'warranty and structural guarantee' (what's actually covered and for how long, a real differentiator hidden by a low bid), 'apples-to-apples scope' (whether competing bids actually include the same work, or a cheap bid quietly omits things).",
@@ -1550,14 +1565,12 @@ Your real underlying needs (reveal only through good discovery questions):
 Stay dismissive, fast, and price-anchored, granting real consideration only when the consultant earns it with concrete lifetime-cost evidence — punish groveling and vague quality claims alike. One to three sentences per turn. No stage directions.`,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // LANDSCAPING
-  // ─────────────────────────────────────────────────────────────
+  // ── Pool & landscaping (landscaping projects) ──
   {
     slug: "landscaping-blank-yard-new-homeowner",
     gender: "male",
     title: "Blank Yard, No Idea Where to Start",
-    vertical: "landscaping",
+    vertical: "pool_landscaping",
     difficulty: "beginner",
     briefing:
       "You're a landscape design consultant meeting a new homeowner with an empty yard. Key terms: 'hardscape vs. softscape' (built elements like patios and walkways vs. living elements like plants, turf, and beds), 'phased design / master plan' (an overall plan built in affordable stages over time), 'grading and drainage' (shaping the land so water flows away from the house), 'native / low-water planting' (regionally-adapted plants that need less upkeep and irrigation).",
@@ -1583,7 +1596,7 @@ Stay friendly and a little lost early, growing enthusiastic as the vision takes 
     slug: "landscaping-mow-trim-hidden-drainage",
     gender: "female",
     title: "Just Mow and Trim (Hidden Drainage Issue)",
-    vertical: "landscaping",
+    vertical: "pool_landscaping",
     difficulty: "beginner",
     briefing:
       "You're a landscape consultant. A homeowner wants basic recurring service but may have a bigger underlying problem. Key terms: 'grading / regrading' (reshaping soil so water drains away from the home rather than pooling), 'French drain / drainage solution' (a gravel-and-pipe system that redirects standing water), 'soil compaction and erosion' (soggy, worn areas where water sits and washes soil away), 'recurring maintenance vs. remediation' (routine mow/trim service vs. fixing a root cause).",
@@ -1609,7 +1622,7 @@ Stay casual and matter-of-fact early, becoming more attentive as the consultant 
     slug: "landscaping-hoa-compliance-pressure",
     gender: "male",
     title: "HOA Complaint Creating Urgency",
-    vertical: "landscaping",
+    vertical: "pool_landscaping",
     difficulty: "intermediate",
     briefing:
       "You're a landscape design consultant. A homeowner has received an HOA violation notice and is reactive and embarrassed. Key terms: 'HOA compliance / violation notice' (a formal warning that a yard breaches community standards, often with a deadline and fines), 'cure period' (the window to fix the issue before penalties escalate), 'low-maintenance / community-standard planting' (durable, tidy plantings that stay compliant with less upkeep), 'phased vs. immediate remediation' (a fast fix now vs. a staged longer-term plan).",
@@ -1635,7 +1648,7 @@ Stay reactive, a bit defensive and embarrassed early, softening as the consultan
     slug: "landscaping-failing-diy-defensive",
     gender: "female",
     title: "Defensive About a Failing DIY Job",
-    vertical: "landscaping",
+    vertical: "pool_landscaping",
     difficulty: "advanced",
     briefing:
       "You're a landscape design consultant meeting a homeowner whose own DIY landscaping is failing. Key terms: 'grading and drainage' (the water-flow foundation most DIY jobs get wrong, causing pooling and plant death), 'plant selection / right-plant-right-place' (matching species to sun, soil, and water — a common DIY mistake), 'sunk-cost / salvage vs. redo' (deciding what existing work can be kept versus what must be torn out), 'soil amendment' (correcting poor soil so plants survive).",

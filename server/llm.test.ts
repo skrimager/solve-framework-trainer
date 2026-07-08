@@ -127,7 +127,10 @@ import {
   CONSTRAINED_DEFERRAL_CAP,
   REFERRAL_MIN_EFFORT_THRESHOLD,
   MAX_ESCALATION_TIER,
+  closeExpectationForTransactionType,
+  anchorForExpectation,
   type CloseOutcome,
+  type CloseExpectation,
 } from "./llm";
 import type { RubricScores } from "@shared/schema";
 
@@ -545,6 +548,136 @@ describe("computeConsultingOverall - constrained-close tiers", () => {
       const lo = computeConsultingOverall(rubric({ needsDiscovery: 0, objectionPrevention: 0, trustBuilding: 0, naturalClose: 0, relationshipContinuity: 0 }), o);
       assert.ok(hi >= 0 && hi <= 100);
       assert.ok(lo >= 0 && lo <= 100);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real-estate transaction-type-aware close expectations. The internal-only
+// scenarios.transactionType picks a close-expectation baseline: "same_day"
+// (manufactured COMMUNITY, real-estate LISTING agent) behaves exactly like the
+// pre-existing default; "multi_step" (manufactured DEALER, real-estate BUYER'S
+// agent) must NOT penalize the absence of a same-day signature and re-anchors a
+// committed next step to the top tier. All of this is driven purely by the
+// transaction type — never surfaced to the trainee.
+// ---------------------------------------------------------------------------
+
+describe("closeExpectationForTransactionType", () => {
+  test("dealer and buyer's-agent are the only multi_step types", () => {
+    assert.equal(closeExpectationForTransactionType("manufactured_dealer"), "multi_step");
+    assert.equal(closeExpectationForTransactionType("re_buyer_agent"), "multi_step");
+  });
+
+  test("community and listing-agent stay same_day (top-tier same-day close realistic)", () => {
+    assert.equal(closeExpectationForTransactionType("manufactured_community"), "same_day");
+    assert.equal(closeExpectationForTransactionType("re_listing_agent"), "same_day");
+  });
+
+  test("unknown / null / undefined default to same_day so every non-RE scenario is unchanged", () => {
+    assert.equal(closeExpectationForTransactionType(null), "same_day");
+    assert.equal(closeExpectationForTransactionType(undefined), "same_day");
+    assert.equal(closeExpectationForTransactionType("hvac_service"), "same_day");
+    assert.equal(closeExpectationForTransactionType(""), "same_day");
+  });
+});
+
+describe("anchorForExpectation", () => {
+  test("same_day is the identity — base anchors are untouched", () => {
+    for (const o of CLOSE_OUTCOMES) {
+      assert.equal(anchorForExpectation(o, "same_day"), closeOutcomeAnchor(o), `same_day should not move ${o}`);
+    }
+  });
+
+  test("multi_step raises ONLY committed-next-step outcomes to the top tier", () => {
+    // The two forward-motion outcomes that are the strongest realistic result on
+    // a first multi-step conversation get re-anchored up to a full agreement.
+    assert.equal(anchorForExpectation("client_asked_next_steps", "multi_step"), 85);
+    assert.equal(anchorForExpectation("constrained_plan_committed", "multi_step"), 85);
+    // Everything else is identical to same_day — no double-counting, no downgrade.
+    for (const o of CLOSE_OUTCOMES) {
+      if (o === "client_asked_next_steps" || o === "constrained_plan_committed") continue;
+      assert.equal(anchorForExpectation(o, "multi_step"), closeOutcomeAnchor(o), `multi_step must not move ${o}`);
+    }
+  });
+});
+
+describe("computeConsultingOverall - transaction-type close expectations", () => {
+  // Strong, uniform discovery/close execution so ONLY the outcome + expectation
+  // move the score.
+  const strong = rubric();
+  const multi: CloseExpectation = "multi_step";
+  const same: CloseExpectation = "same_day";
+
+  test("(a) manufactured COMMUNITY: a same-day deposit/agreement scores top tier", () => {
+    // Community sells on-site inventory — a same-day close is realistic and tops out.
+    assert.equal(closeExpectationForTransactionType("manufactured_community"), same);
+    const agreed = computeConsultingOverall(strong, "client_agreed", "intermediate", same);
+    const deposit = computeConsultingOverall(strong, "constrained_deposit_secured", "intermediate", same);
+    assert.ok(agreed >= ADVANCE_THRESHOLD, `community same-day agreement should qualify, got ${agreed}`);
+    assert.ok(deposit >= ADVANCE_THRESHOLD, `community same-day deposit should qualify, got ${deposit}`);
+  });
+
+  test("(b) manufactured DEALER: a committed plan (no same-day signature) scores well and qualifies", () => {
+    assert.equal(closeExpectationForTransactionType("manufactured_dealer"), multi);
+    const committed = computeConsultingOverall(strong, "constrained_plan_committed", "intermediate", multi);
+    assert.ok(committed >= ADVANCE_THRESHOLD, `dealer committed plan should qualify without a same-day close, got ${committed}`);
+    // Same outcome under the same-day baseline falls just short — proving the
+    // dealer profile is what rescues a legitimately longer-cycle close.
+    const sameDayEquivalent = computeConsultingOverall(strong, "constrained_plan_committed", "intermediate", same);
+    assert.ok(sameDayEquivalent < committed, `multi_step should lift a committed plan above the same_day baseline (${sameDayEquivalent} vs ${committed})`);
+  });
+
+  test("(c) real-estate LISTING agent: a same-day listing agreement scores top tier", () => {
+    assert.equal(closeExpectationForTransactionType("re_listing_agent"), same);
+    const agreed = computeConsultingOverall(strong, "client_agreed", "intermediate", same);
+    assert.ok(agreed >= ADVANCE_THRESHOLD, `listing agreement should score top tier, got ${agreed}`);
+  });
+
+  test("(d) real-estate BUYER'S agent: multi-visit progression scores well and is NOT penalized for no same-day close", () => {
+    assert.equal(closeExpectationForTransactionType("re_buyer_agent"), multi);
+    // Client proactively asking for next steps / scheduling the next showing is
+    // the top realistic outcome on a first buyer conversation.
+    const progression = computeConsultingOverall(strong, "client_asked_next_steps", "advanced", multi);
+    assert.ok(progression >= ADVANCE_THRESHOLD, `buyer-agent progression should qualify, got ${progression}`);
+    // Under the default same-day baseline the identical conversation falls short —
+    // i.e. WITHOUT the buyer-agent profile it would be wrongly penalized.
+    const penalized = computeConsultingOverall(strong, "client_asked_next_steps", "advanced", same);
+    assert.ok(penalized < ADVANCE_THRESHOLD, `same_day baseline would (wrongly) fall short here, got ${penalized}`);
+    assert.ok(progression > penalized, `buyer-agent profile must lift the score, got ${progression} vs ${penalized}`);
+  });
+
+  test("(e-1) multi_step does NOT rescue a vague deferral — PR#25 Tier A cap still holds", () => {
+    // constrained_deferral is deliberately NOT in the multi_step overrides, so a
+    // no-plan ending stays capped even for a longer-cycle deal — no double-count.
+    const tierA = rubric({ needsDiscovery: 78, objectionPrevention: 72, trustBuilding: 76, naturalClose: 55, relationshipContinuity: 50 });
+    const deferralMulti = computeConsultingOverall(tierA, "constrained_deferral", "intermediate", multi);
+    const deferralSame = computeConsultingOverall(tierA, "constrained_deferral", "intermediate", same);
+    assert.ok(deferralMulti <= CONSTRAINED_DEFERRAL_CAP, `deferral cap must hold under multi_step, got ${deferralMulti}`);
+    assert.equal(deferralMulti, deferralSame, "a vague deferral is unaffected by the transaction type");
+  });
+
+  test("(e-2) multi_step leaves the graceful-referral path (PR#24) untouched", () => {
+    const strongReferral = rubric({ needsDiscovery: 85, objectionPrevention: 82, trustBuilding: 85 });
+    const earnedMulti = computeConsultingOverall(strongReferral, "graceful_referral", "advanced", multi);
+    const earnedSame = computeConsultingOverall(strongReferral, "graceful_referral", "advanced", same);
+    assert.equal(earnedMulti, earnedSame, "referral scoring is driven by effort, not the transaction type");
+    // A premature referral (weak process) stays capped low regardless of expectation.
+    const weak = rubric({ needsDiscovery: 40, objectionPrevention: 35, trustBuilding: 45 });
+    const premature = computeConsultingOverall(weak, "graceful_referral", "advanced", multi);
+    assert.ok(premature <= PREMATURE_REFERRAL_CAP, `premature referral still capped under multi_step, got ${premature}`);
+  });
+
+  test("(e-3) weak discovery still caps a multi_step committed plan — the profile can't rescue shallow discovery", () => {
+    const weak = rubric({ needsDiscovery: 40, objectionPrevention: 35, trustBuilding: 45, naturalClose: 80, relationshipContinuity: 80 });
+    const committed = computeConsultingOverall(weak, "constrained_plan_committed", "intermediate", multi);
+    assert.ok(committed <= WEAK_PROCESS_CAP, `weak process must still cap a multi_step close, got ${committed}`);
+  });
+
+  test("default expectation arg keeps every existing (non-RE) caller unchanged", () => {
+    for (const o of CLOSE_OUTCOMES) {
+      const withDefault = computeConsultingOverall(strong, o, "intermediate");
+      const explicitSameDay = computeConsultingOverall(strong, o, "intermediate", same);
+      assert.equal(withDefault, explicitSameDay, `default must equal same_day for ${o}`);
     }
   });
 });
