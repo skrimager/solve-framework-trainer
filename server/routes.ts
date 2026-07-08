@@ -591,7 +591,7 @@ export async function registerRoutes(
       // its track (consulting vs. leadership uses a different rubric).
       const scenario = await storage.getScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
 
       const updated = await storage.updateSession(session.id, {
         status: "completed",
@@ -1300,7 +1300,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       const transcript = JSON.parse(session.transcript);
       const scenario = await storage.getScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
       const updated = await storage.updateDemoSession(session.id, {
         status: "completed",
         score: overall,

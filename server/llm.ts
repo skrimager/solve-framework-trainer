@@ -330,6 +330,87 @@ export function closeOutcomeAnchor(outcome: CloseOutcome): number {
   return CLOSE_OUTCOME_ANCHOR[outcome] ?? CLOSE_OUTCOME_ANCHOR.recommendation_made;
 }
 
+// The internal-only real-estate transaction type a scenario belongs to. This is
+// NEVER shown to the trainee (see scenarios.transactionType in shared/schema.ts)
+// — it is inferred from the scenario's own persona/situation and read here only
+// to pick the right close-expectation baseline. "Real estate" as a vertical
+// spans meaningfully different deal shapes with different realistic close
+// timelines, so the rubric must not hold them all to the same same-day bar.
+export type TransactionType =
+  | "manufactured_community" // on-site inventory in a community: same-day close/deposit realistic
+  | "manufactured_dealer" // broader model selection + land/site variables: longer cycle realistic
+  | "re_listing_agent" // seller's side: signing a listing agreement same-day is realistic
+  | "re_buyer_agent"; // buyer's side: showing homes over multiple visits — a same-day contract is NOT expected
+
+// How realistic a same-day close/agreement is for a given transaction type. This
+// is the single knob transaction type turns:
+//   - "same_day": a same-day close/agreement IS achievable and expected, so it
+//     scores at the top tier when reached (manufactured-community salesperson
+//     selling on-site inventory; real-estate LISTING agent signing a listing
+//     agreement). Behaves exactly like the pre-existing default scoring.
+//   - "multi_step": a same-day signature is NOT a realistic first-conversation
+//     outcome (a real-estate BUYER'S agent showing homes across locations; a
+//     manufactured-housing DEALER with site-prep/land/permitting variables), so
+//     the ABSENCE of a same-day close must not be penalized as a failure. What
+//     matters is guiding the client through a logical decision progression
+//     (narrowing preferences, scheduling next showings, committing to a concrete
+//     next step), so those forward-motion outcomes are re-anchored to the top
+//     tier rather than treated as merely "partway there".
+export type CloseExpectation = "same_day" | "multi_step";
+
+// Manufactured-dealer and real-estate buyer's-agent deals legitimately run a
+// longer cycle; every other (known or unknown) transaction type keeps the
+// same-day baseline. Defaulting unknown/undefined to "same_day" means every
+// non-real-estate scenario is scored exactly as it was before this change.
+export function closeExpectationForTransactionType(t: string | null | undefined): CloseExpectation {
+  return t === "manufactured_dealer" || t === "re_buyer_agent" ? "multi_step" : "same_day";
+}
+
+// For a "multi_step" transaction type, locking in an agreed, concrete next step
+// in a logical decision progression (the client asking where to go from here, or
+// a committed plan/scheduled next showing) IS the strongest outcome achievable
+// on a first conversation — you cannot do better than that today when a same-day
+// signature isn't on the table. So these two forward-motion outcomes are
+// re-anchored up to the top tier (85) for multi_step deals, matching a full
+// same-day agreement. All other anchors (and all "same_day" scoring) are left
+// unchanged. This composes with — and never double-counts against — the PR #25
+// constrained-close tiers: those are triggered by an in-conversation scheduling
+// constraint, whereas this bump is driven purely by the transaction type, and
+// both simply resolve to a single anchor value that is blended once.
+const MULTI_STEP_ANCHOR_OVERRIDES: Partial<Record<CloseOutcome, number>> = {
+  client_asked_next_steps: 85,
+  constrained_plan_committed: 85,
+};
+
+// The anchor a close outcome contributes, given the transaction type's
+// close-expectation profile. "same_day" is the identity (base anchors);
+// "multi_step" raises the committed-next-step outcomes to the top tier.
+export function anchorForExpectation(outcome: CloseOutcome, expectation: CloseExpectation): number {
+  if (expectation === "multi_step" && MULTI_STEP_ANCHOR_OVERRIDES[outcome] !== undefined) {
+    return MULTI_STEP_ANCHOR_OVERRIDES[outcome] as number;
+  }
+  return closeOutcomeAnchor(outcome);
+}
+
+// Transaction-type guidance injected into the CONSULTING scoring prompt so the
+// model classifies the close outcome against the RIGHT close-expectation for the
+// deal — without ever telling the trainee which type they got. Each block only
+// shapes how "moving forward together" is recognized; it never changes the
+// discovery dimensions, which are scored identically across every type. The
+// founder's core principle drives all four: the goal is a comfortable, informed
+// AGREEMENT to a logical next step the client feels good about — not necessarily
+// a signature today.
+const TRANSACTION_TYPE_RUBRIC_CALIBRATION: Record<TransactionType, string> = {
+  manufactured_community:
+    "Transaction context (manufactured-housing COMMUNITY salesperson): the homes are already on-site, so a same-day decision — a deposit or a signed agreement to move forward on a specific unit/lot — IS realistic and is the top outcome when the client is comfortable with it (classify as client_agreed or, if a deposit/paperwork was secured, constrained_deposit_secured). Because the units from the manufacturer are largely similar (minor cosmetic differences only), weight discovery on COMMUNITY and LIFESTYLE fit — lot, neighbors, amenities, day-to-day life here — at least as much as on the specific unit; you're selling the community more than the box.",
+  manufactured_dealer:
+    "Transaction context (manufactured-housing DEALER): the buyer chooses among many models/manufacturers and must place the home somewhere — on land they own or in a pre-selected community — so there are real added variables (site prep, permitting, financing tied to land). A moderately longer cycle is realistic: do NOT penalize the absence of a same-day signature. Score on how well the consultant advanced a logical decision progression and locked in a concrete, agreed next step (a committed plan/timeline is a top outcome here — classify as constrained_plan_committed or client_agreed). A same-day deposit is welcome when it happens but is NOT expected the way it is in a community.",
+  re_listing_agent:
+    "Transaction context (real-estate LISTING agent, seller's side): you are helping a homeowner list their OWN home. This is a fundamentally faster-cycle scenario — a same-day agreement (e.g. signing a listing agreement, agreeing to the listing plan/price strategy) IS realistic and should score at/near the top tier when the seller is genuinely comfortable with it (classify as client_agreed). Do not treat a same-day listing commitment as high-pressure; for a ready seller it is the natural, logical next step.",
+  re_buyer_agent:
+    "Transaction context (real-estate BUYER'S agent, buyer's side): you are showing a buyer multiple homes across different locations. A same-day contract on a FIRST conversation is unrealistic and its absence must NOT be scored as a failure. Score instead on whether the consultant guided the client through a logical decision progression — narrowing preferences, scheduling the next showings, building toward a decision the client is comfortable with. Agreeing on and scheduling concrete next steps IS strong forward motion and the top realistic outcome here — classify it as client_agreed or constrained_plan_committed, NOT as a vague handoff. Reserve none/handoff_no_commitment for a genuinely aimless ending where no next step and no progression were established at all.",
+};
+
 export function normalizeCloseOutcome(raw: unknown): CloseOutcome {
   const value = String(raw ?? "").trim().toLowerCase();
   return (CLOSE_OUTCOMES as readonly string[]).includes(value)
@@ -394,11 +475,16 @@ export const CONSTRAINED_DEFERRAL_CAP = 72;
 export function computeConsultingOverall(
   rubric: RubricScores,
   closeOutcome: CloseOutcome,
-  difficulty: string = "intermediate"
+  difficulty: string = "intermediate",
+  // Transaction-type close-expectation baseline. Defaults to "same_day" so every
+  // existing (non-real-estate) caller is scored exactly as before. A "multi_step"
+  // deal (buyer's agent, manufactured dealer) re-anchors committed-next-step
+  // outcomes to the top tier and never penalizes the absence of a same-day close.
+  closeExpectation: CloseExpectation = "same_day"
 ): number {
   const process = (rubric.needsDiscovery + rubric.objectionPrevention + rubric.trustBuilding) / 3;
   const closeExecution = (rubric.naturalClose + rubric.relationshipContinuity) / 2;
-  const anchor = closeOutcomeAnchor(closeOutcome);
+  const anchor = anchorForExpectation(closeOutcome, closeExpectation);
 
   // A graceful referral is scored as a legitimate SUCCESSFUL outcome, but only
   // when it was earned. When the good-faith discovery effort gate is met, it
@@ -505,7 +591,11 @@ export function detectCloseIntent(text: string): boolean {
 export async function scoreTranscript(
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
-  track: string = "consulting"
+  track: string = "consulting",
+  // Internal-only real-estate transaction type (never trainee-facing). When the
+  // scenario carries one, it selects the close-expectation baseline and injects
+  // matching guidance into the scoring prompt. Ignored for leadership sessions.
+  transactionType: string | null | undefined = null
 ): Promise<{ rubric: RubricScores | LeadershipRubricScores; feedback: string; overall: number }> {
   const transcriptText = transcript
     .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
@@ -517,10 +607,21 @@ export async function scoreTranscript(
   const calibration = calibrationMap[difficulty] ?? calibrationMap.intermediate;
   const keys = isLeadership ? LEADERSHIP_RUBRIC_KEYS : CONSULTING_RUBRIC_KEYS;
 
+  // Consulting sessions with a known transaction type get a type-specific
+  // calibration block appended so the model classifies the close outcome against
+  // the right same-day-vs-multi-step expectation. Leadership sessions and
+  // untyped scenarios get no extra block (identical prompt to before).
+  const txnCalibration =
+    !isLeadership && transactionType && transactionType in TRANSACTION_TYPE_RUBRIC_CALIBRATION
+      ? TRANSACTION_TYPE_RUBRIC_CALIBRATION[transactionType as TransactionType]
+      : "";
+
   // Stable rubric + calibration lead; the volatile transcript comes last so the
-  // rubric prefix (identical for every session at the same track/difficulty)
+  // rubric prefix (identical for every session at the same track/difficulty/type)
   // can be served from cache.
-  const stablePrefix = `${system}\n\n${calibration}`;
+  const stablePrefix = txnCalibration
+    ? `${system}\n\n${calibration}\n\n${txnCalibration}`
+    : `${system}\n\n${calibration}`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -544,7 +645,12 @@ export async function scoreTranscript(
   // their de-escalation dimensions.
   const overall = isLeadership
     ? Math.round(keys.reduce((sum, k) => sum + (parsed[k] ?? 0), 0) / keys.length)
-    : computeConsultingOverall(rubric as RubricScores, normalizeCloseOutcome(parsed.closeOutcome), difficulty);
+    : computeConsultingOverall(
+        rubric as RubricScores,
+        normalizeCloseOutcome(parsed.closeOutcome),
+        difficulty,
+        closeExpectationForTransactionType(transactionType)
+      );
 
   return { rubric, feedback: parsed.feedback ?? "", overall };
 }
