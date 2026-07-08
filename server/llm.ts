@@ -70,12 +70,44 @@ export async function getCustomerOpening(customerPersona: string, track: string 
 // consultant to use more skilled discovery to get anywhere.
 const DIFFICULTY_BEHAVIOR: Record<string, string> = {
   beginner:
-    "Difficulty calibration (BEGINNER): Be relatively cooperative and warm. Volunteer some context with modest prompting, raise only mild objections, and open up fairly readily once the consultant shows basic curiosity.",
+    "Difficulty calibration (BEGINNER): Be warm, cooperative, and fairly forthcoming. Volunteer relevant context with only light prompting, raise only mild objections, and open up readily once the consultant shows basic curiosity. Don't hide your real motivation for long — a beginner should be able to uncover it without expert questioning.",
   intermediate:
-    "Difficulty calibration (INTERMEDIATE): Be realistically guarded. Reveal your real needs only in response to genuinely good, open questions, and raise reasonable objections if the consultant jumps ahead or stays surface-level.",
+    "Difficulty calibration (INTERMEDIATE): Be realistically guarded and a little more closed off. Reveal your real needs only in response to genuinely good, open questions, make the consultant build some rapport before you open up, and raise reasonable objections if the consultant jumps ahead or stays surface-level.",
   advanced:
     "Difficulty calibration (ADVANCED): Be markedly more skeptical and less immediately cooperative. Keep your real needs and priorities well hidden behind your stated request, and reveal them only when the consultant earns it with layered, insightful discovery questions. Push back hard on price and value, surface multiple objections, test whether the consultant is really listening, and stay non-committal until they clearly demonstrate they understand your underlying situation. Do not make it easy.",
 };
+
+// Within-level difficulty escalation ("dangle the carrot"). Once a trainee is
+// consistently clearing the qualifying bar at their current level, the next
+// scenario at that SAME level should get incrementally — not drastically —
+// harder, so mastery keeps requiring a little more before they advance a tier.
+// This is expressed as a small integer tier (0 = base) that layers a light
+// behavioral add-on onto the persona, leaving the base difficulty band intact.
+export const MAX_ESCALATION_TIER = 2;
+
+// Maps a trainee's count of qualifying (85+) sessions at the current level to an
+// escalation tier. The founder's guidance: start nudging harder once they've
+// strung together "a couple" of 85s, and keep it gradual (one notch at a time),
+// never a tier jump. Deliberately gentle so it motivates without discouraging.
+export function computeEscalationTier(qualifyingSessionCount: number): number {
+  if (qualifyingSessionCount >= 4) return 2;
+  if (qualifyingSessionCount >= 2) return 1;
+  return 0;
+}
+
+// The behavioral add-on for each escalation tier, appended to the persona's
+// difficulty calibration. Kept as gentle, incremental toughening that stays
+// within the current level's spirit rather than pushing it toward the next tier.
+const ESCALATION_ADDON: Record<number, string> = {
+  0: "",
+  1: "Escalation (the trainee has been performing well, so make this rendition slightly harder): be a touch slower to volunteer your real motivation, and raise one additional, less-obvious objection before you fully open up. Stay fair for this level — this is a small step up, not a jump.",
+  2: "Escalation (the trainee is consistently strong, so make this noticeably harder within this level): stay guarded a bit longer, require clearer rapport before you reveal your real motivation, and surface a tougher objection or a less obvious buying signal. Remain fair for this level — a firm step up, still not the next tier.",
+};
+
+export function escalationAddon(tier: number): string {
+  const clamped = Math.max(0, Math.min(MAX_ESCALATION_TIER, Math.trunc(tier)));
+  return ESCALATION_ADDON[clamped] ?? "";
+}
 
 // Conversation-progression rules layered onto every customer reply. Without
 // these the model tends to restate the same objection in slightly reworded form
@@ -100,10 +132,16 @@ export const CONVERSATION_REALISM_RULES = `Conversation realism (follow on EVERY
 // cache on turns 2, 3, 4, ... instead of re-billing them at full input rate.
 export function buildCustomerReplyStablePrefix(
   customerPersona: string,
-  difficulty: string = "intermediate"
+  difficulty: string = "intermediate",
+  escalationTier: number = 0
 ): string {
   const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
-  return `${customerPersona}\n\n${behavior}\n\n${CONVERSATION_REALISM_RULES}`;
+  const addon = escalationAddon(escalationTier);
+  // Default (tier 0) keeps the prefix byte-identical to the pre-escalation
+  // format so within-session prompt caching is unaffected when no escalation
+  // applies. A non-zero tier appends its gentle behavioral toughening.
+  const behaviorBlock = addon ? `${behavior}\n\n${addon}` : behavior;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}`;
 }
 
 // Builds the full prompt sent to the model for the customer's next reply. Kept
@@ -115,9 +153,10 @@ export function buildCustomerReplyStablePrefix(
 export function buildCustomerReplyPrompt(
   customerPersona: string,
   transcript: TranscriptMessage[],
-  difficulty: string = "intermediate"
+  difficulty: string = "intermediate",
+  escalationTier: number = 0
 ): string {
-  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty);
+  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
 
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
@@ -131,14 +170,15 @@ export function buildCustomerReplyPrompt(
 export async function getCustomerReply(
   customerPersona: string,
   transcript: TranscriptMessage[],
-  difficulty: string = "intermediate"
+  difficulty: string = "intermediate",
+  escalationTier: number = 0
 ): Promise<string> {
-  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty);
+  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier);
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
     input,
-    prompt_cache_key: cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty)),
+    prompt_cache_key: cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier)),
   });
 
   return (response.output_text || "").trim();
@@ -158,22 +198,23 @@ Also classify how the consultation actually ended, from the CUSTOMER's perspecti
 - "handoff_no_commitment": the consultant tried to wrap up with a soft handoff — handing over a business card, "call me when you're ready", "here's my info", "thanks, goodbye" — WITHOUT the customer agreeing to any concrete next step. Ending this way is an incomplete close, not a real one.
 - "recommendation_made": the consultant did propose a specific recommendation/solution, but the customer gave no clear buy-in signal (didn't ask about next steps and didn't explicitly agree).
 - "client_asked_next_steps": the customer themselves asked something like "what are the next steps?" / "where do we go from here?" — a strong signal the consultant earned enough trust to prompt forward motion.
-- "client_agreed": the customer explicitly agreed to / accepted the proposed recommendation or solution. This is the strongest outcome.
+- "client_agreed": the customer explicitly agreed to / accepted the proposed recommendation or solution. This is the strongest "moving forward together" outcome.
+- "graceful_referral": the consultant, AFTER a genuine, competent discovery effort (real open questions, real rapport-building, adequate time invested), recognized that the customer cannot or will not articulate a clear vision, goal, or motivation — so there is no real basis to engineer a solution — and gracefully referred them elsewhere ("I don't think we're the best fit here; let me point you to someone who may serve you better") instead of forcing a close. This is a LEGITIMATE, professional outcome, NOT a failed close. Classify an ending as "graceful_referral" ONLY when the discovery effort was genuine; if the consultant bailed early, asked shallow questions, or referred out to avoid doing the work, do NOT use this value — classify by what actually happened (usually "none" or "handoff_no_commitment") and let the low discovery scores reflect the weak effort.
 
 Return ONLY valid JSON matching this shape, no other text:
 {"needsDiscovery": number, "objectionPrevention": number, "trustBuilding": number, "naturalClose": number, "relationshipContinuity": number, "closeOutcome": string, "feedback": string}
 
-"feedback" should be 3-5 sentences of specific, constructive narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). Briefly acknowledge what the consultant did well or attempted, then give at least one concrete example of a specific question or phrase they could have used at a particular point in the conversation to score higher on the dimension(s) where they lost points — quote or closely paraphrase the moment in the transcript this applies to. This is discovery-skills coaching, not just a list of what was missing.`;
+"feedback" should be 3-5 sentences of specific, DIAGNOSTIC narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). It must do three things: (1) acknowledge specifically what the consultant did well or attempted, quoting or closely paraphrasing a real moment from the transcript; (2) where they lost points, give at least one concrete example of a specific question or phrase they could have used at a particular point to score higher — again tied to a real moment; (3) when a topic (for example budget/financing) was handled well but raised LATER rather than earlier, do NOT treat that as a failure — acknowledge that they handled it competently when it came up, and explain WHY raising it earlier generally helps (e.g. it lets you shape options to fit from the start and prevents surprises), framed as forward-looking coaching rather than punishment for a good outcome. This is diagnostic discovery-skills coaching, not just a list of what was missing.`;
 
 // Per-difficulty scoring strictness so a higher-level scenario demands more
 // precision and completeness to earn the same score.
 const RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
   beginner:
-    "Scoring calibration (BEGINNER): Reward solid fundamentals. Give credit for a clear, genuine attempt at open discovery and trust-building even when coverage isn't exhaustive.",
+    "Scoring calibration (BEGINNER): Reward solid fundamentals and grade leniently. Give full credit for a clear, genuine attempt at open discovery and trust-building even when coverage isn't exhaustive. Financing/budget is still a real, scored factor — the consultant should address it before wrapping up — BUT at this level the TIMING of when it was raised should barely matter: do NOT dock objectionPrevention or any dimension simply because budget/financing came up later in the conversation rather than up front, as long as it was covered and handled competently before the close. Reward handling a topic well whenever it naturally arose. A strong beginner performance with good discovery, rapport, and a natural close should land in the low-to-mid 80s even if one topic was raised a little late.",
   intermediate:
-    "Scoring calibration (INTERMEDIATE): Hold a professional bar. Expect multiple layers of discovery and mostly complete needs-matching before awarding high marks.",
+    "Scoring calibration (INTERMEDIATE): Hold a professional bar and toughen up relative to beginner. Expect multiple layers of discovery and mostly complete needs-matching before awarding high marks. Timing now matters more: raising budget/financing and other key topics proactively (rather than only reacting when the customer brings them up) is part of good objection prevention and should be reflected in the score.",
   advanced:
-    "Scoring calibration (ADVANCED): Grade strictly. Award high scores (85+) ONLY when discovery is thorough and multi-layered, the real underlying need is explicitly uncovered and reflected back in the customer's own words, objections are anticipated and handled rather than merely reacted to, and any close/next step is precisely tied to what the customer said. Penalize shallow questioning, missed objections, and incomplete needs-matching more heavily than at lower levels.",
+    "Scoring calibration (ADVANCED): Grade strictly. Award high scores (85+) ONLY when discovery is thorough and multi-layered, the real underlying need is explicitly uncovered and reflected back in the customer's own words, objections are anticipated and handled rather than merely reacted to, and any close/next step is precisely tied to what the customer said. Penalize shallow questioning, missed objections, and incomplete needs-matching more heavily than at lower levels. IMPORTANT — the referral path: some advanced customers genuinely cannot or will not articulate a clear vision/goal/motivation even under skilled questioning. When that happens AND the consultant has made a genuine, competent discovery effort, a graceful referral out ('I don't think we're the best fit; let me point you to someone who can serve you better') is a HIGH-scoring, professional outcome — score it on the QUALITY of the discovery effort and the gracefulness of the handoff, and do NOT penalize it for not closing. Do NOT reward a referral that skipped real discovery or gave up early — that is a weak effort and should score low.",
 };
 
 // Leadership / Conflict-Management scoring rubric. Parallel to RUBRIC_SYSTEM but
@@ -227,7 +268,8 @@ export type CloseOutcome =
   | "handoff_no_commitment" // soft close (business card, "call me later") with no agreed next step
   | "recommendation_made" // a recommendation was proposed, but the client gave no buy-in signal
   | "client_asked_next_steps" // the client proactively asked "what are the next steps?"
-  | "client_agreed"; // the client explicitly agreed to the proposed recommendation
+  | "client_agreed" // the client explicitly agreed to the proposed recommendation
+  | "graceful_referral"; // the consultant, after genuine discovery, judged the customer a poor fit and gracefully referred them elsewhere instead of forcing a close
 
 export const CLOSE_OUTCOMES: readonly CloseOutcome[] = [
   "none",
@@ -235,6 +277,7 @@ export const CLOSE_OUTCOMES: readonly CloseOutcome[] = [
   "recommendation_made",
   "client_asked_next_steps",
   "client_agreed",
+  "graceful_referral",
 ] as const;
 
 // The outcome/closing anchor each close tier contributes to the overall score.
@@ -248,6 +291,11 @@ const CLOSE_OUTCOME_ANCHOR: Record<CloseOutcome, number> = {
   recommendation_made: 65,
   client_asked_next_steps: 80,
   client_agreed: 85,
+  // A graceful referral, when EARNED by genuine discovery, is a legitimate
+  // successful outcome — not a failed close — so it anchors alongside client
+  // agreement. This anchor only applies once the good-faith effort gate is met
+  // (see computeConsultingOverall); a premature/lazy referral is capped low.
+  graceful_referral: 85,
 };
 
 export function closeOutcomeAnchor(outcome: CloseOutcome): number {
@@ -272,6 +320,31 @@ export const WEAK_PROCESS_CAP = 64;
 // committed next step) — this closing behavior specifically scores LOW.
 export const SOFT_CLOSE_CAP = 55;
 
+// Beginner-tier leniency. The founder's guidance: beginner should be a "nice
+// blend" — easier, but the trainee still has to demonstrate the fundamentals.
+// A strong-but-imperfect beginner performance (good discovery + rapport + a
+// natural close, with one topic like financing raised a little late) should
+// land in the low 80s rather than the high 70s. This is a modest, bounded
+// additive nudge applied ONLY at beginner and ONLY after the hard caps below,
+// so it lifts genuine borderline performances without rescuing weak-process or
+// soft-close attempts (those stay capped). It is further bounded so it can never
+// reach the 85 qualifying bar (see computeConsultingOverall): a single lenient
+// bump must not manufacture advancement — that still has to be earned outright.
+export const BEGINNER_LENIENCY_BONUS = 3;
+
+// Graceful-referral scoring. A referral only counts as a legitimate successful
+// outcome when it follows a genuine, competent discovery effort — the persona
+// was given a real chance to reveal a vision/motivation and still couldn't or
+// wouldn't. Process quality (discovery + objection-prevention + trust) is the
+// deterministic proxy for that good-faith effort. Below this bar, a referral
+// reads as "gave up early / bad questions / bailed" and is capped low so lazy
+// or premature referrals never score well.
+export const REFERRAL_MIN_EFFORT_THRESHOLD = 70;
+// Cap applied to a premature/lazy referral (referred out without the good-faith
+// discovery effort above). Same low band as a soft close: not an acceptable way
+// to end the conversation.
+export const PREMATURE_REFERRAL_CAP = 55;
+
 // Combines the discovery rubric sub-scores with the close/buy-in outcome into a
 // single overall score for a CONSULTING session. This is a genuine weighted
 // blend, not a binary "was a recommendation stated" gate:
@@ -280,21 +353,60 @@ export const SOFT_CLOSE_CAP = 55;
 //   - the close-execution sub-scores (naturalClose + relationshipContinuity) fine-tune.
 // Two hard rules encode "necessary but not sufficient": weak discovery/rapport
 // caps the score below passing, and a soft/no-commitment close caps it low.
-export function computeConsultingOverall(rubric: RubricScores, closeOutcome: CloseOutcome): number {
+export function computeConsultingOverall(
+  rubric: RubricScores,
+  closeOutcome: CloseOutcome,
+  difficulty: string = "intermediate"
+): number {
   const process = (rubric.needsDiscovery + rubric.objectionPrevention + rubric.trustBuilding) / 3;
   const closeExecution = (rubric.naturalClose + rubric.relationshipContinuity) / 2;
   const anchor = closeOutcomeAnchor(closeOutcome);
 
+  // A graceful referral is scored as a legitimate SUCCESSFUL outcome, but only
+  // when it was earned. When the good-faith discovery effort gate is met, it
+  // blends exactly like a strong close (its high anchor + the gracefulness of
+  // the handoff, captured by naturalClose/relationshipContinuity). When it is
+  // NOT met, the referral was premature/lazy and is capped low regardless of a
+  // high anchor.
+  const isEarnedReferral =
+    closeOutcome === "graceful_referral" && process >= REFERRAL_MIN_EFFORT_THRESHOLD;
+
   let overall = 0.5 * process + 0.3 * anchor + 0.2 * closeExecution;
+
+  // Track whether a hard cap fired so beginner leniency below can never rescue a
+  // genuinely failing attempt (weak process, soft close, or premature referral).
+  let capped = false;
 
   // Recommendation is necessary but not sufficient: too little discovery/rapport
   // fails the attempt even when a recommendation (or agreement) was reached.
   if (process < WEAK_PROCESS_THRESHOLD) {
     overall = Math.min(overall, WEAK_PROCESS_CAP);
+    capped = true;
   }
   // A soft close is not an acceptable outcome — score it low for the closing dimension.
   if (closeOutcome === "none" || closeOutcome === "handoff_no_commitment") {
     overall = Math.min(overall, SOFT_CLOSE_CAP);
+    capped = true;
+  }
+  // A referral that was NOT preceded by a genuine discovery effort reads as
+  // giving up — cap it low so lazy/premature referrals never score well.
+  if (closeOutcome === "graceful_referral" && !isEarnedReferral) {
+    overall = Math.min(overall, PREMATURE_REFERRAL_CAP);
+    capped = true;
+  }
+
+  // Beginner leniency: a modest, bounded nudge applied only to non-capped
+  // performances, so it lifts a genuine borderline beginner attempt into the low
+  // 80s the founder wants (e.g. a 79 becomes an 82) without rescuing a failing
+  // one. Two safeguards keep it honest: it only ever RAISES a score (never
+  // lowers), and it can never lift a score to the 85 qualifying bar — a single
+  // lenient bump must not manufacture advancement, so leniency alone tops out at
+  // one point below the bar. A genuinely excellent beginner performance that
+  // already computes to 85+ on its own merits is untouched and still qualifies.
+  // Skipped for an (already full-credit) earned referral.
+  if (difficulty === "beginner" && !capped && !isEarnedReferral && overall < ADVANCE_THRESHOLD) {
+    const bonused = Math.min(overall + BEGINNER_LENIENCY_BONUS, ADVANCE_THRESHOLD - 1);
+    overall = Math.max(overall, bonused);
   }
 
   return Math.round(Math.max(0, Math.min(100, overall)));
@@ -321,6 +433,13 @@ const CLOSE_INTENT_PATTERNS: RegExp[] = [
   /\bthanks?(?: you)? (?:for your time|so much|again)\b/,
   /\bthank you for your time\b/,
   /\bappreciate your time\b/,
+  // Graceful-referral / "not the best fit" wrap-ups. A referral is also a way of
+  // ending the conversation, so it must trigger the same end-and-score checkpoint.
+  /\b(?:best|right|good)\s+fit\b/,
+  /\brefer you (?:to|out)\b/,
+  /\bpoint you (?:to|toward|in the direction)\b/,
+  /\bsomeone (?:who|that) (?:can|could|might|may|would) (?:better |)(?:serve|help|fit)\b/,
+  /\bbetter served (?:by|elsewhere)\b/,
 ];
 
 export function detectCloseIntent(text: string): boolean {
@@ -375,7 +494,7 @@ export async function scoreTranscript(
   // their de-escalation dimensions.
   const overall = isLeadership
     ? Math.round(keys.reduce((sum, k) => sum + (parsed[k] ?? 0), 0) / keys.length)
-    : computeConsultingOverall(rubric as RubricScores, normalizeCloseOutcome(parsed.closeOutcome));
+    : computeConsultingOverall(rubric as RubricScores, normalizeCloseOutcome(parsed.closeOutcome), difficulty);
 
   return { rubric, feedback: parsed.feedback ?? "", overall };
 }
@@ -494,7 +613,7 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
 
   // Stable instruction leads; the volatile transcript comes last so the
   // instruction prefix is cacheable across calls.
-  const stablePrefix = `Read this discovery-training role-play transcript. Has the consultant proposed ANY recommendation, solution, product/option, or next step/close to the customer yet — even a tentative or partial one? Answer with ONLY the single word "yes" or "no".`;
+  const stablePrefix = `Read this discovery-training role-play transcript. Has the consultant reached a terminal point — that is, either (a) proposed ANY recommendation, solution, product/option, or next step/close to the customer, even a tentative or partial one, OR (b) after a genuine discovery effort, gracefully referred the customer elsewhere because they aren't the right fit? Answer with ONLY the single word "yes" or "no".`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,

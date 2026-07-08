@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   normalizeTrack,
   drawExam,
@@ -501,7 +501,26 @@ export async function registerRoutes(
       // score now or continue the conversation.
       const closeCheckpoint = detectCloseIntent(content);
 
-      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty);
+      // Within-level difficulty escalation ("dangle the carrot"): once the
+      // trainee is consistently clearing the qualifying bar at this level, nudge
+      // the persona incrementally harder. Computed from already-completed
+      // sessions, so it is stable across this session's turns (keeping the
+      // customer-reply prompt prefix cacheable). Defaults to base (tier 0) if the
+      // lookup fails, so it can never break a turn.
+      let escalationTier = 0;
+      try {
+        const track = scenarioTrack(scenario.track);
+        const [allSessions, allScenarios] = await Promise.all([
+          storage.listSessionsByUser(session.userId),
+          storage.listScenarios(),
+        ]);
+        const scoresAtLevel = scoresForTrackAtLevel(track, scenario.difficulty, allSessions, allScenarios);
+        escalationTier = computeEscalationTier(countQualifyingSessions(scoresAtLevel));
+      } catch {
+        escalationTier = 0;
+      }
+
+      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty, escalationTier);
 
       const msgId = randomUUID();
       const customerMsg = transcriptMessageSchema.parse({

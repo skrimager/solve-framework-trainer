@@ -117,10 +117,15 @@ import {
   closeOutcomeAnchor,
   normalizeCloseOutcome,
   computeConsultingOverall,
+  computeEscalationTier,
+  escalationAddon,
   CLOSE_OUTCOMES,
   ADVANCE_THRESHOLD,
   WEAK_PROCESS_CAP,
   SOFT_CLOSE_CAP,
+  PREMATURE_REFERRAL_CAP,
+  REFERRAL_MIN_EFFORT_THRESHOLD,
+  MAX_ESCALATION_TIER,
   type CloseOutcome,
 } from "./llm";
 import type { RubricScores } from "@shared/schema";
@@ -265,5 +270,251 @@ describe("computeConsultingOverall", () => {
       assert.ok(hi >= 0 && hi <= 100);
       assert.ok(lo >= 0 && lo <= 100);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Beginner leniency — a strong-but-imperfect beginner attempt (good discovery,
+// rapport, and close, with one topic like financing raised a little late) must
+// land in the low 80s, not the high 70s, WITHOUT letting leniency manufacture a
+// qualifying (85+) session. This encodes the founder's spec directly.
+// ---------------------------------------------------------------------------
+
+describe("computeConsultingOverall - beginner leniency", () => {
+  // The exact profile from the founder's real test: strong discovery + rapport
+  // and a natural close the client agreed to, but financing was raised late so
+  // objection-prevention took a hit. At intermediate this scores 79; at beginner
+  // the timing should barely matter and it should land 80-82.
+  const lateFinancing = rubric({
+    needsDiscovery: 80,
+    objectionPrevention: 60, // dinged for late financing
+    trustBuilding: 85,
+    naturalClose: 82,
+    relationshipContinuity: 80,
+  });
+
+  test("the same late-financing attempt scores 79 at intermediate", () => {
+    const score = computeConsultingOverall(lateFinancing, "client_agreed", "intermediate");
+    assert.equal(score, 79);
+  });
+
+  test("the same attempt scores 80-82 at beginner (the founder's target)", () => {
+    const score = computeConsultingOverall(lateFinancing, "client_agreed", "beginner");
+    assert.ok(score >= 80 && score <= 82, `expected 80-82 at beginner, got ${score}`);
+  });
+
+  test("leniency only ever raises a beginner score, never lowers it", () => {
+    // Sweep a range of sub-scores; beginner must always be >= intermediate.
+    for (let base = 40; base <= 95; base += 5) {
+      const r = rubric({ needsDiscovery: base, objectionPrevention: base, trustBuilding: base });
+      const beginner = computeConsultingOverall(r, "client_agreed", "beginner");
+      const intermediate = computeConsultingOverall(r, "client_agreed", "intermediate");
+      assert.ok(beginner >= intermediate, `beginner ${beginner} < intermediate ${intermediate} at base ${base}`);
+    }
+  });
+
+  test("leniency alone cannot manufacture a qualifying (85+) beginner session", () => {
+    // A borderline-strong beginner attempt that computes to the low 80s must stay
+    // below the 85 bar after leniency — advancement has to be earned outright.
+    const strongButImperfect = rubric({
+      needsDiscovery: 82,
+      objectionPrevention: 78,
+      trustBuilding: 85,
+      naturalClose: 85,
+      relationshipContinuity: 85,
+    });
+    const score = computeConsultingOverall(strongButImperfect, "client_agreed", "beginner");
+    assert.ok(score < ADVANCE_THRESHOLD, `leniency should not reach the bar, got ${score}`);
+  });
+
+  test("a genuinely excellent beginner attempt still qualifies on its own merit", () => {
+    const excellent = rubric({
+      needsDiscovery: 92,
+      objectionPrevention: 90,
+      trustBuilding: 92,
+      naturalClose: 90,
+      relationshipContinuity: 90,
+    });
+    const score = computeConsultingOverall(excellent, "client_agreed", "beginner");
+    assert.ok(score >= ADVANCE_THRESHOLD, `expected >= ${ADVANCE_THRESHOLD}, got ${score}`);
+  });
+
+  test("beginner leniency never rescues a weak-process or soft-close attempt", () => {
+    const weak = rubric({ needsDiscovery: 40, objectionPrevention: 35, trustBuilding: 45 });
+    assert.ok(computeConsultingOverall(weak, "client_agreed", "beginner") <= WEAK_PROCESS_CAP);
+    const strong = rubric();
+    assert.ok(computeConsultingOverall(strong, "none", "beginner") <= SOFT_CLOSE_CAP);
+    assert.ok(computeConsultingOverall(strong, "handoff_no_commitment", "beginner") <= SOFT_CLOSE_CAP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Graceful referral — a legitimate high-scoring outcome when EARNED by genuine
+// discovery, but capped low when the referral was premature/lazy. Guards against
+// abuse: referring out to dodge the work must never score well.
+// ---------------------------------------------------------------------------
+
+describe("computeConsultingOverall - graceful referral path", () => {
+  test("a graceful referral after a good-faith effort scores well (not a failed close)", () => {
+    const goodFaith = rubric({
+      needsDiscovery: 82,
+      objectionPrevention: 78,
+      trustBuilding: 85,
+      naturalClose: 85, // graceful handoff
+      relationshipContinuity: 85, // pointed them somewhere genuinely helpful
+    });
+    const referral = computeConsultingOverall(goodFaith, "graceful_referral", "advanced");
+    assert.ok(referral >= 80, `earned referral should score well, got ${referral}`);
+
+    // Crucially, the SAME strong discovery ending with no proposal at all ("none")
+    // is treated as a soft close and scores far lower — proving the referral is
+    // NOT penalized as a failed close.
+    const noClose = computeConsultingOverall(goodFaith, "none", "advanced");
+    assert.ok(referral > noClose + 20, `referral ${referral} should vastly outscore a no-close ${noClose}`);
+  });
+
+  test("an excellent good-faith referral can clear the qualifying bar", () => {
+    const excellent = rubric({
+      needsDiscovery: 88,
+      objectionPrevention: 85,
+      trustBuilding: 90,
+      naturalClose: 90,
+      relationshipContinuity: 90,
+    });
+    const score = computeConsultingOverall(excellent, "graceful_referral", "advanced");
+    assert.ok(score >= ADVANCE_THRESHOLD, `expected >= ${ADVANCE_THRESHOLD}, got ${score}`);
+  });
+
+  test("a lazy/premature referral (weak discovery, gave up early) scores LOW", () => {
+    const lazy = rubric({
+      needsDiscovery: 45,
+      objectionPrevention: 40,
+      trustBuilding: 42,
+      naturalClose: 60,
+      relationshipContinuity: 55,
+    });
+    const score = computeConsultingOverall(lazy, "graceful_referral", "advanced");
+    assert.ok(score <= PREMATURE_REFERRAL_CAP, `expected <= ${PREMATURE_REFERRAL_CAP}, got ${score}`);
+    assert.ok(score < ADVANCE_THRESHOLD);
+  });
+
+  test("the good-faith gate is a real cliff: process just below the bar is still capped", () => {
+    // Process of 65 is decent but below the REFERRAL_MIN_EFFORT_THRESHOLD (70):
+    // this reads as insufficient effort, so the referral is capped low.
+    const belowBar = rubric({
+      needsDiscovery: 66,
+      objectionPrevention: 64,
+      trustBuilding: 65,
+      naturalClose: 70,
+      relationshipContinuity: 68,
+    });
+    const below = computeConsultingOverall(belowBar, "graceful_referral", "advanced");
+    assert.ok(below <= PREMATURE_REFERRAL_CAP, `below-bar referral should be capped, got ${below}`);
+
+    // Process of exactly the threshold clears the gate and scores well above the cap.
+    const atBar = rubric({
+      needsDiscovery: REFERRAL_MIN_EFFORT_THRESHOLD,
+      objectionPrevention: REFERRAL_MIN_EFFORT_THRESHOLD,
+      trustBuilding: REFERRAL_MIN_EFFORT_THRESHOLD,
+      naturalClose: 80,
+      relationshipContinuity: 80,
+    });
+    const earned = computeConsultingOverall(atBar, "graceful_referral", "advanced");
+    assert.ok(earned > PREMATURE_REFERRAL_CAP, `at-threshold referral should clear the cap, got ${earned}`);
+    assert.ok(earned - below > 15, `expected a clear cliff between insufficient and good-faith effort`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectCloseIntent — graceful-referral phrasing must also trigger the
+// end-and-score checkpoint (a referral is a way of ending the conversation).
+// ---------------------------------------------------------------------------
+
+describe("detectCloseIntent - graceful referral phrasing", () => {
+  test("detects 'not the best fit' style referrals", () => {
+    assert.equal(detectCloseIntent("Honestly, I don't think we're the best fit for you."), true);
+    assert.equal(detectCloseIntent("Let me refer you to someone who can help."), true);
+    assert.equal(detectCloseIntent("I can point you toward a colleague who specializes in this."), true);
+    assert.equal(detectCloseIntent("You'd be better served by someone who focuses on rentals."), true);
+  });
+
+  test("still ignores ordinary discovery questions", () => {
+    assert.equal(detectCloseIntent("What would a great outcome look like for you?"), false);
+    assert.equal(detectCloseIntent("Tell me more about what's driving the timeline."), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Within-level difficulty escalation ("dangle the carrot") — gradual, one notch
+// at a time, kicking in only once the trainee strings together qualifying scores.
+// ---------------------------------------------------------------------------
+
+describe("computeEscalationTier", () => {
+  test("stays at base until a couple of qualifying sessions are earned", () => {
+    assert.equal(computeEscalationTier(0), 0);
+    assert.equal(computeEscalationTier(1), 0);
+  });
+
+  test("nudges up one notch at a time as mastery accumulates", () => {
+    assert.equal(computeEscalationTier(2), 1);
+    assert.equal(computeEscalationTier(3), 1);
+    assert.equal(computeEscalationTier(4), 2);
+    assert.equal(computeEscalationTier(5), 2);
+  });
+
+  test("never exceeds the max escalation tier", () => {
+    assert.equal(computeEscalationTier(50), MAX_ESCALATION_TIER);
+  });
+});
+
+describe("escalationAddon + buildCustomerReplyStablePrefix escalation", () => {
+  test("tier 0 adds nothing and keeps the prefix byte-identical to the base format", () => {
+    assert.equal(escalationAddon(0), "");
+    const base = buildCustomerReplyStablePrefix(PERSONA, "advanced");
+    const explicitZero = buildCustomerReplyStablePrefix(PERSONA, "advanced", 0);
+    assert.equal(base, explicitZero);
+    assert.ok(!base.includes("Escalation"));
+  });
+
+  test("higher tiers append progressively harder behavioral guidance", () => {
+    assert.match(escalationAddon(1), /slightly harder/i);
+    assert.match(escalationAddon(2), /noticeably harder/i);
+  });
+
+  test("escalation addon is layered into the stable prefix without dropping persona/rules", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 1);
+    assert.ok(prefix.includes(PERSONA));
+    assert.ok(prefix.includes(CONVERSATION_REALISM_RULES));
+    assert.ok(prefix.includes("Escalation"));
+  });
+
+  test("clamps out-of-range tiers", () => {
+    assert.equal(escalationAddon(-5), "");
+    assert.equal(escalationAddon(99), escalationAddon(MAX_ESCALATION_TIER));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Persona guardedness by difficulty (item 4) — testable at the prompt level:
+// beginner personas are forthcoming, intermediate guarded/need rapport, advanced
+// skeptical and hidden.
+// ---------------------------------------------------------------------------
+
+describe("DIFFICULTY_BEHAVIOR progression (prompt construction)", () => {
+  test("beginner personas are forthcoming", () => {
+    const p = buildCustomerReplyStablePrefix(PERSONA, "beginner").toLowerCase();
+    assert.ok(p.includes("forthcoming") || p.includes("readily"));
+  });
+
+  test("intermediate personas are guarded and require rapport", () => {
+    const p = buildCustomerReplyStablePrefix(PERSONA, "intermediate").toLowerCase();
+    assert.ok(p.includes("guarded"));
+    assert.ok(p.includes("rapport"));
+  });
+
+  test("advanced personas are skeptical and keep needs hidden", () => {
+    const p = buildCustomerReplyStablePrefix(PERSONA, "advanced").toLowerCase();
+    assert.ok(p.includes("skeptical"));
+    assert.ok(p.includes("hidden"));
   });
 });
