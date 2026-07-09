@@ -14,6 +14,7 @@ import {
   isCodeValid,
   isSessionLimitReached,
   remainingSessions,
+  isUnlimitedDemoEmail,
   signDemoToken,
   verifyDemoToken,
   ctaSeatQuestion,
@@ -79,6 +80,32 @@ describe("session limit helpers", () => {
     assert.equal(remainingSessions(0), MAX_DEMO_SESSIONS);
     assert.equal(remainingSessions(MAX_DEMO_SESSIONS), 0);
     assert.equal(remainingSessions(MAX_DEMO_SESSIONS + 5), 0);
+  });
+
+  test("isUnlimitedDemoEmail recognizes the founder's exempted email, case/whitespace-insensitively", () => {
+    assert.equal(isUnlimitedDemoEmail("wadeskrimager@icloud.com"), true);
+    assert.equal(isUnlimitedDemoEmail("  WadeSkrimager@ICloud.com  "), true);
+    assert.equal(isUnlimitedDemoEmail("someoneelse@example.com"), false);
+  });
+
+  test("an exempted email is never limit-reached even far past MAX", () => {
+    const email = "wadeskrimager@icloud.com";
+    assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS, email), false);
+    assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS + 50, email), false);
+    assert.equal(isSessionLimitReached(0, email), false);
+  });
+
+  test("an exempted email always has Infinity remaining", () => {
+    const email = "wadeskrimager@icloud.com";
+    assert.equal(remainingSessions(0, email), Infinity);
+    assert.equal(remainingSessions(MAX_DEMO_SESSIONS, email), Infinity);
+    assert.equal(remainingSessions(MAX_DEMO_SESSIONS + 100, email), Infinity);
+  });
+
+  test("a non-exempted email is unaffected by the email param (same behavior as no email)", () => {
+    const email = "someoneelse@example.com";
+    assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS, email), true);
+    assert.equal(remainingSessions(MAX_DEMO_SESSIONS, email), 0);
   });
 });
 

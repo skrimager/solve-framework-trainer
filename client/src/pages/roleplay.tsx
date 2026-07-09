@@ -124,6 +124,13 @@ export default function RolePlay() {
   const [scoringFailed, setScoringFailed] = useState(false);
   const [showIncompleteModal, setShowIncompleteModal] = useState(false);
   const [showCloseCheckpoint, setShowCloseCheckpoint] = useState(false);
+  // Tracks whether the consultant has already hit the "incomplete" wall once in
+  // this session. On the first hit we show the choice modal (cancel / save for
+  // later / force-score now). If they end up back here a second time — e.g. they
+  // resumed and tried to end again — we skip the modal entirely and force-score
+  // immediately, so nobody gets stuck seeing the same blocking wall twice with no
+  // way out. A bad score is always better than no score.
+  const hitIncompleteOnceRef = useRef(false);
 
   const completeSession = useMutation({
     mutationFn: async (opts?: { force?: boolean }) => {
@@ -137,9 +144,16 @@ export default function RolePlay() {
       navigate(`/results/${id}`);
     },
     onError: (err: any) => {
-      // A 409 means no recommendation/solution has been proposed yet — show the
-      // "incomplete consultation" choice instead of treating it as a real failure.
+      // A 409 means no recommendation/solution has been proposed yet (per a single
+      // LLM judgment call, which can false-negative on a legitimate transcript).
       if (String(err?.message ?? "").startsWith("409")) {
+        if (hitIncompleteOnceRef.current) {
+          // Second time hitting this wall in this session — don't show the modal
+          // again, just force the score through.
+          completeSession.mutate({ force: true });
+          return;
+        }
+        hitIncompleteOnceRef.current = true;
         setShowIncompleteModal(true);
         return;
       }
@@ -370,12 +384,12 @@ export default function RolePlay() {
           <DialogHeader>
             <DialogTitle>Consultation is incomplete</DialogTitle>
             <DialogDescription data-testid="text-incomplete-message">
-              This consultation is incomplete without a solution. You haven't proposed a
-              recommendation or close to the customer yet. Save it for later and pick up where
-              you left off, or cancel and start over.
+              This consultation looks incomplete — no recommendation or close was detected yet.
+              You can save it for later and pick up where you left off, cancel and start over, or
+              end it now and get your score as-is (a lower score beats no score).
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter className="gap-2 sm:gap-2">
+          <DialogFooter className="gap-2 sm:gap-2 flex-wrap">
             <Button
               variant="outline"
               onClick={() => {
@@ -387,12 +401,23 @@ export default function RolePlay() {
               <XCircle className="w-4 h-4 mr-1.5" /> Cancel and start over
             </Button>
             <Button
+              variant="outline"
               onClick={() => saveForLater.mutate()}
               disabled={saveForLater.isPending}
-              style={{ backgroundColor: "#E06D00", color: "white" }}
               data-testid="button-save-for-later"
             >
               <Save className="w-4 h-4 mr-1.5" /> {saveForLater.isPending ? "Saving..." : "Save for Later"}
+            </Button>
+            <Button
+              onClick={() => {
+                setShowIncompleteModal(false);
+                completeSession.mutate({ force: true });
+              }}
+              disabled={completeSession.isPending}
+              style={{ backgroundColor: "#E06D00", color: "white" }}
+              data-testid="button-force-score-incomplete"
+            >
+              {completeSession.isPending ? "Scoring..." : "End & get my score now"}
             </Button>
           </DialogFooter>
         </DialogContent>

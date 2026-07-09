@@ -26,13 +26,16 @@ const TTS_SPEED = Number(process.env.OPENAI_TTS_SPEED) || 1.12;
 // Generates speech audio for a simulated customer's line using OpenAI TTS.
 // Runs directly in Node so it works identically in the dev sandbox and on
 // Render production — no external sidecar process required.
-export async function synthesizeSpeech(text: string, voice: string): Promise<Buffer> {
+export async function synthesizeSpeech(text: string, voice: string, instructions?: string): Promise<Buffer> {
   const response = await client.audio.speech.create({
     model: TTS_MODEL,
     voice: voice as any,
     input: text,
     response_format: "mp3",
     speed: TTS_SPEED,
+    // gpt-4o-mini-tts-only: steers delivery (pitch/pacing/register) so a young
+    // persona's voice ID doesn't default to reading as a mature adult.
+    ...(instructions ? { instructions } : {}),
   });
   const arrayBuffer = await response.arrayBuffer();
   return Buffer.from(arrayBuffer);
