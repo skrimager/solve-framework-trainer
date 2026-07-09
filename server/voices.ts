@@ -112,6 +112,29 @@ export const PERSONA_VOICES: Record<string, string> = {
   "peer-conflict-senior-junior-power-struggle": "onyx", // Greg, 52 (m)
 };
 
+// Curated age/energy delivery instructions per persona, passed to OpenAI's
+// gpt-4o-mini-tts `instructions` parameter (voice ID alone can't convey a
+// teen/college-age register vs. a mature adult one -- the model needs an
+// explicit steer). Keyed by the same slug as PERSONA_VOICES. Any slug not
+// listed here gets a neutral adult delivery (no instructions passed).
+export const PERSONA_VOICE_INSTRUCTIONS: Record<string, string> = {
+  "auto-sales-first-car-college-student":
+    "Voice: a 20-year-old college student, first time buying a car on her own. Pitch: youthful, on the higher/lighter end for an adult woman -- not a mature or authoritative register. Pacing: a little quick and slightly hesitant, with rising inflection on uncertain statements, like she's still figuring out what to say. Tone: nervous-but-friendly, a bit shy, gains confidence gradually over the conversation as trust builds. Should sound like a young adult, not a middle-aged professional.",
+  "apartment-rental-recent-grad":
+    "Voice: a 22-year-old recent college graduate renting their first apartment. Pitch: youthful, energetic. Pacing: upbeat and a little fast-talking. Tone: enthusiastic, casual, informal -- sounds like a young adult, not a seasoned renter.",
+  "employee-grievance-pto-denied-frustration":
+    "Voice: a 29-year-old employee. Pitch: youthful adult, not mature or authoritative. Tone: frustrated but still measured, early-career register.",
+  "financial-advisor-young-professional-starting":
+    "Voice: a 26-year-old early-career professional. Pitch: youthful adult male, energetic. Tone: a little eager and unsure, not a seasoned executive register.",
+};
+
+// Returns gpt-4o-mini-tts delivery instructions for a scenario slug, or
+// undefined when no age/tone steer is curated (falls back to the model's
+// default delivery for that voice).
+export function getVoiceInstructionsForScenario(slug: string | undefined | null): string | undefined {
+  return slug ? PERSONA_VOICE_INSTRUCTIONS[slug] : undefined;
+}
+
 const DEFAULT_FEMALE_VOICE = "shimmer";
 const DEFAULT_MALE_VOICE = "onyx";
 

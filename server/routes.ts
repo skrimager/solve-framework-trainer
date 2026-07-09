@@ -16,7 +16,7 @@ import {
   TRACK_CREDENTIAL,
   type Track,
 } from "./certification";
-import { getVoiceForScenario } from "./voices";
+import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { sendLeadNotification, sendDemoVerificationCode } from "./notifications";
 import {
   MAX_DEMO_SESSIONS,
@@ -27,6 +27,7 @@ import {
   isCodeValid,
   isSessionLimitReached,
   remainingSessions,
+  isUnlimitedDemoEmail,
   signDemoToken,
   verifyDemoToken,
   ctaSeatQuestion,
@@ -540,7 +541,7 @@ export async function registerRoutes(
 
       // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
       if (withAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender))
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender), getVoiceInstructionsForScenario(scenario.slug))
           .then(async (audioUrl) => {
             const latestSession = await storage.getSession(session.id);
             if (!latestSession) return;
@@ -1089,7 +1090,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     const now = new Date();
 
     let signup = await storage.getDemoSignupByEmail(email);
-    if (signup && isSessionLimitReached(signup.sessionsUsed)) {
+    if (signup && isSessionLimitReached(signup.sessionsUsed, email)) {
       return res.json({ ok: true, limitReached: true, remaining: 0 });
     }
 
@@ -1113,7 +1114,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     if (!sent) {
       return res.status(502).json({ message: "We couldn't send your code just now. Please try again in a moment.", retryable: true });
     }
-    res.json({ ok: true, remaining: remainingSessions(signup.sessionsUsed) });
+    res.json({ ok: true, remaining: remainingSessions(signup.sessionsUsed, email) });
   });
 
   // Step 2: visitor submits the code. On success we consume the code, mark the
@@ -1140,11 +1141,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // Consume the code (single-use) and mark verified.
     await storage.updateDemoSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
 
-    if (isSessionLimitReached(signup.sessionsUsed)) {
+    if (isSessionLimitReached(signup.sessionsUsed, email)) {
       return res.json({ verified: true, limitReached: true, remaining: 0 });
     }
     const token = signDemoToken(email);
-    res.json({ verified: true, token, remaining: remainingSessions(signup.sessionsUsed) });
+    res.json({ verified: true, token, remaining: remainingSessions(signup.sessionsUsed, email) });
   });
 
   // Step 3: start a demo roleplay. Usage is incremented AT START (before the
@@ -1155,14 +1156,17 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     }
     const signup = await requireDemoSignup(req, res);
     if (!signup) return;
-    if (isSessionLimitReached(signup.sessionsUsed)) {
+    if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
       return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0 });
     }
     const scenario = await getDemoScenario();
     if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
 
     // Increment usage FIRST so a failure after this point can't grant a free retry.
-    const updatedSignup = await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
+    // Exempted (unlimited) emails skip the counter entirely so the cap never applies to them.
+    const updatedSignup = isUnlimitedDemoEmail(signup.email)
+      ? signup
+      : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
 
     let openingTranscript = "[]";
     try {
@@ -1196,7 +1200,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
 
     res.json({
       session: publicDemoSession(session),
-      remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1),
+      remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1, signup.email),
       scenario: {
         id: scenario.id,
         slug: scenario.slug,
@@ -1258,7 +1262,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       res.json({ session: publicDemoSession(updated!) });
 
       if (withAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender))
+        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender), getVoiceInstructionsForScenario(scenario.slug))
           .then(async (audioUrl) => {
             const latest = await storage.getDemoSession(session.id);
             if (!latest) return;
@@ -1640,16 +1644,19 @@ export function registerPublicAndAdminRoutes(app: Express): void {
         completedByEmail.set(s.email, (completedByEmail.get(s.email) ?? 0) + 1);
       }
     }
-    const rows = signups.map((s) => ({
-      id: s.id,
-      email: s.email,
-      verified: s.verified ? "yes" : "no",
-      sessionsUsed: s.sessionsUsed,
-      maxSessions: MAX_DEMO_SESSIONS,
-      completedSessions: completedByEmail.get(s.email) ?? 0,
-      createdAt: s.createdAt,
-      lastSentAt: s.lastSentAt ?? "",
-    }));
+    const rows = signups.map((s) => {
+      const unlimited = isUnlimitedDemoEmail(s.email);
+      return {
+        id: s.id,
+        email: s.email,
+        verified: s.verified ? "yes" : "no",
+        sessionsUsed: unlimited ? `${s.sessionsUsed} (unlimited)` : s.sessionsUsed,
+        maxSessions: unlimited ? "unlimited" : MAX_DEMO_SESSIONS,
+        completedSessions: completedByEmail.get(s.email) ?? 0,
+        createdAt: s.createdAt,
+        lastSentAt: s.lastSentAt ?? "",
+      };
+    });
     sendData(req, res, "demo.csv", [
       { key: "id", header: "ID" },
       { key: "email", header: "Email" },
@@ -1717,10 +1724,10 @@ async function generateUniqueInviteCode(): Promise<string> {
   throw new Error("Could not generate a unique invite code");
 }
 
-async function synthesizeAudio(text: string, voice: string): Promise<string> {
+async function synthesizeAudio(text: string, voice: string, instructions?: string): Promise<string> {
   const filename = `${randomUUID()}.mp3`;
   const outputPath = path.join(AUDIO_DIR, filename);
-  const audioBuffer = await synthesizeSpeech(text, voice);
+  const audioBuffer = await synthesizeSpeech(text, voice, instructions);
   await fs.writeFile(outputPath, audioBuffer);
   return `/api/audio/${filename}`;
 }

@@ -11,6 +11,27 @@ import type { DemoSignup } from "@shared/schema";
 // A verified visitor gets this many free roleplay sessions, ever, per email.
 export const MAX_DEMO_SESSIONS = 3;
 
+// Emails in this allowlist never hit the free-session cap. This exists for the
+// founder's own live sales demos to prospective business customers, where
+// re-using the same email repeatedly must never lock out mid-demo. Configure
+// via UNLIMITED_DEMO_EMAILS (comma-separated) to add more without a code
+// change; the founder's email is always included as a sane default even if
+// the env var is unset or misconfigured.
+const DEFAULT_UNLIMITED_DEMO_EMAILS = ["wadeskrimager@icloud.com"];
+
+function unlimitedDemoEmails(): Set<string> {
+  const fromEnv = (process.env.UNLIMITED_DEMO_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set([...DEFAULT_UNLIMITED_DEMO_EMAILS, ...fromEnv]);
+}
+
+// True if this email is exempt from the demo session cap (case-insensitive).
+export function isUnlimitedDemoEmail(email: string): boolean {
+  return unlimitedDemoEmails().has(normalizeEmail(email));
+}
+
 // A freshly-emailed code is valid for this long before it must be re-sent.
 export const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -62,12 +83,16 @@ export function isCodeValid(
   return true;
 }
 
-// True once the email has consumed all of its free sessions.
-export function isSessionLimitReached(sessionsUsed: number): boolean {
+// True once the email has consumed all of its free sessions. `email` is
+// optional so existing call sites keep working; pass it whenever available so
+// allowlisted emails (see isUnlimitedDemoEmail) are never capped.
+export function isSessionLimitReached(sessionsUsed: number, email?: string): boolean {
+  if (email && isUnlimitedDemoEmail(email)) return false;
   return sessionsUsed >= MAX_DEMO_SESSIONS;
 }
 
-export function remainingSessions(sessionsUsed: number): number {
+export function remainingSessions(sessionsUsed: number, email?: string): number {
+  if (email && isUnlimitedDemoEmail(email)) return Infinity;
   return Math.max(0, MAX_DEMO_SESSIONS - sessionsUsed);
 }
 
