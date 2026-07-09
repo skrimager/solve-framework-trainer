@@ -77,8 +77,16 @@ export const scenarios = pgTable("scenarios", {
   id: serial("id").primaryKey(),
   slug: text("slug").notNull().unique(),
   title: text("title").notNull(),
-  vertical: text("vertical").notNull(), // consulting: 'manufactured_housing' | 'real_estate' | 'apartment_rental' | 'auto_sales' | 'hvac_service' | 'hvac_sales' | 'plumbing' | 'financial_advisor' | 'insurance_auto'; leadership: 'upset_customer_service' | 'employee_grievance' | 'peer_conflict'
+  vertical: text("vertical").notNull(), // consulting: 'manufactured_housing' | 'manufactured_housing_community' | 'real_estate' | 'apartment_rental' | 'auto_sales' | 'hvac_service' | 'hvac_sales' | 'plumbing' | 'financial_advisor' | 'insurance_auto' | 'home_improvement' (consolidated kitchen/bathroom/bedroom/windows/etc.) | 'pool_landscaping'; leadership: 'upset_customer_service' | 'employee_grievance' | 'peer_conflict'
   track: text("track").notNull().default("consulting"), // 'consulting' | 'leadership' — which top-level training track this scenario belongs to; existing rows backfill to 'consulting'
+  // INTERNAL-ONLY real-estate transaction-type classifier. Never surfaced in any
+  // trainee-facing UI or scenario picker: realtors should practice both listings
+  // and purchases without forewarning, so which type a scenario is stays a
+  // surprise. Read ONLY by the scoring/rubric logic (see closeExpectationForTransactionType
+  // in server/llm.ts) to pick the right same-day-close expectation baseline.
+  // 'manufactured_community' | 'manufactured_dealer' | 're_listing_agent' | 're_buyer_agent';
+  // null for every non-real-estate / non-manufactured-housing scenario.
+  transactionType: text("transaction_type"),
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // system prompt describing the simulated customer
   gender: text("gender").notNull(), // 'male' | 'female' — single source of truth that must match the persona's avatar image; deterministically gates TTS voice selection so the heard voice can never be the wrong gender for the shown face
