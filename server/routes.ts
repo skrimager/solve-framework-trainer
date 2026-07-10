@@ -17,7 +17,14 @@ import {
   type Track,
 } from "./certification";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
-import { sendLeadNotification, sendDemoVerificationCode } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail } from "./notifications";
+import {
+  buildSequence,
+  planApproval,
+  sendDueOutreach,
+  startOutreachScheduler,
+  SEQUENCE_STEPS,
+} from "./opportunities";
 import {
   MAX_DEMO_SESSIONS,
   DEMO_SCENARIO_SLUG,
@@ -838,6 +845,12 @@ export async function registerRoutes(
   });
 
   registerPublicAndAdminRoutes(app);
+
+  // Start the Opportunity Intelligence drip sender (every ~20 min it sends any
+  // scheduled+due outreach via the existing Resend transport). Guarded against
+  // double-start inside startOutreachScheduler. Only booted here (the DB entry
+  // point), never in the test harness which drives sendDueOutreach directly.
+  startOutreachScheduler(storage);
 
   return httpServer;
 }
@@ -1667,6 +1680,275 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       { key: "createdAt", header: "First Seen" },
       { key: "lastSentAt", header: "Last Code Sent" },
     ], rows);
+  });
+
+  // ===========================================================================
+  // Opportunity Intelligence (admin-only outbound lead-gen + email drip)
+  // ===========================================================================
+
+  // List discovery batches, most recent first.
+  app.get("/api/admin/opportunities/searches", requireAdmin, async (_req, res) => {
+    const searches = await storage.listProspectSearches();
+    res.json({
+      rows: searches.map((s) => ({
+        id: s.id,
+        segment: s.segment,
+        geography: s.geography,
+        runAt: s.runAt,
+        resultsCount: s.resultsCount,
+        status: s.status,
+      })),
+    });
+  });
+
+  // Full detail for one batch: its companies, each company's contacts, and each
+  // contact's full drafted/scheduled outreach sequence (step-sorted).
+  app.get("/api/admin/opportunities/searches/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const search = await storage.getProspectSearch(id);
+    if (!search) return res.status(404).json({ message: "Batch not found" });
+
+    const outreach = await storage.listProspectOutreachBySearch(id);
+    const contactIds = Array.from(new Set(outreach.map((o) => o.contactId)));
+    const contacts = await storage.getProspectContactsByIds(contactIds);
+    const companyIds = Array.from(new Set(contacts.map((c) => c.companyId)));
+    const companies = await storage.getProspectCompaniesByIds(companyIds);
+
+    const outreachByContact = new Map<number, typeof outreach>();
+    for (const o of outreach) {
+      const list = outreachByContact.get(o.contactId) ?? [];
+      list.push(o);
+      outreachByContact.set(o.contactId, list);
+    }
+    const contactsByCompany = new Map<number, typeof contacts>();
+    for (const c of contacts) {
+      const list = contactsByCompany.get(c.companyId) ?? [];
+      list.push(c);
+      contactsByCompany.set(c.companyId, list);
+    }
+
+    const companiesOut = companies.map((co) => ({
+      id: co.id,
+      name: co.name,
+      domain: co.domain ?? "",
+      segment: co.segment,
+      city: co.city ?? "",
+      state: co.state ?? "",
+      employeeCount: co.employeeCount ?? null,
+      signalType: co.signalType,
+      signalDetail: co.signalDetail,
+      source: co.source,
+      status: co.status,
+      contacts: (contactsByCompany.get(co.id) ?? []).map((c) => ({
+        id: c.id,
+        fullName: c.fullName,
+        title: c.title,
+        email: c.email,
+        phone: c.phone ?? "",
+        linkedinUrl: c.linkedinUrl ?? "",
+        outreach: (outreachByContact.get(c.id) ?? [])
+          .slice()
+          .sort((a, b) => a.sequenceStep - b.sequenceStep)
+          .map((o) => ({
+            id: o.id,
+            sequenceStep: o.sequenceStep,
+            emailSubject: o.emailSubject,
+            emailBody: o.emailBody,
+            scheduledAt: o.scheduledAt ?? "",
+            sentAt: o.sentAt ?? "",
+            status: o.status,
+          })),
+      })),
+    }));
+
+    res.json({
+      search: {
+        id: search.id,
+        segment: search.segment,
+        geography: search.geography,
+        runAt: search.runAt,
+        resultsCount: search.resultsCount,
+        status: search.status,
+      },
+      companies: companiesOut,
+    });
+  });
+
+  // Approve a batch: mark it approved and schedule its entire draft outreach
+  // sequence — step 1 now, step 2 at +3 days, step 3 at +7 days. Idempotent-ish:
+  // only a pending_review batch can be approved.
+  app.post("/api/admin/opportunities/searches/:id/approve", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const search = await storage.getProspectSearch(id);
+    if (!search) return res.status(404).json({ message: "Batch not found" });
+    if (search.status !== "pending_review") {
+      return res.status(409).json({ message: `Batch is already ${search.status}` });
+    }
+
+    const outreach = await storage.listProspectOutreachBySearch(id);
+    const plan = planApproval(outreach, Date.now());
+    for (const p of plan) {
+      await storage.updateProspectOutreach(p.id, { status: p.status, scheduledAt: p.scheduledAt });
+    }
+    const updated = await storage.updateProspectSearch(id, { status: "approved" });
+    res.json({ search: updated, scheduled: plan.length });
+  });
+
+  // Reject a batch: mark it rejected. Outreach stays draft and is never sent.
+  app.post("/api/admin/opportunities/searches/:id/reject", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const search = await storage.getProspectSearch(id);
+    if (!search) return res.status(404).json({ message: "Batch not found" });
+    if (search.status !== "pending_review") {
+      return res.status(409).json({ message: `Batch is already ${search.status}` });
+    }
+    const updated = await storage.updateProspectSearch(id, { status: "rejected" });
+    res.json({ search: updated });
+  });
+
+  // Recent prospect activity (opened/replied/bounced/sent), newest first, with
+  // the contact's name/email resolved for display.
+  app.get("/api/admin/opportunities/activity", requireAdmin, async (_req, res) => {
+    const events = await storage.listRecentProspectActivity(200);
+    const contactIds = Array.from(new Set(events.map((e) => e.contactId)));
+    const contacts = await storage.getProspectContactsByIds(contactIds);
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+    res.json({
+      rows: events.map((e) => {
+        const c = byId.get(e.contactId);
+        return {
+          id: e.id,
+          contactId: e.contactId,
+          contactName: c?.fullName ?? "",
+          contactEmail: c?.email ?? "",
+          eventType: e.eventType,
+          eventDetail: e.eventDetail,
+          occurredAt: e.occurredAt,
+        };
+      }),
+    });
+  });
+
+  // Insert a discovery batch out-of-band. Discovery itself runs externally (via
+  // Perplexity connectors called by the parent agent); its results are POSTed
+  // here as JSON. Each contact's three-step drip is generated from the segment
+  // templates unless the payload supplies explicit emails. See the README
+  // section "How new discovery batches get created".
+  const batchEmailSchema = z.object({
+    step: z.number().int().min(1).max(3),
+    subject: z.string().min(1),
+    body: z.string().min(1),
+  });
+  const batchContactSchema = z.object({
+    fullName: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    email: z.string().trim().email(),
+    phone: z.string().trim().optional().or(z.literal("")),
+    linkedinUrl: z.string().trim().optional().or(z.literal("")),
+    emails: z.array(batchEmailSchema).optional(),
+  });
+  const batchCompanySchema = z.object({
+    name: z.string().trim().min(1),
+    domain: z.string().trim().optional().or(z.literal("")),
+    city: z.string().trim().optional().or(z.literal("")),
+    state: z.string().trim().optional().or(z.literal("")),
+    employeeCount: z.number().int().nonnegative().optional(),
+    signalType: z.string().trim().min(1),
+    signalDetail: z.string().trim().min(1),
+    source: z.string().trim().min(1),
+    status: z.string().trim().optional(),
+    contacts: z.array(batchContactSchema).min(1),
+  });
+  const batchSchema = z.object({
+    segment: z.string().trim().min(1),
+    geography: z.string().trim().min(1),
+    runAt: z.string().trim().optional(),
+    companies: z.array(batchCompanySchema).min(1),
+  });
+
+  app.post("/api/admin/opportunities/batches", requireAdmin, async (req, res) => {
+    const parsed = batchSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid batch payload" });
+    }
+    const payload = parsed.data;
+    const now = new Date().toISOString();
+
+    const search = await storage.createProspectSearch({
+      segment: payload.segment,
+      geography: payload.geography,
+      runAt: payload.runAt || now,
+      resultsCount: payload.companies.length,
+      status: "pending_review",
+    });
+
+    let contactCount = 0;
+    let outreachCount = 0;
+    for (const co of payload.companies) {
+      const company = await storage.createProspectCompany({
+        name: co.name,
+        domain: co.domain || null,
+        segment: payload.segment,
+        city: co.city || null,
+        state: co.state || null,
+        employeeCount: co.employeeCount ?? null,
+        signalType: co.signalType,
+        signalDetail: co.signalDetail,
+        source: co.source,
+        discoveredAt: now,
+        status: co.status || "new",
+      });
+      for (const ct of co.contacts) {
+        const contact = await storage.createProspectContact({
+          companyId: company.id,
+          fullName: ct.fullName,
+          title: ct.title,
+          email: ct.email,
+          phone: ct.phone || null,
+          linkedinUrl: ct.linkedinUrl || null,
+          createdAt: now,
+        });
+        contactCount += 1;
+
+        // Use supplied emails if present, else generate the segment drip.
+        const drafts = ct.emails && ct.emails.length
+          ? ct.emails.map((e) => ({ step: e.step, emailSubject: e.subject, emailBody: e.body }))
+          : buildSequence(payload.segment, { contactName: ct.fullName, companyName: co.name });
+
+        for (const step of SEQUENCE_STEPS) {
+          const draft = drafts.find((d) => d.step === step);
+          if (!draft) continue;
+          await storage.createProspectOutreach({
+            contactId: contact.id,
+            searchId: search.id,
+            sequenceStep: step,
+            emailSubject: draft.emailSubject,
+            emailBody: draft.emailBody,
+            scheduledAt: null,
+            sentAt: null,
+            status: "draft",
+          });
+          outreachCount += 1;
+        }
+      }
+    }
+
+    res.status(201).json({
+      searchId: search.id,
+      companies: payload.companies.length,
+      contacts: contactCount,
+      outreach: outreachCount,
+    });
+  });
+
+  // Manual trigger for the drip sender (useful for ops + as a documented cron
+  // target if a platform scheduler is preferred over the in-process interval).
+  app.post("/api/admin/opportunities/run-drip", requireAdmin, async (_req, res) => {
+    const result = await sendDueOutreach({ storage, send: sendProspectEmail });
+    res.json(result);
   });
 }
 

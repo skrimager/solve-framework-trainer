@@ -1,8 +1,8 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray, and, desc } from "drizzle-orm";
+import { eq, inArray, and, desc, lte } from "drizzle-orm";
 import { filterContacts, sortByFollowUp, type ContactFilters } from "./contacts";
 
 const { Pool } = pg;
@@ -92,6 +92,28 @@ export interface IStorage {
   getDemoSession(id: number): Promise<DemoSession | undefined>;
   updateDemoSession(id: number, patch: Partial<InsertDemoSession>): Promise<DemoSession | undefined>;
   listDemoSessions(): Promise<DemoSession[]>;
+
+  // --- Opportunity Intelligence (admin-only outbound lead-gen + drip) ---
+  createProspectSearch(search: InsertProspectSearch): Promise<ProspectSearch>;
+  getProspectSearch(id: number): Promise<ProspectSearch | undefined>;
+  listProspectSearches(): Promise<ProspectSearch[]>;
+  updateProspectSearch(id: number, patch: Partial<InsertProspectSearch>): Promise<ProspectSearch | undefined>;
+
+  createProspectCompany(company: InsertProspectCompany): Promise<ProspectCompany>;
+  getProspectCompaniesByIds(ids: number[]): Promise<ProspectCompany[]>;
+
+  createProspectContact(contact: InsertProspectContact): Promise<ProspectContact>;
+  getProspectContact(id: number): Promise<ProspectContact | undefined>;
+  getProspectContactsByIds(ids: number[]): Promise<ProspectContact[]>;
+
+  createProspectOutreach(outreach: InsertProspectOutreach): Promise<ProspectOutreach>;
+  getProspectOutreach(id: number): Promise<ProspectOutreach | undefined>;
+  listProspectOutreachBySearch(searchId: number): Promise<ProspectOutreach[]>;
+  listDueProspectOutreach(nowIso: string): Promise<ProspectOutreach[]>;
+  updateProspectOutreach(id: number, patch: Partial<InsertProspectOutreach>): Promise<ProspectOutreach | undefined>;
+
+  createProspectActivity(activity: InsertProspectActivity): Promise<ProspectActivity>;
+  listRecentProspectActivity(limit?: number): Promise<ProspectActivity[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -371,6 +393,87 @@ export class DatabaseStorage implements IStorage {
 
   async listDemoSessions(): Promise<DemoSession[]> {
     return db.select().from(demoSessions).orderBy(desc(demoSessions.id));
+  }
+
+  // --- Opportunity Intelligence ---
+  async createProspectSearch(search: InsertProspectSearch): Promise<ProspectSearch> {
+    const rows = await db.insert(prospectSearches).values(search).returning();
+    return rows[0];
+  }
+
+  async getProspectSearch(id: number): Promise<ProspectSearch | undefined> {
+    const rows = await db.select().from(prospectSearches).where(eq(prospectSearches.id, id));
+    return rows[0];
+  }
+
+  async listProspectSearches(): Promise<ProspectSearch[]> {
+    return db.select().from(prospectSearches).orderBy(desc(prospectSearches.id));
+  }
+
+  async updateProspectSearch(id: number, patch: Partial<InsertProspectSearch>): Promise<ProspectSearch | undefined> {
+    const rows = await db.update(prospectSearches).set(patch).where(eq(prospectSearches.id, id)).returning();
+    return rows[0];
+  }
+
+  async createProspectCompany(company: InsertProspectCompany): Promise<ProspectCompany> {
+    const rows = await db.insert(prospectCompanies).values(company).returning();
+    return rows[0];
+  }
+
+  async getProspectCompaniesByIds(ids: number[]): Promise<ProspectCompany[]> {
+    if (ids.length === 0) return [];
+    return db.select().from(prospectCompanies).where(inArray(prospectCompanies.id, ids));
+  }
+
+  async createProspectContact(contact: InsertProspectContact): Promise<ProspectContact> {
+    const rows = await db.insert(prospectContacts).values(contact).returning();
+    return rows[0];
+  }
+
+  async getProspectContact(id: number): Promise<ProspectContact | undefined> {
+    const rows = await db.select().from(prospectContacts).where(eq(prospectContacts.id, id));
+    return rows[0];
+  }
+
+  async getProspectContactsByIds(ids: number[]): Promise<ProspectContact[]> {
+    if (ids.length === 0) return [];
+    return db.select().from(prospectContacts).where(inArray(prospectContacts.id, ids));
+  }
+
+  async createProspectOutreach(outreach: InsertProspectOutreach): Promise<ProspectOutreach> {
+    const rows = await db.insert(prospectOutreach).values(outreach).returning();
+    return rows[0];
+  }
+
+  async getProspectOutreach(id: number): Promise<ProspectOutreach | undefined> {
+    const rows = await db.select().from(prospectOutreach).where(eq(prospectOutreach.id, id));
+    return rows[0];
+  }
+
+  async listProspectOutreachBySearch(searchId: number): Promise<ProspectOutreach[]> {
+    return db.select().from(prospectOutreach).where(eq(prospectOutreach.searchId, searchId)).orderBy(prospectOutreach.id);
+  }
+
+  async listDueProspectOutreach(nowIso: string): Promise<ProspectOutreach[]> {
+    return db
+      .select()
+      .from(prospectOutreach)
+      .where(and(eq(prospectOutreach.status, "scheduled"), lte(prospectOutreach.scheduledAt, nowIso)))
+      .orderBy(prospectOutreach.id);
+  }
+
+  async updateProspectOutreach(id: number, patch: Partial<InsertProspectOutreach>): Promise<ProspectOutreach | undefined> {
+    const rows = await db.update(prospectOutreach).set(patch).where(eq(prospectOutreach.id, id)).returning();
+    return rows[0];
+  }
+
+  async createProspectActivity(activity: InsertProspectActivity): Promise<ProspectActivity> {
+    const rows = await db.insert(prospectActivity).values(activity).returning();
+    return rows[0];
+  }
+
+  async listRecentProspectActivity(limit = 200): Promise<ProspectActivity[]> {
+    return db.select().from(prospectActivity).orderBy(desc(prospectActivity.id)).limit(limit);
   }
 }
 

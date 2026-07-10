@@ -78,6 +78,13 @@
       "when": 1783106657000,
       "tag": "0010_scenario_transaction_type",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783106658000,
+      "tag": "0011_opportunity_intelligence",
+      "breakpoints": true
     }
   ]
 }

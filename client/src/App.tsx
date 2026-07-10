@@ -62,6 +62,7 @@ function AppRouter() {
           unrelated; each admin page verifies the admin cookie via /api/admin/me. */}
       <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin" component={AdminDashboard} />
+      <Route path="/admin/opportunities" component={AdminDashboard} />
       <Route component={NotFound} />
     </Switch>
   );

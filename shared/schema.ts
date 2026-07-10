@@ -319,6 +319,105 @@ export const insertDemoSessionSchema = createInsertSchema(demoSessions).omit({ i
 export type InsertDemoSession = z.infer<typeof insertDemoSessionSchema>;
 export type DemoSession = typeof demoSessions.$inferSelect;
 
+// ===========================================================================
+// Opportunity Intelligence — admin-only lead-generation + email-drip system for
+// SOLVE Framework's OWN marketing. Entirely separate from trainee-facing data
+// (users/sessions/scenarios) and from the inbound CRM (contacts): these rows are
+// OUTBOUND prospects discovered externally (Apollo/SimilarWeb, run out-of-band)
+// and warmed with a scheduled three-step discovery-training email sequence.
+// `segment` and `geography` are deliberately free-text (NOT enums) so new
+// markets/verticals need no schema change — the first test market is Phoenix, AZ
+// but geography is never hardcoded.
+// ===========================================================================
+
+// One weekly discovery batch: the result of running a segment × geography search
+// externally. A batch is reviewed in the admin console, then Approved (which
+// schedules its whole outreach sequence) or Rejected (outreach never sends).
+export const prospectSearches = pgTable("prospect_searches", {
+  id: serial("id").primaryKey(),
+  segment: text("segment").notNull(), // free-text market segment, e.g. "manufactured_housing"
+  geography: text("geography").notNull(), // free-text, e.g. "Phoenix, AZ"
+  runAt: text("run_at").notNull(), // ISO timestamp the external discovery run completed
+  resultsCount: integer("results_count").notNull().default(0), // number of companies in the batch
+  status: text("status").notNull().default("pending_review"), // 'pending_review' | 'approved' | 'rejected'
+});
+
+export const insertProspectSearchSchema = createInsertSchema(prospectSearches).omit({ id: true });
+export type InsertProspectSearch = z.infer<typeof insertProspectSearchSchema>;
+export type ProspectSearch = typeof prospectSearches.$inferSelect;
+
+// A prospect company surfaced by discovery. Not directly linked to a search row:
+// its association to a batch is via its contacts' outreach (outreach.searchId),
+// mirroring how discovery writes companies once and may reference them across
+// steps.
+export const prospectCompanies = pgTable("prospect_companies", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  domain: text("domain"), // company website domain (nullable)
+  segment: text("segment").notNull(), // free-text, matches the search segment
+  city: text("city"),
+  state: text("state"),
+  employeeCount: integer("employee_count"),
+  signalType: text("signal_type").notNull(), // 'hiring' | 'growth' | 'news' (free-text, extensible)
+  signalDetail: text("signal_detail").notNull(), // human-readable reason this company surfaced
+  source: text("source").notNull(), // 'apollo' | 'similarweb' (free-text, extensible)
+  discoveredAt: text("discovered_at").notNull(), // ISO timestamp
+  status: text("status").notNull().default("new"), // 'new' | 'contacted' | 'replied' | 'converted' | 'dead'
+});
+
+export const insertProspectCompanySchema = createInsertSchema(prospectCompanies).omit({ id: true });
+export type InsertProspectCompany = z.infer<typeof insertProspectCompanySchema>;
+export type ProspectCompany = typeof prospectCompanies.$inferSelect;
+
+// A named contact at a prospect company — the actual outreach recipient.
+export const prospectContacts = pgTable("prospect_contacts", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => prospectCompanies.id),
+  fullName: text("full_name").notNull(),
+  title: text("title").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone"),
+  linkedinUrl: text("linkedin_url"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertProspectContactSchema = createInsertSchema(prospectContacts).omit({ id: true });
+export type InsertProspectContact = z.infer<typeof insertProspectContactSchema>;
+export type ProspectContact = typeof prospectContacts.$inferSelect;
+
+// One email in a contact's three-step discovery-training drip. Created as `draft`
+// when a batch is inserted. Approving the batch flips step-1 to `scheduled` for
+// now, step-2 for now+3d, step-3 for now+7d. The scheduled sender sends any
+// `scheduled` row whose scheduledAt has passed, then sets it `sent`.
+export const prospectOutreach = pgTable("prospect_outreach", {
+  id: serial("id").primaryKey(),
+  contactId: integer("contact_id").notNull().references(() => prospectContacts.id),
+  searchId: integer("search_id").notNull().references(() => prospectSearches.id),
+  sequenceStep: integer("sequence_step").notNull(), // 1 | 2 | 3
+  emailSubject: text("email_subject").notNull(),
+  emailBody: text("email_body").notNull(),
+  scheduledAt: text("scheduled_at"), // ISO timestamp; set on approval, null while draft
+  sentAt: text("sent_at"), // ISO timestamp; set by the sender
+  status: text("status").notNull().default("draft"), // 'draft' | 'scheduled' | 'sent' | 'replied' | 'stopped'
+});
+
+export const insertProspectOutreachSchema = createInsertSchema(prospectOutreach).omit({ id: true });
+export type InsertProspectOutreach = z.infer<typeof insertProspectOutreachSchema>;
+export type ProspectOutreach = typeof prospectOutreach.$inferSelect;
+
+// Append-only activity log for a prospect contact (email opened, replied, bounced).
+export const prospectActivity = pgTable("prospect_activity", {
+  id: serial("id").primaryKey(),
+  contactId: integer("contact_id").notNull().references(() => prospectContacts.id),
+  eventType: text("event_type").notNull(), // 'opened' | 'replied' | 'bounced' | 'sent' (free-text, extensible)
+  eventDetail: text("event_detail").notNull(),
+  occurredAt: text("occurred_at").notNull(), // ISO timestamp
+});
+
+export const insertProspectActivitySchema = createInsertSchema(prospectActivity).omit({ id: true });
+export type InsertProspectActivity = z.infer<typeof insertProspectActivitySchema>;
+export type ProspectActivity = typeof prospectActivity.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request

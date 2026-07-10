@@ -9,8 +9,16 @@ import {
   TableRow,
   TableCell,
 } from "@/components/ui/table";
-import { adminApi, type AdminSection, type AdminContact, type ContactEvent } from "@/lib/adminApi";
-import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic } from "lucide-react";
+import {
+  adminApi,
+  type AdminSection,
+  type AdminContact,
+  type ContactEvent,
+  type ProspectSearchRow,
+  type ProspectBatchDetail,
+  type ProspectActivityRow,
+} from "@/lib/adminApi";
+import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target } from "lucide-react";
 
 const NAVY = "#0A1A30";
 const NAVY_DARK = "#05162D";
@@ -22,6 +30,7 @@ const SECTIONS: { key: AdminSection; label: string; icon: any }[] = [
   { key: "users", label: "All Users", icon: Users },
   { key: "sales", label: "Sales", icon: DollarSign },
   { key: "demo", label: "Voice Demo", icon: Mic },
+  { key: "opportunities", label: "Opportunities", icon: Target },
 ];
 
 const CONTACT_TYPES = ["speaking", "consulting", "book", "training", "role_play", "general"];
@@ -33,9 +42,12 @@ function priorityColor(p: string): string {
 }
 
 export default function AdminDashboard() {
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const [authChecked, setAuthChecked] = useState(false);
-  const [section, setSection] = useState<AdminSection>("visitors");
+  // Deep-link support: /admin/opportunities opens the Opportunities tab directly.
+  const [section, setSection] = useState<AdminSection>(
+    location === "/admin/opportunities" ? "opportunities" : "visitors",
+  );
 
   useEffect(() => {
     adminApi.me().then((me) => {
@@ -112,6 +124,9 @@ function SectionView({ section }: { section: AdminSection }) {
   // filters/fetching/detail panel independently of the generic table sections.
   if (section === "leads") {
     return <ContactsSection />;
+  }
+  if (section === "opportunities") {
+    return <OpportunitiesSection />;
   }
   return <GenericSectionView section={section} />;
 }
@@ -606,6 +621,305 @@ function DemoTable({ rows }: { rows: any[] }) {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+function batchStatusColor(s: string): string {
+  return s === "approved" ? "#2FB170" : s === "rejected" ? "#E0483C" : "#E0A800";
+}
+
+function OpportunitiesSection() {
+  const [searches, setSearches] = useState<ProspectSearchRow[] | null>(null);
+  const [activity, setActivity] = useState<ProspectActivityRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [s, a] = await Promise.all([adminApi.listProspectSearches(), adminApi.listProspectActivity()]);
+      setSearches(s.rows);
+      setActivity(a.rows);
+    } catch {
+      setError("Failed to load data.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const decide = useCallback(
+    async (id: number, action: "approve" | "reject") => {
+      setBusyId(id);
+      try {
+        if (action === "approve") await adminApi.approveProspectBatch(id);
+        else await adminApi.rejectProspectBatch(id);
+        await load();
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load],
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-white">Opportunity Intelligence</h1>
+        <p className="text-white/60 text-sm mt-1">
+          Outbound discovery-training batches. Review a batch, then approve to schedule its email sequence or reject to hold it.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY }}>
+        {loading && <p className="p-6 text-white/50">Loading…</p>}
+        {error && <p className="p-6 text-red-300" data-testid="text-section-error">{error}</p>}
+        {!loading && !error && searches && (
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent border-white/10">
+                <TableHead className={headCls}>Segment</TableHead>
+                <TableHead className={headCls}>Geography</TableHead>
+                <TableHead className={headCls}>Run</TableHead>
+                <TableHead className={headCls}>Companies</TableHead>
+                <TableHead className={headCls}>Status</TableHead>
+                <TableHead className={headCls}>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {searches.length === 0 && <EmptyRow span={6} />}
+              {searches.map((s) => (
+                <TableRow
+                  key={s.id}
+                  className="border-white/10 cursor-pointer hover:bg-white/5"
+                  data-testid={`row-batch-${s.id}`}
+                  onClick={() => setSelectedId(s.id)}
+                >
+                  <TableCell className={cellCls}>{s.segment}</TableCell>
+                  <TableCell className={cellCls}>{s.geography}</TableCell>
+                  <TableCell className="text-white/60 text-xs">{s.runAt.slice(0, 10)}</TableCell>
+                  <TableCell className={cellCls}>{s.resultsCount}</TableCell>
+                  <TableCell>
+                    <span
+                      className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
+                      style={{ backgroundColor: batchStatusColor(s.status), color: "white" }}
+                      data-testid={`badge-batch-status-${s.id}`}
+                    >
+                      {s.status.replace(/_/g, " ")}
+                    </span>
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    {s.status === "pending_review" ? (
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          disabled={busyId === s.id}
+                          onClick={() => decide(s.id, "approve")}
+                          data-testid={`button-approve-batch-${s.id}`}
+                          style={{ backgroundColor: ORANGE, color: "white" }}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyId === s.id}
+                          onClick={() => decide(s.id, "reject")}
+                          data-testid={`button-reject-batch-${s.id}`}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    ) : (
+                      <span className="text-white/40 text-xs">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {/* Activity feed */}
+      <div>
+        <h2 className="text-lg font-bold text-white mb-2">Recent activity</h2>
+        <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY }}>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent border-white/10">
+                <TableHead className={headCls}>When</TableHead>
+                <TableHead className={headCls}>Contact</TableHead>
+                <TableHead className={headCls}>Event</TableHead>
+                <TableHead className={headCls}>Detail</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(!activity || activity.length === 0) && <EmptyRow span={4} />}
+              {activity?.map((e) => (
+                <TableRow key={e.id} className="border-white/10" data-testid={`row-activity-${e.id}`}>
+                  <TableCell className="text-white/60 text-xs">{e.occurredAt.slice(0, 19).replace("T", " ")}</TableCell>
+                  <TableCell className={cellCls}>{e.contactName || e.contactEmail}</TableCell>
+                  <TableCell className={cellCls}>{e.eventType}</TableCell>
+                  <TableCell className="text-white/70 text-sm">{e.eventDetail}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+
+      {selectedId !== null && (
+        <BatchDetail id={selectedId} onClose={() => setSelectedId(null)} onChanged={load} />
+      )}
+    </div>
+  );
+}
+
+function BatchDetail({
+  id,
+  onClose,
+  onChanged,
+}: {
+  id: number;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [detail, setDetail] = useState<ProspectBatchDetail | null>(null);
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setDetail(await adminApi.getProspectBatch(id));
+    } catch {
+      setDetail(null);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function decide(action: "approve" | "reject") {
+    setBusy(true);
+    try {
+      if (action === "approve") await adminApi.approveProspectBatch(id);
+      else await adminApi.rejectProspectBatch(id);
+      await load();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const search = detail?.search;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/50"
+      onClick={onClose}
+      data-testid="batch-detail-overlay"
+    >
+      <div
+        className="w-full max-w-2xl h-full overflow-auto p-6 border-l border-white/10"
+        style={{ backgroundColor: NAVY }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white">
+              {search ? `${search.segment} · ${search.geography}` : "Batch"}
+            </h2>
+            {search && (
+              <p className="text-white/60 text-sm">
+                {search.resultsCount} companies · run {search.runAt.slice(0, 10)} ·{" "}
+                <span style={{ color: batchStatusColor(search.status) }}>{search.status.replace(/_/g, " ")}</span>
+              </p>
+            )}
+          </div>
+          <button onClick={onClose} data-testid="button-close-batch" className="text-white/60 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {search?.status === "pending_review" && (
+          <div className="mt-4 flex gap-2">
+            <Button
+              disabled={busy}
+              onClick={() => decide("approve")}
+              data-testid="button-approve-batch-detail"
+              style={{ backgroundColor: ORANGE, color: "white" }}
+            >
+              Approve batch
+            </Button>
+            <Button disabled={busy} variant="outline" onClick={() => decide("reject")} data-testid="button-reject-batch-detail">
+              Reject batch
+            </Button>
+          </div>
+        )}
+
+        {!detail && <p className="mt-6 text-white/50 text-sm">Loading…</p>}
+
+        <div className="mt-6 space-y-4">
+          {detail?.companies.map((co) => (
+            <div key={co.id} className="rounded-lg border border-white/10 p-4" data-testid={`company-${co.id}`}>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-white font-semibold">{co.name}</p>
+                  <p className="text-white/50 text-xs">
+                    {[co.city, co.state].filter(Boolean).join(", ")}
+                    {co.domain ? ` · ${co.domain}` : ""}
+                    {co.employeeCount ? ` · ${co.employeeCount} employees` : ""}
+                  </p>
+                </div>
+                <Tag label={`${co.signalType}`} />
+              </div>
+              <p className="text-white/60 text-sm mt-1">{co.signalDetail}</p>
+
+              <div className="mt-3 space-y-3">
+                {co.contacts.map((c) => {
+                  const first = c.outreach.find((o) => o.sequenceStep === 1) ?? c.outreach[0];
+                  const isOpen = expanded[c.id];
+                  return (
+                    <div key={c.id} className="border-l-2 border-white/15 pl-3" data-testid={`prospect-contact-${c.id}`}>
+                      <p className="text-white/90 text-sm font-medium">
+                        {c.fullName} <span className="text-white/50 font-normal">· {c.title}</span>
+                      </p>
+                      <p className="text-white/50 text-xs">{c.email}</p>
+                      {first && (
+                        <div className="mt-2">
+                          <button
+                            onClick={() => setExpanded((e) => ({ ...e, [c.id]: !e[c.id] }))}
+                            data-testid={`toggle-email-${c.id}`}
+                            className="text-xs font-semibold"
+                            style={{ color: ORANGE }}
+                          >
+                            {isOpen ? "Hide" : "Show"} drafted email · {first.status}
+                          </button>
+                          {isOpen && (
+                            <div className="mt-2 rounded bg-white/5 border border-white/10 p-3">
+                              <p className="text-white/80 text-xs font-semibold">{first.emailSubject}</p>
+                              <p className="text-white/70 text-xs whitespace-pre-wrap mt-1">{first.emailBody}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
