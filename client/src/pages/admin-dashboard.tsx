@@ -18,7 +18,8 @@ import {
   type ProspectBatchDetail,
   type ProspectActivityRow,
 } from "@/lib/adminApi";
-import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target } from "lucide-react";
+import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target, Menu } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const NAVY = "#0A1A30";
 const NAVY_DARK = "#05162D";
@@ -48,6 +49,7 @@ export default function AdminDashboard() {
   const [section, setSection] = useState<AdminSection>(
     location === "/admin/opportunities" ? "opportunities" : "visitors",
   );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     adminApi.me().then((me) => {
@@ -74,11 +76,54 @@ export default function AdminDashboard() {
 
   return (
     <div className="min-h-dvh flex" style={{ backgroundColor: NAVY_DARK }}>
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col border-r border-white/10" style={{ backgroundColor: NAVY }}>
-        <div className="px-5 py-5 border-b border-white/10">
-          <p className="text-white font-bold text-lg">Solve Admin</p>
-          <p className="text-white/50 text-xs">Internal console</p>
+      {/* Mobile top bar (below lg): hamburger + title */}
+      <header
+        className="lg:hidden fixed top-0 inset-x-0 z-30 flex items-center gap-3 h-14 px-4 border-b border-white/10"
+        style={{ backgroundColor: NAVY }}
+      >
+        <button
+          onClick={() => setMobileNavOpen(true)}
+          data-testid="button-admin-nav-toggle"
+          aria-label="Open navigation"
+          className="text-white/80 hover:text-white"
+        >
+          <Menu className="w-6 h-6" />
+        </button>
+        <p className="text-white font-bold text-base">Solve Admin</p>
+      </header>
+
+      {/* Off-canvas overlay (below lg) */}
+      {mobileNavOpen && (
+        <div
+          className="lg:hidden fixed inset-0 z-40 bg-black/50"
+          onClick={() => setMobileNavOpen(false)}
+          data-testid="admin-nav-overlay"
+        />
+      )}
+
+      {/* Sidebar: static on lg+, off-canvas drawer below lg */}
+      <aside
+        className={cn(
+          "w-56 shrink-0 flex flex-col border-r border-white/10",
+          "fixed inset-y-0 left-0 z-50 transition-transform duration-300 ease-in-out",
+          "lg:static lg:z-auto lg:translate-x-0",
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
+        )}
+        style={{ backgroundColor: NAVY }}
+      >
+        <div className="px-5 py-5 border-b border-white/10 flex items-start justify-between">
+          <div>
+            <p className="text-white font-bold text-lg">Solve Admin</p>
+            <p className="text-white/50 text-xs">Internal console</p>
+          </div>
+          <button
+            onClick={() => setMobileNavOpen(false)}
+            data-testid="button-admin-nav-close"
+            aria-label="Close navigation"
+            className="lg:hidden text-white/60 hover:text-white"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
         <nav className="flex-1 py-3">
           {SECTIONS.map((s) => {
@@ -87,7 +132,10 @@ export default function AdminDashboard() {
             return (
               <button
                 key={s.key}
-                onClick={() => setSection(s.key)}
+                onClick={() => {
+                  setSection(s.key);
+                  setMobileNavOpen(false);
+                }}
                 data-testid={`nav-${s.key}`}
                 title={s.title}
                 className="w-full flex items-center gap-3 px-5 py-3 text-sm text-left transition-colors"
@@ -113,7 +161,7 @@ export default function AdminDashboard() {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 min-w-0 overflow-auto p-4 pt-20 lg:p-6">
         <SectionView key={section} section={section} />
       </main>
     </div>
@@ -158,7 +206,7 @@ function GenericSectionView({ section }: { section: AdminSection }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">{title}</h1>
           {section === "sales" && data && (
