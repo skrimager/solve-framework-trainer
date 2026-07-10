@@ -158,6 +158,9 @@ export default function Certification() {
   return (
     <AppShell title="Certification exam">
       <div className="space-y-4 max-w-2xl">
+        <p className="text-sm text-muted-foreground" data-testid="text-academy-byline">
+          Certification administered by <span className="font-semibold" style={{ color: "#E06D00" }}>SOLVE Academy™</span>.
+        </p>
         <div
           className="inline-flex rounded-lg border-2 p-1"
           style={{ borderColor: "#E06D00" }}
@@ -248,7 +251,9 @@ function OverviewCard({
           <CardTitle className="flex items-center gap-2 text-lg">
             <Award className="w-5 h-5" style={{ color: "#E06D00" }} /> {credential}
           </CardTitle>
-          <CardDescription>You have earned this credential. Both the written test and the final expert scenario were passed.</CardDescription>
+          <CardDescription>
+            Certified through SOLVE Academy. Both the written test and the final expert scenario were passed.
+          </CardDescription>
         </CardHeader>
       </Card>
     );

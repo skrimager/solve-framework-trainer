@@ -68,7 +68,7 @@ export default function Login() {
           >
             <SolveMark />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">SOLVE Framework Trainer</h1>
+          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">SOLVE Platform™</h1>
           <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
         </div>
         <Card className="border-2" style={{ borderColor: "#E06D00" }}>
