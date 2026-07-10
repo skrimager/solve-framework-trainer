@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, coachingMessages } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, CoachingMessage, InsertCoachingMessage } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -114,6 +114,13 @@ export interface IStorage {
 
   createProspectActivity(activity: InsertProspectActivity): Promise<ProspectActivity>;
   listRecentProspectActivity(limit?: number): Promise<ProspectActivity[]>;
+
+  // --- SOLVE Coach follow-up Q&A ---
+  createCoachingMessage(message: InsertCoachingMessage): Promise<CoachingMessage>;
+  // Only the still-active (cleared=false) thread for a session, oldest-first for display.
+  listCoachingMessagesBySession(sessionId: number): Promise<CoachingMessage[]>;
+  // Soft-clear every still-active thread a trainee owns (called when they start a new attempt).
+  clearCoachingMessagesForUser(userId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -474,6 +481,27 @@ export class DatabaseStorage implements IStorage {
 
   async listRecentProspectActivity(limit = 200): Promise<ProspectActivity[]> {
     return db.select().from(prospectActivity).orderBy(desc(prospectActivity.id)).limit(limit);
+  }
+
+  // --- SOLVE Coach follow-up Q&A ---
+  async createCoachingMessage(message: InsertCoachingMessage): Promise<CoachingMessage> {
+    const rows = await db.insert(coachingMessages).values(message).returning();
+    return rows[0];
+  }
+
+  async listCoachingMessagesBySession(sessionId: number): Promise<CoachingMessage[]> {
+    return db
+      .select()
+      .from(coachingMessages)
+      .where(and(eq(coachingMessages.sessionId, sessionId), eq(coachingMessages.cleared, false)))
+      .orderBy(coachingMessages.id);
+  }
+
+  async clearCoachingMessagesForUser(userId: number): Promise<void> {
+    await db
+      .update(coachingMessages)
+      .set({ cleared: true })
+      .where(and(eq(coachingMessages.userId, userId), eq(coachingMessages.cleared, false)));
   }
 }
 

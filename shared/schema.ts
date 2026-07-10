@@ -124,6 +124,30 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
 
+// A single message in the SOLVE Coach follow-up Q&A thread that a trainee can
+// have with the AI after a scenario's rubric feedback is shown. The thread is
+// scoped to one scenario attempt (sessionId) and one trainee (userId). When the
+// trainee starts a NEW scenario attempt, their prior threads are soft-cleared
+// (cleared=true) so a fresh attempt never shows the last attempt's conversation.
+// Managers/QA can read a trainee's still-active (cleared=false) thread but never
+// post — role authorship is fixed to 'trainee' | 'coach'.
+export const coachingMessages = pgTable("coaching_messages", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").notNull(),
+  userId: integer("user_id").notNull(), // the trainee who owns the attempt/thread
+  role: text("role").notNull(), // 'trainee' | 'coach'
+  content: text("content").notNull(),
+  cleared: boolean("cleared").notNull().default(false), // soft-clear flag: hidden once the trainee begins a new attempt
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertCoachingMessageSchema = createInsertSchema(coachingMessages).omit({
+  id: true,
+});
+
+export type InsertCoachingMessage = z.infer<typeof insertCoachingMessageSchema>;
+export type CoachingMessage = typeof coachingMessages.$inferSelect;
+
 // A single certification-exam attempt for one track. The two-part exam (written
 // test + final expert scenario) is tracked here start-to-finish. `overallPassed`
 // is only true once BOTH parts pass; that is the event that flips the user's
