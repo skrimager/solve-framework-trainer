@@ -17,6 +17,7 @@ import {
   type Track,
 } from "./certification";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
 import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail } from "./notifications";
 import {
   buildSequence,
@@ -441,6 +442,16 @@ export async function registerRoutes(
       console.error("Opening line generation failed; starting with empty transcript:", err);
     }
 
+    // Starting a new attempt retires any SOLVE Coach follow-up thread from the
+    // trainee's previous attempt: prior threads are soft-cleared so a fresh
+    // attempt never shows the last attempt's Q&A (persistence is per-attempt,
+    // not kept forever). Best-effort — a failure here must not block starting.
+    try {
+      await storage.clearCoachingMessagesForUser(Number(userId));
+    } catch (err) {
+      console.error("Failed to clear prior coaching threads:", err);
+    }
+
     const session = await storage.createSession({
       userId,
       scenarioId,
@@ -843,6 +854,8 @@ export async function registerRoutes(
       res.status(500).json({ message: err.message ?? "Failed to grade written test" });
     }
   });
+
+  registerCoachingRoutes(app);
 
   registerPublicAndAdminRoutes(app);
 
@@ -1949,6 +1962,117 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   app.post("/api/admin/opportunities/run-drip", requireAdmin, async (_req, res) => {
     const result = await sendDueOutreach({ storage, send: sendProspectEmail });
     res.json(result);
+  });
+}
+
+// SOLVE Coach follow-up Q&A routes. Extracted so they can be mounted on a bare
+// Express app in tests with an injected `responder` (no network) and stubbed
+// storage. In production `registerRoutes` mounts them with the default OpenAI
+// responder. Two routes:
+//   POST /api/sessions/:id/coaching — the TRAINEE (session owner, seat-gated)
+//     posts a follow-up question; we persist it, generate SOLVE Coach's reply
+//     (with the attempt's feedback + transcript in context), persist that, and
+//     return the refreshed thread.
+//   GET  /api/sessions/:id/coaching — returns the still-active thread. Readable
+//     by the trainee who owns it AND by a manager/QA in the same office
+//     (read-only visibility while the thread is active) — managers never post.
+export function registerCoachingRoutes(
+  app: Express,
+  opts: { responder?: CoachingResponder } = {},
+): void {
+  const responder = opts.responder;
+
+  app.get("/api/sessions/:id/coaching", async (req, res) => {
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ message: "Session not found" });
+
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) return res.status(400).json({ message: "requesterId is required" });
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+
+    // The owning trainee always sees their own thread. Otherwise the requester
+    // must be a manager/QA in the SAME office as the trainee (read-only view).
+    if (requester.id !== session.userId) {
+      const owner = await storage.getUser(session.userId);
+      const isManagerPeer =
+        (requester.role === "manager" || requester.role === "qa") &&
+        !!owner &&
+        owner.officeId === requester.officeId;
+      if (!isManagerPeer) return res.status(403).json({ message: "Not authorized" });
+    }
+
+    const messages = await storage.listCoachingMessagesBySession(session.id);
+    res.json({ messages, canPost: requester.id === session.userId });
+  });
+
+  app.post("/api/sessions/:id/coaching", async (req, res) => {
+    try {
+      const session = await storage.getSession(Number(req.params.id));
+      if (!session) return res.status(404).json({ message: "Session not found" });
+
+      const { userId, content } = req.body ?? {};
+      // Only the trainee who owns this attempt can post — managers are read-only.
+      if (Number(userId) !== session.userId) {
+        return res.status(403).json({ message: "Only the trainee who ran this scenario can ask SOLVE Coach." });
+      }
+      const gate = await checkSeatAccess(session.userId);
+      if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+      const question = typeof content === "string" ? content.trim() : "";
+      if (!question) return res.status(400).json({ message: "A question is required" });
+
+      const scenario = await storage.getScenario(session.scenarioId);
+      const track = scenarioTrack(scenario?.track);
+      const transcript = JSON.parse(session.transcript);
+
+      // Persist the trainee's turn first so the thread is durable even if the
+      // model call fails on the coach reply.
+      await storage.createCoachingMessage({
+        sessionId: session.id,
+        userId: session.userId,
+        role: "trainee",
+        content: question,
+        cleared: false,
+        createdAt: new Date().toISOString(),
+      });
+
+      const priorThread = await storage.listCoachingMessagesBySession(session.id);
+      // The thread we pass to the model is prior turns EXCLUDING the just-saved
+      // question (which is passed separately as the new question).
+      const thread: CoachingThreadMessage[] = priorThread
+        .filter((m) => m.role === "trainee" || m.role === "coach")
+        .slice(0, -1)
+        .map((m) => ({ role: m.role as "trainee" | "coach", content: m.content }));
+
+      const reply = await getCoachingReply(
+        {
+          track,
+          feedback: session.feedback ?? "",
+          rubricScoresJson: session.rubricScores ?? null,
+          overallScore: session.score ?? null,
+          transcript,
+          thread,
+          question,
+        },
+        responder,
+      );
+
+      await storage.createCoachingMessage({
+        sessionId: session.id,
+        userId: session.userId,
+        role: "coach",
+        content: reply,
+        cleared: false,
+        createdAt: new Date().toISOString(),
+      });
+
+      const messages = await storage.listCoachingMessagesBySession(session.id);
+      res.json({ messages, canPost: true });
+    } catch (err: any) {
+      console.error("Coaching reply failed:", err);
+      res.status(500).json({ message: err.message ?? "Failed to get a coaching reply" });
+    }
   });
 }
 
