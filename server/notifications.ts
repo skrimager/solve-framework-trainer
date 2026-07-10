@@ -120,6 +120,41 @@ export async function sendLeadNotification(lead: Lead): Promise<void> {
   }
 }
 
+// Sends one outbound prospect-outreach email through the SAME Resend transport
+// (same RESEND_API_KEY, same from address) used for lead/demo mail — no new key.
+// Returns whether the send succeeded so the drip sender only marks a row `sent`
+// on a real 2xx. Never throws.
+export async function sendProspectEmail(
+  to: string,
+  subject: string,
+  html: string,
+): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[notifications] RESEND_API_KEY is not set; skipping prospect outreach email.");
+    return false;
+  }
+  try {
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from: FROM_ADDRESS, to: [to], subject, html }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} for prospect email to ${to}: ${detail}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to send prospect outreach email to ${to}:`, err);
+    return false;
+  }
+}
+
 // Sends a public demo's 6-digit verification code to the visitor's own email,
 // reusing the exact same Resend transport as sendLeadNotification. Unlike the
 // best-effort lead email, the code IS the demo's auth, so this returns whether

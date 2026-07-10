@@ -14,7 +14,67 @@ async function request(method: string, url: string, body?: unknown): Promise<Res
   return res;
 }
 
-export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo";
+export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo" | "opportunities";
+
+// --- Opportunity Intelligence ---
+export type ProspectSearchRow = {
+  id: number;
+  segment: string;
+  geography: string;
+  runAt: string;
+  resultsCount: number;
+  status: string;
+};
+
+export type ProspectOutreachDetail = {
+  id: number;
+  sequenceStep: number;
+  emailSubject: string;
+  emailBody: string;
+  scheduledAt: string;
+  sentAt: string;
+  status: string;
+};
+
+export type ProspectContactDetail = {
+  id: number;
+  fullName: string;
+  title: string;
+  email: string;
+  phone: string;
+  linkedinUrl: string;
+  outreach: ProspectOutreachDetail[];
+};
+
+export type ProspectCompanyDetail = {
+  id: number;
+  name: string;
+  domain: string;
+  segment: string;
+  city: string;
+  state: string;
+  employeeCount: number | null;
+  signalType: string;
+  signalDetail: string;
+  source: string;
+  status: string;
+  contacts: ProspectContactDetail[];
+};
+
+export type ProspectBatchDetail = {
+  search: ProspectSearchRow;
+  companies: ProspectCompanyDetail[];
+};
+
+export type ProspectActivityRow = {
+  id: number;
+  contactId: number;
+  contactName: string;
+  contactEmail: string;
+  eventType: string;
+  eventDetail: string;
+  occurredAt: string;
+};
 
 export type AdminContact = {
   id: number;
@@ -114,6 +174,35 @@ export const adminApi = {
     const params = new URLSearchParams({ format: "csv" });
     for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
     await downloadBlob(`/api/admin/contacts?${params.toString()}`, "contacts.csv");
+  },
+
+  // --- Opportunity Intelligence ---
+  async listProspectSearches(): Promise<{ rows: ProspectSearchRow[] }> {
+    const res = await request("GET", "/api/admin/opportunities/searches");
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
+  },
+
+  async getProspectBatch(id: number): Promise<ProspectBatchDetail> {
+    const res = await request("GET", `/api/admin/opportunities/searches/${id}`);
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
+  },
+
+  async approveProspectBatch(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/opportunities/searches/${id}/approve`);
+    if (!res.ok) throw new Error("approve failed");
+  },
+
+  async rejectProspectBatch(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/opportunities/searches/${id}/reject`);
+    if (!res.ok) throw new Error("reject failed");
+  },
+
+  async listProspectActivity(): Promise<{ rows: ProspectActivityRow[] }> {
+    const res = await request("GET", "/api/admin/opportunities/activity");
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
   },
 };
 
