@@ -24,13 +24,13 @@ const NAVY = "#0A1A30";
 const NAVY_DARK = "#05162D";
 const ORANGE = "#E06D00";
 
-const SECTIONS: { key: AdminSection; label: string; icon: any }[] = [
+const SECTIONS: { key: AdminSection; label: string; icon: any; title?: string }[] = [
   { key: "visitors", label: "Visitors", icon: Eye },
   { key: "leads", label: "Contacts", icon: FileText },
   { key: "users", label: "All Users", icon: Users },
   { key: "sales", label: "Sales", icon: DollarSign },
   { key: "demo", label: "Voice Demo", icon: Mic },
-  { key: "opportunities", label: "Opportunities", icon: Target },
+  { key: "opportunities", label: "Opportunity Intel", icon: Target, title: "SOLVE Opportunity Intelligence™" },
 ];
 
 const CONTACT_TYPES = ["speaking", "consulting", "book", "training", "role_play", "general"];
@@ -89,6 +89,7 @@ export default function AdminDashboard() {
                 key={s.key}
                 onClick={() => setSection(s.key)}
                 data-testid={`nav-${s.key}`}
+                title={s.title}
                 className="w-full flex items-center gap-3 px-5 py-3 text-sm text-left transition-colors"
                 style={{
                   backgroundColor: active ? ORANGE : "transparent",
@@ -671,7 +672,7 @@ function OpportunitiesSection() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">Opportunity Intelligence</h1>
+        <h1 className="text-2xl font-bold text-white">SOLVE Opportunity Intelligence™</h1>
         <p className="text-white/60 text-sm mt-1">
           Outbound discovery-training batches. Review a batch, then approve to schedule its email sequence or reject to hold it.
         </p>

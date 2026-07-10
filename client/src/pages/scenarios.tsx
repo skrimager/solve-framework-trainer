@@ -277,7 +277,7 @@ export default function Scenarios() {
                   Advanced is no longer sufficient (that only unlocks the exam). */}
               {certified && (
                 <p className="text-xs font-semibold" style={{ color: "#E06D00" }} data-testid="text-credential">
-                  ✓ {TRACK_CREDENTIAL[track]}
+                  ✓ {TRACK_CREDENTIAL[track]} · SOLVE Academy™
                 </p>
               )}
             </div>

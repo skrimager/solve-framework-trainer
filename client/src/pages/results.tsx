@@ -61,8 +61,11 @@ export default function Results() {
               <span className="text-2xl font-semibold" data-testid="text-overall-score">{session.score ?? "-"}</span>
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground" data-testid="text-feedback">{session.feedback}</p>
+            <p className="text-xs font-medium" style={{ color: "#E06D00" }} data-testid="text-coach-byline">
+              Scored by SOLVE Coach™
+            </p>
           </CardContent>
         </Card>
 
