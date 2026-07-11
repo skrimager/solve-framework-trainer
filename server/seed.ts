@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { hashPassword } from "./admin";
+import { healUnlimitedDemoUsage } from "./demo";
 import type { InsertScenario, Office } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
@@ -73,6 +74,13 @@ export async function seed() {
       await storage.createScenario(scenario);
     }
     console.log(`Seeded ${missing.length} new scenario(s) across ${new Set(missing.map((s) => s.vertical)).size} vertical(s).`);
+  }
+
+  // Heal any allowlisted demo email whose stored usage predates the exemption,
+  // so a redeploy alone unblocks them without a manual production DB edit.
+  const healed = await healUnlimitedDemoUsage(storage);
+  if (healed.length > 0) {
+    console.log(`Reset demo session usage for ${healed.length} allowlisted email(s): ${healed.join(", ")}.`);
   }
 }
 

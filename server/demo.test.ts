@@ -15,6 +15,7 @@ import {
   isSessionLimitReached,
   remainingSessions,
   isUnlimitedDemoEmail,
+  healUnlimitedDemoUsage,
   signDemoToken,
   verifyDemoToken,
   ctaSeatQuestion,
@@ -106,6 +107,59 @@ describe("session limit helpers", () => {
     const email = "someoneelse@example.com";
     assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS, email), true);
     assert.equal(remainingSessions(MAX_DEMO_SESSIONS, email), 0);
+  });
+});
+
+describe("healUnlimitedDemoUsage", () => {
+  function fakeStore(rows: Array<Pick<DemoSignup, "id" | "email" | "sessionsUsed">>) {
+    const patches: Array<{ id: number; patch: Partial<DemoSignup> }> = [];
+    const store = {
+      async listDemoSignups() {
+        return rows as DemoSignup[];
+      },
+      async updateDemoSignup(id: number, patch: Partial<DemoSignup>) {
+        patches.push({ id, patch });
+        const row = rows.find((r) => r.id === id);
+        if (row) Object.assign(row, patch);
+        return row as DemoSignup | undefined;
+      },
+    };
+    return { store, patches };
+  }
+
+  test("resets an allowlisted email whose stored counter is at/over the cap", async () => {
+    const { store, patches } = fakeStore([
+      { id: 1, email: "wadeskrimager@icloud.com", sessionsUsed: MAX_DEMO_SESSIONS },
+    ]);
+    const reset = await healUnlimitedDemoUsage(store);
+    assert.deepEqual(reset, ["wadeskrimager@icloud.com"]);
+    assert.deepEqual(patches, [{ id: 1, patch: { sessionsUsed: 0 } }]);
+  });
+
+  test("matches the allowlist case/whitespace-insensitively", async () => {
+    const { store } = fakeStore([
+      { id: 7, email: "  WadeSkrimager@ICloud.com ", sessionsUsed: 5 },
+    ]);
+    const reset = await healUnlimitedDemoUsage(store);
+    assert.equal(reset.length, 1);
+  });
+
+  test("leaves non-exempt emails untouched even when over the cap", async () => {
+    const { store, patches } = fakeStore([
+      { id: 2, email: "someoneelse@example.com", sessionsUsed: MAX_DEMO_SESSIONS + 2 },
+    ]);
+    const reset = await healUnlimitedDemoUsage(store);
+    assert.deepEqual(reset, []);
+    assert.equal(patches.length, 0);
+  });
+
+  test("is idempotent — an allowlisted row already at 0 is not rewritten", async () => {
+    const { store, patches } = fakeStore([
+      { id: 3, email: "wadeskrimager@icloud.com", sessionsUsed: 0 },
+    ]);
+    const reset = await healUnlimitedDemoUsage(store);
+    assert.deepEqual(reset, []);
+    assert.equal(patches.length, 0);
   });
 });
 
