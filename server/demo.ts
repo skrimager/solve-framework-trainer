@@ -1,5 +1,5 @@
 import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
-import type { DemoSignup } from "@shared/schema";
+import type { DemoSignup, InsertDemoSignup } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
 // Public "Free Voice Demo" logic. This is intentionally self-contained and
@@ -30,6 +30,34 @@ function unlimitedDemoEmails(): Set<string> {
 // True if this email is exempt from the demo session cap (case-insensitive).
 export function isUnlimitedDemoEmail(email: string): boolean {
   return unlimitedDemoEmails().has(normalizeEmail(email));
+}
+
+// Minimal storage surface healUnlimitedDemoUsage needs. Declared here (rather
+// than importing the concrete storage) so the heal is trivially unit-testable
+// with a fake, and so demo.ts stays free of a DB dependency.
+export interface DemoUsageStore {
+  listDemoSignups(): Promise<DemoSignup[]>;
+  updateDemoSignup(id: number, patch: Partial<InsertDemoSignup>): Promise<DemoSignup | undefined>;
+}
+
+// Reset the persisted `sessionsUsed` counter to 0 for every allowlisted
+// (unlimited) email whose row still shows usage. The runtime cap check
+// (isSessionLimitReached) already exempts these emails, but a row created
+// BEFORE the email was allowlisted keeps its stale sessionsUsed >= MAX. That is
+// misleading in the admin export and leaves the account brittle to any code
+// path that reads the raw count. Running this on boot heals such rows on the
+// next deploy with no manual SQL. Idempotent: only touches rows that need it.
+// Returns the list of emails it reset (for logging/tests).
+export async function healUnlimitedDemoUsage(store: DemoUsageStore): Promise<string[]> {
+  const signups = await store.listDemoSignups();
+  const reset: string[] = [];
+  for (const signup of signups) {
+    if (signup.sessionsUsed > 0 && isUnlimitedDemoEmail(signup.email)) {
+      await store.updateDemoSignup(signup.id, { sessionsUsed: 0 });
+      reset.push(signup.email);
+    }
+  }
+  return reset;
 }
 
 // A freshly-emailed code is valid for this long before it must be re-sent.
