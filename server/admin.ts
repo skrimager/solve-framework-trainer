@@ -5,7 +5,11 @@ import {
   createHmac,
 } from "node:crypto";
 import type { Office } from "@shared/schema";
-import { officeIsActive } from "./billing";
+import {
+  officeIsActive,
+  planForSeatCount,
+  isEnterpriseSeatCount,
+} from "./billing";
 
 // --- Admin session config ---------------------------------------------------
 // The admin account is a true top-level account: its session lives in a
@@ -92,22 +96,33 @@ export function toCsv<T extends Record<string, unknown>>(
 
 // --- Sales aggregation -------------------------------------------------------
 // Per-office subscription/revenue rows derived from the billing fields already
-// stored per office (populated by the Stripe webhook sync). MRR is a directional
-// estimate from the seat count using the same public volume-tiered seat pricing;
-// the Manager Dashboard fee is a flat monthly fee (not amortized from an annual price).
-const MANAGER_MONTHLY = 189;
+// stored per office (populated by the Stripe webhook sync). MRR uses the Pricing
+// v2 flat-per-tier model (see billing.ts): every seat in an office bills at the
+// single flat rate of the tier its total seat count lands in — NOT graduated math.
+// The optional Manager Dashboard fee is counted only when the add-on is active,
+// at the office's current tier rate. Enterprise (36+) offices are custom quotes
+// and are tracked separately, not folded into the standard MRR formula.
 
-export function seatMonthlyRate(seatIndex: number): number {
-  // seatIndex is 1-based position of the seat within the office.
-  if (seatIndex <= 5) return 29;
-  if (seatIndex <= 15) return 24;
-  return 19;
+// Seat MRR for an office of `seatCount` seats under flat-per-tier pricing:
+//   1 seat = $49, 5 = $245, 6 = $270, 20 = $900, 21 = $861, 35 = $1,435.
+// NOTE: because this is flat-per-tier (not graduated), a larger seat count can
+// cost LESS than a smaller one across a tier boundary — e.g. 21 seats ($861) is
+// cheaper than 20 seats ($900). This is the founder-confirmed intended behavior,
+// not a bug to "fix" here. Enterprise (36+) has no self-serve rate → returns 0.
+export function calculateSeatMRR(seatCount: number): number {
+  if (seatCount <= 0) return 0;
+  const plan = planForSeatCount(seatCount);
+  if (!plan) return 0; // Enterprise (36+): custom quote, tracked separately
+  return seatCount * plan.seatRate;
 }
 
-export function seatsMrr(seatCount: number): number {
-  let total = 0;
-  for (let i = 1; i <= seatCount; i++) total += seatMonthlyRate(i);
-  return total;
+// Dashboard MRR: only offices with the add-on actually active (a dashboard line
+// exists on the subscription) contribute, at their CURRENT tier's dashboard rate.
+export function dashboardMRR(office: Office): number {
+  if (!office.managerItemId) return 0; // add-on not active → $0 dashboard
+  const plan = planForSeatCount(office.activeSeatCount ?? 0);
+  if (!plan) return 0; // Enterprise handled separately
+  return plan.dashboardRate;
 }
 
 export type SalesRow = {
@@ -119,16 +134,17 @@ export type SalesRow = {
   seatsMrr: number;
   managerMrr: number;
   mrr: number;
+  isEnterprise: boolean;
   hasStripeCustomer: boolean;
 };
 
 export function computeSalesRow(office: Office): SalesRow {
   const active = officeIsActive(office);
   const seatCount = office.activeSeatCount ?? 0;
-  const seats = active ? seatsMrr(seatCount) : 0;
-  // The manager dashboard fee only contributes while the office is active and has
-  // actually subscribed (a Stripe customer exists).
-  const managerMrr = active && office.stripeCustomerId ? Math.round(MANAGER_MONTHLY * 100) / 100 : 0;
+  const isEnterprise = isEnterpriseSeatCount(seatCount);
+  // Enterprise offices are custom quotes — excluded from the standard MRR formula.
+  const seats = active && !isEnterprise ? calculateSeatMRR(seatCount) : 0;
+  const managerMrr = active && !isEnterprise ? dashboardMRR(office) : 0;
   const mrr = Math.round((seats + managerMrr) * 100) / 100;
   return {
     officeId: office.id,
@@ -139,15 +155,19 @@ export function computeSalesRow(office: Office): SalesRow {
     seatsMrr: seats,
     managerMrr,
     mrr,
+    isEnterprise,
     hasStripeCustomer: Boolean(office.stripeCustomerId),
   };
 }
 
-export function summarizeSales(offices: Office[]): { rows: SalesRow[]; totalMrr: number; activeOffices: number } {
+export function summarizeSales(
+  offices: Office[],
+): { rows: SalesRow[]; totalMrr: number; activeOffices: number; enterpriseOffices: number } {
   const rows = offices.map(computeSalesRow);
   const totalMrr = Math.round(rows.reduce((sum, r) => sum + r.mrr, 0) * 100) / 100;
   const activeOffices = rows.filter((r) => r.active).length;
-  return { rows, totalMrr, activeOffices };
+  const enterpriseOffices = rows.filter((r) => r.isEnterprise).length;
+  return { rows, totalMrr, activeOffices, enterpriseOffices };
 }
 
 // --- In-memory per-IP rate limiter ------------------------------------------

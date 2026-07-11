@@ -1,16 +1,26 @@
-// One-time setup: creates the two Stripe products and their prices for the SOLVE
-// billing model, then prints the price IDs to paste into your environment.
+// One-time setup for the SOLVE Pricing v2 (flat-per-tier) billing model. Creates
+// the Stripe products and per-tier prices, then prints the price IDs to paste into
+// your environment.
 //
-//   Product 1 — "Manager Dashboard + User Portal": flat $189/year, quantity always 1.
-//   Product 2 — "Consultant Seat": $29/mo per seat for the first 5, $24/mo for 6–15,
-//               $19/mo for 16+ — using volume tiered pricing (the whole quantity is
-//               billed at the tier its total falls into).
+// Pricing v2 is flat-per-tier (NOT graduated): a consultant seat and the optional
+// Manager Dashboard each have ONE flat monthly rate per plan tier. The app switches
+// an office's seat/dashboard subscription items between these prices as its seat
+// count moves tiers (see server/billing.ts). Enterprise (36+) is a custom quote —
+// no self-serve Stripe price object is created for it.
+//
+//   Consultant Seat (monthly, flat per unit, one price per tier):
+//     Team    (1–5)   $49/seat
+//     Office  (6–20)  $45/seat
+//     Company (21–35) $41/seat
+//   Manager Dashboard (monthly flat, optional, one price per tier):
+//     Team $249/mo   Office $389/mo   Company $529/mo
 //
 // Run against TEST mode first:
 //   STRIPE_SECRET_KEY=sk_test_... npx tsx scripts/stripe-setup.ts
 //
-// Re-running creates NEW products/prices (Stripe has no natural upsert key here), so
-// run once per environment and record the printed IDs.
+// Stripe prices are IMMUTABLE and this script has no natural upsert key, so each run
+// creates NEW products/prices. Run once per environment and record the printed IDs.
+// Do NOT delete old price objects — archive/deprecate the superseded ones in Stripe.
 import Stripe from "stripe";
 
 async function main() {
@@ -21,42 +31,63 @@ async function main() {
   }
   const stripe = new Stripe(key, { apiVersion: "2025-02-24.acacia" });
 
-  console.log("Creating Manager Dashboard product…");
-  const managerProduct = await stripe.products.create({
-    name: "Manager Dashboard + User Portal",
-    description: "Annual access to the manager dashboard and user portal (one per office).",
-  });
-  const managerPrice = await stripe.prices.create({
-    product: managerProduct.id,
-    currency: "usd",
-    unit_amount: 18900, // $189.00
-    recurring: { interval: "year" },
-    nickname: "Manager Dashboard (annual flat)",
-  });
+  // Per-seat monthly rates (in cents) by tier.
+  const SEAT_TIERS = [
+    { tier: "TEAM", label: "Team (1–5)", unit_amount: 4900 },
+    { tier: "OFFICE", label: "Office (6–20)", unit_amount: 4500 },
+    { tier: "COMPANY", label: "Company (21–35)", unit_amount: 4100 },
+  ] as const;
+
+  // Optional Manager Dashboard monthly fee (in cents) by tier.
+  const DASHBOARD_TIERS = [
+    { tier: "TEAM", label: "Team", unit_amount: 24900 },
+    { tier: "OFFICE", label: "Office", unit_amount: 38900 },
+    { tier: "COMPANY", label: "Company", unit_amount: 52900 },
+  ] as const;
 
   console.log("Creating Consultant Seat product…");
   const seatProduct = await stripe.products.create({
     name: "Consultant Seat",
-    description: "Per-consultant monthly training seat with volume pricing.",
+    description: "Per-consultant monthly practice seat. Flat-per-tier: all seats bill at the office's current plan tier rate.",
   });
-  const seatPrice = await stripe.prices.create({
-    product: seatProduct.id,
-    currency: "usd",
-    recurring: { interval: "month" },
-    billing_scheme: "tiered",
-    tiers_mode: "volume",
-    tiers: [
-      { up_to: 5, unit_amount: 2900 }, // $29/seat when total ≤ 5
-      { up_to: 15, unit_amount: 2400 }, // $24/seat when total ≤ 15
-      { up_to: "inf", unit_amount: 1900 }, // $19/seat when total ≥ 16
-    ],
-    nickname: "Consultant Seat (monthly, volume tiered)",
+  const seatPriceIds: Record<string, string> = {};
+  for (const t of SEAT_TIERS) {
+    const price = await stripe.prices.create({
+      product: seatProduct.id,
+      currency: "usd",
+      unit_amount: t.unit_amount,
+      recurring: { interval: "month" },
+      nickname: `Consultant Seat — ${t.label} ($${(t.unit_amount / 100).toFixed(0)}/seat/mo)`,
+    });
+    seatPriceIds[t.tier] = price.id;
+  }
+
+  console.log("Creating Manager Dashboard product…");
+  const dashboardProduct = await stripe.products.create({
+    name: "Manager Dashboard",
+    description: "Optional monthly manager dashboard (team oversight and practice tracking). Not required to practice; does not include a personal practice seat.",
   });
+  const dashboardPriceIds: Record<string, string> = {};
+  for (const t of DASHBOARD_TIERS) {
+    const price = await stripe.prices.create({
+      product: dashboardProduct.id,
+      currency: "usd",
+      unit_amount: t.unit_amount,
+      recurring: { interval: "month" },
+      nickname: `Manager Dashboard — ${t.label} ($${(t.unit_amount / 100).toFixed(0)}/mo)`,
+    });
+    dashboardPriceIds[t.tier] = price.id;
+  }
 
   console.log("\n✅ Stripe products/prices created. Add these to your environment:\n");
-  console.log(`STRIPE_MANAGER_DASHBOARD_PRICE_ID=${managerPrice.id}`);
-  console.log(`STRIPE_CONSULTANT_SEAT_PRICE_ID=${seatPrice.id}`);
-  console.log("\nAlso set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and APP_URL.");
+  console.log(`STRIPE_SEAT_TEAM_PRICE_ID=${seatPriceIds.TEAM}`);
+  console.log(`STRIPE_SEAT_OFFICE_PRICE_ID=${seatPriceIds.OFFICE}`);
+  console.log(`STRIPE_SEAT_COMPANY_PRICE_ID=${seatPriceIds.COMPANY}`);
+  console.log(`STRIPE_DASHBOARD_TEAM_PRICE_ID=${dashboardPriceIds.TEAM}`);
+  console.log(`STRIPE_DASHBOARD_OFFICE_PRICE_ID=${dashboardPriceIds.OFFICE}`);
+  console.log(`STRIPE_DASHBOARD_COMPANY_PRICE_ID=${dashboardPriceIds.COMPANY}`);
+  console.log("\nEnterprise (36+) is a custom quote — no self-serve price object is created.");
+  console.log("Also set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and APP_URL.");
   process.exit(0);
 }
 

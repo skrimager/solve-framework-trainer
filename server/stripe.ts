@@ -3,18 +3,57 @@ import Stripe from "stripe";
 // Central Stripe configuration. All billing code imports the client and env
 // helpers from here so there is a single place that knows about keys/price IDs.
 //
+// Pricing v2 (flat-per-tier): consultant seats and the optional Manager Dashboard
+// each have ONE monthly Stripe Price per plan tier (Team / Office / Company).
+// Enterprise (36+ seats) is a custom quote with no self-serve Price object. The
+// app switches an office's seat item between these prices as its seat count moves
+// tiers (see billing.setSeatQuantity). Create the Price objects with
+// scripts/stripe-setup.ts and paste the printed ids into these env vars.
+//
 // No secrets are committed. In every environment these come from process.env:
-//   STRIPE_SECRET_KEY                      sk_test_... (or sk_live_... in prod)
-//   STRIPE_WEBHOOK_SECRET                  whsec_...
-//   STRIPE_MANAGER_DASHBOARD_PRICE_ID      price_... (annual flat $189, qty 1)
-//   STRIPE_CONSULTANT_SEAT_PRICE_ID        price_... (monthly volume-tiered seat)
-//   APP_URL                                base URL for Checkout/Portal redirects
+//   STRIPE_SECRET_KEY                sk_test_... (or sk_live_... in prod)
+//   STRIPE_WEBHOOK_SECRET            whsec_...
+//   STRIPE_SEAT_TEAM_PRICE_ID        price_... ($49/seat/mo, Team 1-5)
+//   STRIPE_SEAT_OFFICE_PRICE_ID      price_... ($45/seat/mo, Office 6-20)
+//   STRIPE_SEAT_COMPANY_PRICE_ID     price_... ($41/seat/mo, Company 21-35)
+//   STRIPE_DASHBOARD_TEAM_PRICE_ID   price_... ($249/mo optional dashboard, Team)
+//   STRIPE_DASHBOARD_OFFICE_PRICE_ID price_... ($389/mo optional dashboard, Office)
+//   STRIPE_DASHBOARD_COMPANY_PRICE_ID price_... ($529/mo optional dashboard, Company)
+//   APP_URL                          base URL for Checkout/Portal redirects
+import type { SelfServeTier } from "./billing";
 
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? "";
-export const MANAGER_DASHBOARD_PRICE_ID = process.env.STRIPE_MANAGER_DASHBOARD_PRICE_ID ?? "";
-export const CONSULTANT_SEAT_PRICE_ID = process.env.STRIPE_CONSULTANT_SEAT_PRICE_ID ?? "";
 export const APP_URL = process.env.APP_URL ?? "http://localhost:5000";
+
+const SEAT_PRICE_ID_BY_TIER: Record<SelfServeTier, string> = {
+  team: process.env.STRIPE_SEAT_TEAM_PRICE_ID ?? "",
+  office: process.env.STRIPE_SEAT_OFFICE_PRICE_ID ?? "",
+  company: process.env.STRIPE_SEAT_COMPANY_PRICE_ID ?? "",
+};
+
+const DASHBOARD_PRICE_ID_BY_TIER: Record<SelfServeTier, string> = {
+  team: process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID ?? "",
+  office: process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID ?? "",
+  company: process.env.STRIPE_DASHBOARD_COMPANY_PRICE_ID ?? "",
+};
+
+// The Stripe Price id for a seat / dashboard subscription item at a given tier.
+export function seatPriceIdForTier(tier: SelfServeTier): string {
+  return SEAT_PRICE_ID_BY_TIER[tier];
+}
+export function dashboardPriceIdForTier(tier: SelfServeTier): string {
+  return DASHBOARD_PRICE_ID_BY_TIER[tier];
+}
+
+// Reverse lookup: is this price id one of our seat / dashboard prices? Used by the
+// webhook sync to classify subscription items regardless of which tier they're at.
+export function isSeatPriceId(priceId: string): boolean {
+  return priceId !== "" && Object.values(SEAT_PRICE_ID_BY_TIER).includes(priceId);
+}
+export function isDashboardPriceId(priceId: string): boolean {
+  return priceId !== "" && Object.values(DASHBOARD_PRICE_ID_BY_TIER).includes(priceId);
+}
 
 // Billing is only wired up when a secret key is present. Everywhere billing is
 // optional, callers check isStripeConfigured() first and degrade gracefully so

@@ -8,16 +8,26 @@ import {
   officeIsActive,
   syncOfficeFromSubscription,
   setSeatQuantity,
+  addDashboard,
+  removeDashboard,
   handleStripeEvent,
+  EnterpriseQuoteRequiredError,
 } from "./billing";
 import type { Office, BillingEvent } from "@shared/schema";
 
-// These tests use hardcoded price ids; billing.ts reads them from env at module
-// load, so we set them before anything else runs.
-process.env.STRIPE_MANAGER_DASHBOARD_PRICE_ID ??= "price_manager";
-process.env.STRIPE_CONSULTANT_SEAT_PRICE_ID ??= "price_seat";
-const MANAGER_PRICE = process.env.STRIPE_MANAGER_DASHBOARD_PRICE_ID;
-const SEAT_PRICE = process.env.STRIPE_CONSULTANT_SEAT_PRICE_ID;
+// billing.ts (via stripe.ts) reads the per-tier price ids from env at module load.
+// The npm test script sets them; these fallbacks keep the file runnable directly.
+process.env.STRIPE_SEAT_TEAM_PRICE_ID ??= "price_seat_team";
+process.env.STRIPE_SEAT_OFFICE_PRICE_ID ??= "price_seat_office";
+process.env.STRIPE_SEAT_COMPANY_PRICE_ID ??= "price_seat_company";
+process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID ??= "price_dash_team";
+process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID ??= "price_dash_office";
+process.env.STRIPE_DASHBOARD_COMPANY_PRICE_ID ??= "price_dash_company";
+
+const SEAT_TEAM = process.env.STRIPE_SEAT_TEAM_PRICE_ID;
+const SEAT_OFFICE = process.env.STRIPE_SEAT_OFFICE_PRICE_ID;
+const DASH_TEAM = process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID;
+const DASH_OFFICE = process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID;
 
 // --- In-memory storage patch (no database needed) ---
 let offices: Map<number, Office>;
@@ -67,7 +77,8 @@ beforeEach(() => {
   };
 });
 
-// A minimal fake Stripe covering only what billing.ts calls.
+// A minimal fake Stripe covering only what billing.ts calls. Update/create calls
+// record BOTH price and quantity so tests can assert the flat-per-tier reprice.
 function fakeStripe(subscription: any, calls: any[] = []): void {
   const fake = {
     subscriptions: {
@@ -78,12 +89,16 @@ function fakeStripe(subscription: any, calls: any[] = []): void {
     },
     subscriptionItems: {
       update: async (id: string, params: any) => {
-        calls.push(["subscriptionItems.update", id, params.quantity]);
+        calls.push(["subscriptionItems.update", id, params.price, params.quantity]);
         return { id };
       },
       create: async (params: any) => {
         calls.push(["subscriptionItems.create", params.price, params.quantity]);
         return { id: "si_new" };
+      },
+      del: async (id: string) => {
+        calls.push(["subscriptionItems.del", id]);
+        return { id, deleted: true };
       },
     },
   };
@@ -92,10 +107,10 @@ function fakeStripe(subscription: any, calls: any[] = []): void {
 
 function subscriptionWith(status: string, seatQty: number | null): any {
   const items = [
-    { id: "si_manager", price: { id: MANAGER_PRICE }, quantity: 1 },
+    { id: "si_manager", price: { id: DASH_TEAM }, quantity: 1 },
   ];
   if (seatQty !== null) {
-    items.push({ id: "si_seat", price: { id: SEAT_PRICE }, quantity: seatQty });
+    items.push({ id: "si_seat", price: { id: SEAT_TEAM }, quantity: seatQty });
   }
   return { id: "sub_1", status, customer: "cus_1", items: { data: items }, metadata: { officeId: "1" } };
 }
@@ -120,26 +135,121 @@ describe("syncOfficeFromSubscription", () => {
     assert.equal(o.seatItemId, "si_seat");
     assert.equal(o.activeSeatCount, 7);
   });
+
+  test("classifies a seat priced at ANY tier (Office) as the seat line", async () => {
+    offices.set(1, makeOffice());
+    const sub = {
+      id: "sub_1",
+      status: "active",
+      customer: "cus_1",
+      items: { data: [{ id: "si_seat", price: { id: SEAT_OFFICE }, quantity: 12 }] },
+      metadata: { officeId: "1" },
+    };
+    await syncOfficeFromSubscription(offices.get(1)!, sub as any);
+    const o = offices.get(1)!;
+    assert.equal(o.seatItemId, "si_seat");
+    assert.equal(o.activeSeatCount, 12);
+  });
+
+  test("a seats-only subscription (no dashboard line) leaves managerItemId unset", async () => {
+    offices.set(1, makeOffice());
+    const sub = {
+      id: "sub_1",
+      status: "active",
+      customer: "cus_1",
+      items: { data: [{ id: "si_seat", price: { id: SEAT_TEAM }, quantity: 4 }] },
+      metadata: { officeId: "1" },
+    };
+    await syncOfficeFromSubscription(offices.get(1)!, sub as any);
+    const o = offices.get(1)!;
+    assert.equal(o.seatItemId, "si_seat");
+    assert.equal(o.activeSeatCount, 4);
+    assert.equal(o.managerItemId, null, "no dashboard add-on → managerItemId stays null");
+  });
 });
 
 describe("setSeatQuantity", () => {
-  test("updates existing seat item quantity", async () => {
+  test("updates existing seat item at the Team-tier price for 4 seats", async () => {
     const calls: any[] = [];
     fakeStripe(null, calls);
     const office = makeOffice({ seatItemId: "si_seat" });
     const id = await setSeatQuantity(office, 4);
     assert.equal(id, "si_seat");
-    assert.deepEqual(calls[0], ["subscriptionItems.update", "si_seat", 4]);
+    assert.deepEqual(calls[0], ["subscriptionItems.update", "si_seat", SEAT_TEAM, 4]);
   });
 
-  test("creates seat item on first seat and persists id", async () => {
+  test("creates seat item on first seat at the Team-tier price and persists id", async () => {
     const calls: any[] = [];
     fakeStripe(null, calls);
     offices.set(1, makeOffice({ seatItemId: null }));
     const id = await setSeatQuantity(offices.get(1)!, 1);
     assert.equal(id, "si_new");
-    assert.deepEqual(calls[0], ["subscriptionItems.create", SEAT_PRICE, 1]);
+    assert.deepEqual(calls[0], ["subscriptionItems.create", SEAT_TEAM, 1]);
     assert.equal(offices.get(1)!.seatItemId, "si_new");
+  });
+
+  test("crossing 5→6 seats re-prices the WHOLE seat line to the Office-tier rate", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    // Office was in the Team tier (seat item already priced at Team). Growing to 6
+    // seats moves it to Office; the entire seat line must switch to the Office price.
+    const office = makeOffice({ seatItemId: "si_seat" });
+    await setSeatQuantity(office, 6);
+    assert.deepEqual(calls[0], ["subscriptionItems.update", "si_seat", SEAT_OFFICE, 6]);
+  });
+
+  test("an office can run seats-only: no dashboard line is touched when the add-on is inactive", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    // managerItemId is null (no dashboard add-on) — only the seat line changes.
+    const office = makeOffice({ seatItemId: "si_seat", managerItemId: null });
+    await setSeatQuantity(office, 3);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], ["subscriptionItems.update", "si_seat", SEAT_TEAM, 3]);
+  });
+
+  test("dashboard re-tiers when a seat change moves the office into a new tier", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    // Dashboard add-on is active (managerItemId set). Growing to 6 seats (Office
+    // tier) must also re-price the dashboard line to the Office dashboard rate.
+    const office = makeOffice({ seatItemId: "si_seat", managerItemId: "si_manager" });
+    await setSeatQuantity(office, 6);
+    assert.deepEqual(calls[0], ["subscriptionItems.update", "si_seat", SEAT_OFFICE, 6]);
+    assert.deepEqual(calls[1], ["subscriptionItems.update", "si_manager", DASH_OFFICE, 1]);
+  });
+
+  test("reaching 36+ seats is Enterprise and is rejected (route to a custom quote)", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    const office = makeOffice({ seatItemId: "si_seat" });
+    await assert.rejects(() => setSeatQuantity(office, 36), EnterpriseQuoteRequiredError);
+    assert.equal(calls.length, 0, "no Stripe calls should be made for Enterprise");
+  });
+});
+
+describe("optional dashboard add-on", () => {
+  test("addDashboard adds ONLY a dashboard line (no seat granted — manager buys a seat separately)", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    offices.set(1, makeOffice({ managerItemId: null, seatItemId: null, activeSeatCount: 0 }));
+    const id = await addDashboard(offices.get(1)!);
+    assert.equal(id, "si_new");
+    // Exactly one create call, for the dashboard at the Team-tier rate. No seat line.
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], ["subscriptionItems.create", DASH_TEAM, 1]);
+    assert.equal(offices.get(1)!.managerItemId, "si_new");
+    assert.equal(offices.get(1)!.seatItemId, null, "dashboard must not create a seat");
+  });
+
+  test("removeDashboard drops the dashboard line so the office runs seats-only", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    offices.set(1, makeOffice({ managerItemId: "si_manager", seatItemId: "si_seat", activeSeatCount: 3 }));
+    await removeDashboard(offices.get(1)!);
+    assert.deepEqual(calls[0], ["subscriptionItems.del", "si_manager"]);
+    assert.equal(offices.get(1)!.managerItemId, null);
+    assert.equal(offices.get(1)!.seatItemId, "si_seat", "seat line is untouched");
   });
 });
 
