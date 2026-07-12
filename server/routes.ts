@@ -502,7 +502,7 @@ export async function registerRoutes(
       if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
       const scenario = await storage.getScenario(session.scenarioId);
-      if (!scenario) return res.status(404).json({ message: "Scenario not found" });
+      if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
       const { content, withAudio } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);
@@ -1268,7 +1268,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
         return res.status(404).json({ message: "Session not found" });
       }
       const scenario = await storage.getScenario(session.scenarioId);
-      if (!scenario) return res.status(404).json({ message: "Scenario not found" });
+      if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
       const { content, withAudio } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);

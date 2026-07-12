@@ -186,7 +186,7 @@ export default function RolePlay() {
   }, [transcript.length]);
 
   const isLeadership = scenario?.track === "leadership";
-  const sessionTitle = isLeadership ? "Conflict scenario" : "Discovery session";
+  const sessionTitle = isLeadership ? "Conflict conversation" : "Discovery session";
   const sessionHint = isLeadership
     ? "Listen with empathy, uncover the root cause, and work toward a resolution that doesn't lay blame."
     : "Ask open questions before proposing anything. Uncover the real need.";

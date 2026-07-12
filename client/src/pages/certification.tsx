@@ -252,7 +252,7 @@ function OverviewCard({
             <Award className="w-5 h-5" style={{ color: "#E06D00" }} /> {credential}
           </CardTitle>
           <CardDescription>
-            Certified through SOLVE Academy. Both the written test and the final expert scenario were passed.
+            Certified through SOLVE Academy. Both the written test and the final expert conversation were passed.
           </CardDescription>
         </CardHeader>
       </Card>
@@ -264,7 +264,7 @@ function OverviewCard({
     return (
       <Card className="border-2" style={{ borderColor: "#E06D00" }} data-testid="card-final-scenario-pending">
         <CardHeader>
-          <CardTitle className="text-lg">Final expert scenario</CardTitle>
+          <CardTitle className="text-lg">Final expert conversation</CardTitle>
           <CardDescription>
             You passed the written test. One step remains: complete the final expert-level roleplay and score 85+ to earn {credential}.
           </CardDescription>
@@ -275,7 +275,7 @@ function OverviewCard({
             style={{ backgroundColor: "#E06D00", color: "white" }}
             data-testid="button-go-final-scenario"
           >
-            Go to final scenario
+            Go to final conversation
           </Button>
         </CardContent>
       </Card>
@@ -314,7 +314,7 @@ function OverviewCard({
         <CardTitle className="text-lg">{credential} exam</CardTitle>
         <CardDescription>
           Two parts, both required: a 30-question written test (pass at 85%, ≥26/30) and a final expert-level
-          roleplay scenario (score 85+). The written test unlocks the scenario.
+          roleplay conversation (score 85+). The written test unlocks the conversation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -456,7 +456,7 @@ function WrittenResultCard({
               style={{ backgroundColor: "#E06D00", color: "white" }}
               data-testid="button-start-final-scenario"
             >
-              Start final scenario
+              Start final conversation
             </Button>
           </div>
         ) : (

@@ -195,7 +195,7 @@ export default function Scenarios() {
   };
 
   return (
-    <AppShell title="Training scenarios">
+    <AppShell title="Training conversations">
       <div className="space-y-4">
         {/* Track picker — two distinct, separately-selectable cards (not a
             toggle). Each is its own square with its own icon, name, and
@@ -296,8 +296,8 @@ export default function Scenarios() {
         )}
         <p className="text-sm text-muted-foreground max-w-prose" data-testid="text-scenarios-intro">
           {track === "leadership"
-            ? "Pick a scenario and start the conversation cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
-            : "Pick a scenario and start the conversation cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
+            ? "Pick a conversation and start it cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
+            : "Pick a conversation and start it cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
@@ -379,7 +379,7 @@ export default function Scenarios() {
                     disabled={startSession.isPending}
                     data-testid={`button-start-${vertical}`}
                   >
-                    {startSession.isPending ? "Starting..." : track === "leadership" ? "Start conflict scenario" : "Start discovery session"}
+                    {startSession.isPending ? "Starting..." : track === "leadership" ? "Start conflict conversation" : "Start discovery session"}
                   </Button>
                 </CardContent>
               </Card>
@@ -388,7 +388,7 @@ export default function Scenarios() {
         </div>
         {!isLoading && orderedVerticals.length === 0 && (
           <p className="text-sm text-muted-foreground" data-testid="text-no-scenarios">
-            No scenarios available in this track yet.
+            No conversations available in this track yet.
           </p>
         )}
       </div>
