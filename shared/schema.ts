@@ -442,6 +442,29 @@ export const insertProspectActivitySchema = createInsertSchema(prospectActivity)
 export type InsertProspectActivity = z.infer<typeof insertProspectActivitySchema>;
 export type ProspectActivity = typeof prospectActivity.$inferSelect;
 
+// ===========================================================================
+// Inbound-lead welcome drip. A separate table (NOT prospect_outreach) so the
+// inbound day 0/3/7 sequence auto-enrolled from POST /api/leads is never mixed
+// into the admin OUTBOUND prospecting batches/views. One row per step of an
+// inbound contact's three-step sequence: step 1 is the day-0 welcome (recorded
+// as `sent` because it's dispatched inline at capture time), steps 2 and 3 are
+// the day-3 and day-7 follow-ups the shared background sender delivers when due.
+// ===========================================================================
+export const leadDripEmails = pgTable("lead_drip_emails", {
+  id: serial("id").primaryKey(),
+  contactId: integer("contact_id").notNull().references(() => contacts.id),
+  sequenceStep: integer("sequence_step").notNull(), // 1 (day 0 welcome) | 2 (day 3) | 3 (day 7)
+  emailSubject: text("email_subject").notNull(),
+  emailBody: text("email_body").notNull(), // plain text; rendered to HTML at send time
+  scheduledAt: text("scheduled_at"), // ISO timestamp this step is due to send
+  sentAt: text("sent_at"), // ISO timestamp set once actually sent
+  status: text("status").notNull().default("scheduled"), // 'scheduled' | 'sent' | 'stopped'
+});
+
+export const insertLeadDripEmailSchema = createInsertSchema(leadDripEmails).omit({ id: true });
+export type InsertLeadDripEmail = z.infer<typeof insertLeadDripEmailSchema>;
+export type LeadDripEmail = typeof leadDripEmails.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request

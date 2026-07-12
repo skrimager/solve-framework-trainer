@@ -18,12 +18,13 @@ import {
 } from "./certification";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
-import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
 import {
   buildSequence,
   planApproval,
   sendDueOutreach,
   startOutreachScheduler,
+  enrollInboundLead,
   SEQUENCE_STEPS,
 } from "./opportunities";
 import {
@@ -1026,6 +1027,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // Best-effort notification email. sendLeadNotification never throws, so a
     // failure here must never block or fail the lead-capture response.
     void sendLeadNotification(lead);
+    // Auto-enroll this NEW inbound lead into the welcome drip: the day-0 welcome
+    // is sent inline (best-effort) and the day-3/day-7 follow-ups are scheduled
+    // for the shared background sender. Fire-and-forget and never throws, so it
+    // is fully independent of the founder notification and never blocks capture.
+    void enrollInboundLead({ storage, send: sendInboundEmail }, lead);
     res.status(201).json({ ok: true, id: lead.id });
   });
 

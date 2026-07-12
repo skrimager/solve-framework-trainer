@@ -12,6 +12,11 @@ import { buildVerificationEmail } from "./demo";
 const RESEND_API_URL = "https://api.resend.com/emails";
 const FROM_ADDRESS = "SOLVE Framework <notifications@solveframework.com>";
 const TO_ADDRESS = "hello@solveframework.com";
+// Inbound-lead mail (welcome + day 3/7 drip) is a personal note "from Wade", so
+// it goes out from the friendly hello@ mailbox rather than the notifications@
+// system address. Same Resend account/API key/verified domain — no new sender
+// identity or credentials.
+const INBOUND_FROM_ADDRESS = "SOLVE Framework <hello@solveframework.com>";
 
 // Human-friendly labels for known lead columns; anything else falls back to the
 // raw key so newly-added fields still show up in the email.
@@ -151,6 +156,46 @@ export async function sendProspectEmail(
     return true;
   } catch (err) {
     console.warn(`[notifications] Failed to send prospect outreach email to ${to}:`, err);
+    return false;
+  }
+}
+
+// Sends one inbound-lead email (the day-0 welcome or a day-3/7 drip follow-up)
+// through the SAME Resend transport as the founder/prospect mail — same
+// RESEND_API_KEY, same verified domain — but from the friendly hello@ mailbox.
+// Best-effort: returns whether the send succeeded (so the background drip sender
+// only marks a step `sent` on a real 2xx) and never throws. `text` is the plain
+// fallback shown by clients that don't render HTML.
+export async function sendInboundEmail(
+  to: string,
+  subject: string,
+  html: string,
+  text?: string,
+): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[notifications] RESEND_API_KEY is not set; skipping inbound lead email.");
+    return false;
+  }
+  try {
+    const body: Record<string, unknown> = { from: INBOUND_FROM_ADDRESS, to: [to], subject, html };
+    if (text) body.text = text;
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} for inbound email to ${to}: ${detail}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to send inbound lead email to ${to}:`, err);
     return false;
   }
 }
