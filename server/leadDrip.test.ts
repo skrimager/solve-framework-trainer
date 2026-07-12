@@ -104,6 +104,15 @@ describe("inboundBodyToHtml", () => {
     assert.doesNotMatch(html, /<script>/);
     assert.match(html, /&lt;script&gt;/);
   });
+  test("a crafted URL-like token cannot break out of the href attribute", () => {
+    // A malicious name/body token that looks like a URL but embeds a quote must
+    // not inject extra HTML attributes into the generated anchor.
+    const html = inboundBodyToHtml('http://evil.com/"onmouseover="alert(1) rest');
+    // The anchor is closed at the quote; the crafted attribute never lands
+    // inside a tag (the leftover survives only as inert, escaped text).
+    assert.match(html, /<a href="http:\/\/evil\.com\/">http:\/\/evil\.com\/<\/a>/);
+    assert.doesNotMatch(html, /<a[^>]*onmouseover/);
+  });
   test("linkifies the day-7 Book a Demo URL into an anchor", () => {
     const html = inboundBodyToHtml(buildInboundDay7Body("Dana"));
     assert.match(html, /<a href="https:\/\/www\.solveframework\.com\/demo">/);

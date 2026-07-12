@@ -382,7 +382,11 @@ export function inboundBodyToHtml(body: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-  const linked = escaped.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>');
+  // Exclude quotes/brackets from the URL match so a user-supplied token that
+  // looks like a URL (e.g. a crafted name) can't break out of the href="" and
+  // inject attributes/markup. `<`/`>` are already entity-escaped above; barring
+  // `"` closes the attribute-injection vector while still linkifying real URLs.
+  const linked = escaped.replace(/(https?:\/\/[^\s"<>]+)/g, '<a href="$1">$1</a>');
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111;white-space:pre-wrap;">${linked.replace(/\n/g, "<br>")}</div>`;
 }
 
