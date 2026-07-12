@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, coachingMessages } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, CoachingMessage, InsertCoachingMessage } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -114,6 +114,12 @@ export interface IStorage {
 
   createProspectActivity(activity: InsertProspectActivity): Promise<ProspectActivity>;
   listRecentProspectActivity(limit?: number): Promise<ProspectActivity[]>;
+
+  // --- Inbound-lead welcome drip (day 0/3/7 auto-enrolled from /api/leads) ---
+  createLeadDripEmail(email: InsertLeadDripEmail): Promise<LeadDripEmail>;
+  listDueLeadDripEmails(nowIso: string): Promise<LeadDripEmail[]>;
+  listLeadDripEmailsByContact(contactId: number): Promise<LeadDripEmail[]>;
+  updateLeadDripEmail(id: number, patch: Partial<InsertLeadDripEmail>): Promise<LeadDripEmail | undefined>;
 
   // --- SOLVE Coach follow-up Q&A ---
   createCoachingMessage(message: InsertCoachingMessage): Promise<CoachingMessage>;
@@ -481,6 +487,29 @@ export class DatabaseStorage implements IStorage {
 
   async listRecentProspectActivity(limit = 200): Promise<ProspectActivity[]> {
     return db.select().from(prospectActivity).orderBy(desc(prospectActivity.id)).limit(limit);
+  }
+
+  // --- Inbound-lead welcome drip ---
+  async createLeadDripEmail(email: InsertLeadDripEmail): Promise<LeadDripEmail> {
+    const rows = await db.insert(leadDripEmails).values(email).returning();
+    return rows[0];
+  }
+
+  async listDueLeadDripEmails(nowIso: string): Promise<LeadDripEmail[]> {
+    return db
+      .select()
+      .from(leadDripEmails)
+      .where(and(eq(leadDripEmails.status, "scheduled"), lte(leadDripEmails.scheduledAt, nowIso)))
+      .orderBy(leadDripEmails.id);
+  }
+
+  async listLeadDripEmailsByContact(contactId: number): Promise<LeadDripEmail[]> {
+    return db.select().from(leadDripEmails).where(eq(leadDripEmails.contactId, contactId)).orderBy(leadDripEmails.id);
+  }
+
+  async updateLeadDripEmail(id: number, patch: Partial<InsertLeadDripEmail>): Promise<LeadDripEmail | undefined> {
+    const rows = await db.update(leadDripEmails).set(patch).where(eq(leadDripEmails.id, id)).returning();
+    return rows[0];
   }
 
   // --- SOLVE Coach follow-up Q&A ---
