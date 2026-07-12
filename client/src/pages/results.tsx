@@ -92,7 +92,7 @@ function CoachingPanel({ sessionId, ownerId }: { sessionId: string; ownerId: num
         ) : messages.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="text-coaching-empty">
             {isOwner
-              ? "No questions yet. Ask anything about your discovery approach in this scenario."
+              ? "No questions yet. Ask anything about your discovery approach in this conversation."
               : "This trainee hasn't asked SOLVE Coach anything on this attempt yet."}
           </p>
         ) : (
@@ -214,7 +214,7 @@ export default function Results() {
         )}
 
         <Button onClick={() => navigate("/scenarios")} data-testid="button-back-to-scenarios">
-          Try another scenario
+          Try another conversation
         </Button>
       </div>
     </AppShell>

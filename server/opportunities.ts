@@ -86,7 +86,7 @@ export function buildSequence(segment: string, ctx: SequenceContext): DraftedEma
   const firstName = ctx.contactName.trim().split(/\s+/)[0] || "there";
 
   const capabilities =
-    "SOLVE is a discovery-training platform: your people practice live role-play scenarios with realistic customers, every session is scored and tracked so managers can see skill grow week over week, and reps work along a clear path to certification.";
+    "SOLVE is a discovery-training platform: your people practice live role-play conversations with realistic customers, every session is scored and tracked so managers can see skill grow week over week, and reps work along a clear path to certification.";
   const cta = `You can try a live role-play yourself, free, in about five minutes: ${DEMO_URL}.`;
 
   const bodies: Record<number, string> = {
@@ -105,7 +105,7 @@ Open to a quick look?
 
 Circling back in case my first note got buried. ${angle}
 
-The reason teams stick with SOLVE is the feedback loop: live role-play scenarios, scored and tracked per rep, all building toward certification — so improvement is something you can actually measure, not just hope for.
+The reason teams stick with SOLVE is the feedback loop: live role-play conversations, scored and tracked per rep, all building toward certification — so improvement is something you can actually measure, not just hope for.
 
 ${cta}
 
@@ -116,7 +116,7 @@ Happy to share how other ${canonical.replace(/_/g, " ")} teams have used it.
 
 I'll keep this short. If building consistent discovery skill is on your radar, the easiest next step is to feel it firsthand.
 
-SOLVE gives your team live role-play scenarios, scoring and progress tracking, and a path to certification — and you can experience a scored session yourself for free, no commitment: ${DEMO_URL}.
+SOLVE gives your team live role-play conversations, scoring and progress tracking, and a path to certification — and you can experience a scored session yourself for free, no commitment: ${DEMO_URL}.
 
 If the timing isn't right, no worries at all — just reply and I'll close the loop.
 
@@ -280,7 +280,7 @@ Your Free Practice Sessions
 
 Your account includes three complimentary AI practice sessions so you can experience how the platform works.
 
-Choose a scenario that interests you and have a real conversation with our AI coach. There are no tricks, no perfect scripts, and no "gotcha" questions. Simply approach the conversation the way you naturally would.
+Choose a conversation that interests you and dive in with our AI coach. There are no tricks, no perfect scripts, and no "gotcha" questions. Simply approach the conversation the way you naturally would.
 
 When you're finished, don't stop there.
 
@@ -332,7 +332,7 @@ export function buildInboundDay3Body(name: string | null | undefined): string {
 
 A few days ago you signed up to try the SOLVE Framework — I wanted to check in personally.
 
-If you haven't run a practice session yet, no pressure. Just know your three free sessions are sitting there whenever you're ready. Pick any scenario that feels close to a real conversation you have often, and just talk to it the way you naturally would. That's it.
+If you haven't run a practice session yet, no pressure. Just know your three free sessions are sitting there whenever you're ready. Pick any conversation that feels close to a real one you have often, and just talk to it the way you naturally would. That's it.
 
 If you have already run one — did you read your SOLVE Coach feedback afterward? That's genuinely where most people tell me the real "aha" moment happens. The practice conversation teaches you something. The coaching afterward is what actually changes how you show up next time.
 

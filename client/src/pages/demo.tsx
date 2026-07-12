@@ -133,7 +133,7 @@ function Landing({ onStart }: { onStart: () => void }) {
         Step into the role of the real estate agent. Our AI plays a motivated
         buyer who needs to purchase a home within the next 30 days. Talk to them
         like a real call, uncover what they actually need, and get scored on your
-        discovery. It's a beginner-friendly scenario, and it's completely free —
+        discovery. It's a beginner-friendly conversation, and it's completely free —
         no signup required.
       </p>
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
@@ -675,7 +675,7 @@ function ResultsAndCta({
             <p data-testid="text-limit-reached">
               Thanks for practicing with the free demo! You've completed all 3 free
               voice roleplay sessions for <span className="font-medium text-foreground">{email}</span>.
-              To keep training with unlimited scenarios and your whole team, grab
+              To keep training with unlimited conversations and your whole team, grab
               full access below.
             </p>
           </CardContent>
@@ -776,7 +776,7 @@ function CtaForm({ email }: { email: string }) {
       </CardHeader>
       <CardContent>
         <p className="mb-4 text-sm text-muted-foreground">
-          Unlimited scenarios, every difficulty level, and progress tracking come
+          Unlimited conversations, every difficulty level, and progress tracking come
           with a paid plan. Tell us about your team and we'll set you up.
         </p>
         <form
