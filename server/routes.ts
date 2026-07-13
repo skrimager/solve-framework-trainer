@@ -52,7 +52,7 @@ import {
   DEFAULT_PRIORITY,
   type ContactFilters,
 } from "./contacts";
-import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact } from "@shared/schema";
+import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
@@ -857,6 +857,8 @@ export async function registerRoutes(
   });
 
   registerCoachingRoutes(app);
+
+  registerManagerRosterRoutes(app);
 
   registerPublicAndAdminRoutes(app);
 
@@ -2079,6 +2081,167 @@ export function registerCoachingRoutes(
       console.error("Coaching reply failed:", err);
       res.status(500).json({ message: err.message ?? "Failed to get a coaching reply" });
     }
+  });
+}
+
+// ===========================================================================
+// Manager roster — office-wide per-consultant progress for the manager/QA
+// dashboard. Two read-only routes, authorized to the office's own manager/QA:
+//   GET /api/offices/:officeId/consultants          — one summary row per consultant
+//   GET /api/offices/:officeId/consultants/:userId  — one consultant's full session history
+// Progress ("N of 5 at 85%+") is DERIVED, not stored: it reuses the same
+// scoresForTrackAtLevel/countQualifyingSessions logic that drives level
+// advancement, so the roster can never disagree with the trainee's own view.
+// ===========================================================================
+
+// Per-consultant summary shape returned by the roster endpoint. Kept independent
+// of publicUser so tightening one never silently changes the other.
+type ConsultantSummary = ReturnType<typeof buildConsultantSummary>;
+
+function buildConsultantSummary(
+  user: User,
+  userSessions: Session[],
+  allScenarios: Scenario[],
+) {
+  const completed = userSessions.filter((s) => s.status === "completed");
+  const scored = completed.filter((s) => s.score !== null);
+  const averageScore = scored.length
+    ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+    : null;
+
+  // Progress toward the next consulting tier: how many completed sessions at the
+  // user's CURRENT consulting difficulty individually cleared the 85% bar.
+  const consultingScoresAtTier = scoresForTrackAtLevel(
+    "consulting",
+    user.currentLevel,
+    userSessions,
+    allScenarios,
+  );
+  const qualifyingSessionsAtCurrentTier = countQualifyingSessions(consultingScoresAtTier);
+
+  // Most recent activity: prefer completedAt, fall back to createdAt so an
+  // in-progress-only consultant still shows a last-active date.
+  const lastSessionDate =
+    userSessions
+      .map((s) => s.completedAt ?? s.createdAt)
+      .filter((d): d is string => !!d)
+      .sort()
+      .at(-1) ?? null;
+
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    currentLevel: user.currentLevel,
+    leadershipLevel: user.leadershipLevel,
+    consultingCertified: user.consultingCertified,
+    consultingCertifiedAt: user.consultingCertifiedAt,
+    leadershipCertified: user.leadershipCertified,
+    leadershipCertifiedAt: user.leadershipCertifiedAt,
+    totalSessionsCompleted: completed.length,
+    averageScore,
+    qualifyingSessionsAtCurrentTier,
+    requiredQualifyingSessions: REQUIRED_QUALIFYING_SESSIONS,
+    lastSessionDate,
+  };
+}
+
+// Authorize a manager-roster request: the requester must exist, be a manager or
+// QA, and belong to the office they're asking about. Mirrors the office-scoping
+// used by /api/offices/:id/seats/remove and the coaching manager-peer check.
+async function authorizeRosterRequest(
+  requesterId: number,
+  officeId: number,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  if (!requesterId) return { ok: false, status: 400, message: "requesterId is required" };
+  const requester = await storage.getUser(requesterId);
+  if (!requester) return { ok: false, status: 401, message: "Unknown user" };
+  if (requester.role !== "manager" && requester.role !== "qa") {
+    return { ok: false, status: 403, message: "Only a manager or QA can view the office roster" };
+  }
+  if (requester.officeId !== officeId) {
+    return { ok: false, status: 403, message: "You can only view your own office's roster" };
+  }
+  return { ok: true };
+}
+
+export function registerManagerRosterRoutes(app: Express): void {
+  // Roster: one summary row per consultant in the office.
+  app.get("/api/offices/:officeId/consultants", async (req, res) => {
+    const officeId = Number(req.params.officeId);
+    const requesterId = Number(req.query.requesterId);
+    const auth = await authorizeRosterRequest(requesterId, officeId);
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(officeId),
+      storage.listSessionsByOffice(officeId),
+      storage.listScenarios(),
+    ]);
+
+    const sessionsByUser = new Map<number, Session[]>();
+    for (const s of officeSessions) {
+      const list = sessionsByUser.get(s.userId) ?? [];
+      list.push(s);
+      sessionsByUser.set(s.userId, list);
+    }
+
+    const consultants = officeUsers
+      .filter((u) => u.role === "consultant")
+      .map((u) => buildConsultantSummary(u, sessionsByUser.get(u.id) ?? [], allScenarios));
+
+    res.json(consultants);
+  });
+
+  // Detail: one consultant's full session history (newest first) so a manager can
+  // click into an employee and review their actual practice attempts.
+  app.get("/api/offices/:officeId/consultants/:userId", async (req, res) => {
+    const officeId = Number(req.params.officeId);
+    const userId = Number(req.params.userId);
+    const requesterId = Number(req.query.requesterId);
+    const auth = await authorizeRosterRequest(requesterId, officeId);
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+
+    const target = await storage.getUser(userId);
+    if (!target || target.officeId !== officeId || target.role !== "consultant") {
+      return res.status(404).json({ message: "Consultant not found in this office" });
+    }
+
+    const [userSessions, allScenarios] = await Promise.all([
+      storage.listSessionsByUser(userId),
+      storage.listScenarios(),
+    ]);
+    const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+
+    const sessions = userSessions
+      .map((s) => {
+        const scenario = scenarioById.get(s.scenarioId);
+        let rubricScores: unknown = null;
+        if (s.rubricScores) {
+          try {
+            rubricScores = JSON.parse(s.rubricScores);
+          } catch {
+            rubricScores = null;
+          }
+        }
+        return {
+          id: s.id,
+          scenarioTitle: scenario?.title ?? `Conversation #${s.scenarioId}`,
+          scenarioVertical: scenario?.vertical ?? null,
+          track: scenarioTrack(scenario?.track),
+          status: s.status,
+          score: s.score,
+          rubricScores,
+          createdAt: s.createdAt,
+          completedAt: s.completedAt,
+        };
+      })
+      .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt));
+
+    res.json({
+      consultant: buildConsultantSummary(target, userSessions, allScenarios),
+      sessions,
+    });
   });
 }
 
