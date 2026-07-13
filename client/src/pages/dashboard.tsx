@@ -1,10 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 import { AppShell } from "@/components/app-shell";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
@@ -20,9 +18,8 @@ function officeActive(office?: Office): boolean {
 // Shared by 'manager' and 'qa' roles — both need to review sessions across consultants.
 export default function Dashboard() {
   const { user } = useAuth();
-  const [, navigate] = useLocation();
 
-  const { data: sessions, isLoading } = useQuery<Session[]>({
+  const { data: sessions } = useQuery<Session[]>({
     queryKey: [`/api/sessions?requesterId=${user?.id}`],
     enabled: !!user,
   });
@@ -87,32 +84,6 @@ export default function Dashboard() {
         </div>
 
         {user && <ConsultantRoster officeId={user.officeId} requesterId={user.id} />}
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">All sessions</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {isLoading && <Skeleton className="h-32 rounded-lg" />}
-            {!isLoading && sessions?.length === 0 && (
-              <p className="text-sm text-muted-foreground" data-testid="text-no-sessions">No sessions recorded yet.</p>
-            )}
-            {sessions?.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => navigate(`/results/${s.id}`)}
-                className="w-full flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm text-left hover-elevate active-elevate-2"
-                data-testid={`row-session-${s.id}`}
-              >
-                <span className="text-muted-foreground">Session #{s.id} · consultant #{s.userId}</span>
-                <div className="flex items-center gap-2 shrink-0">
-                  {s.score !== null && <span className="font-medium">{s.score}</span>}
-                  <Badge variant={s.status === "completed" ? "secondary" : "outline"}>{s.status}</Badge>
-                </div>
-              </button>
-            ))}
-          </CardContent>
-        </Card>
       </div>
     </AppShell>
   );
