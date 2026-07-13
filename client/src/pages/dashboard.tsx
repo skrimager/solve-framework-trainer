@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AppShell } from "@/components/app-shell";
+import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -84,6 +85,8 @@ export default function Dashboard() {
             </CardContent>
           </Card>
         </div>
+
+        {user && <ConsultantRoster officeId={user.officeId} requesterId={user.id} />}
 
         <Card>
           <CardHeader>
