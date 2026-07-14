@@ -65,29 +65,13 @@ const VERTICAL_LABELS: Record<string, string> = {
   pool_landscaping: "Pool & landscaping",
   financial_advisor: "Financial advisor",
   insurance_auto: "Insurance",
+  solar: "Solar",
+  pest_control: "Pest control",
+  roofing: "Roofing",
+  saas: "SaaS",
 };
 
-// Order verticals should appear in on the picker, per track — top scenarios first per owner priority
-const LEADERSHIP_VERTICAL_ORDER = [
-  "upset_customer_service",
-  "employee_grievance",
-  "peer_conflict",
-];
-
-const VERTICAL_ORDER = [
-  "auto_sales",
-  "manufactured_housing_community",
-  "manufactured_housing",
-  "real_estate",
-  "apartment_rental",
-  "hvac_sales",
-  "hvac_service",
-  "financial_advisor",
-  "insurance_auto",
-  "plumbing",
-  "home_improvement",
-  "pool_landscaping",
-];
+const verticalLabel = (vertical: string) => VERTICAL_LABELS[vertical] ?? vertical;
 
 function initialTrack(): Track {
   if (typeof window === "undefined") return "consulting";
@@ -162,11 +146,15 @@ export default function Scenarios() {
     list.push(s);
     verticalGroups.set(s.vertical, list);
   }
-  const orderPref = track === "leadership" ? LEADERSHIP_VERTICAL_ORDER : VERTICAL_ORDER;
-  const orderedVerticals = [
-    ...orderPref.filter((v) => verticalGroups.has(v)),
-    ...Array.from(verticalGroups.keys()).filter((v) => !orderPref.includes(v)),
-  ];
+  // Sort scenarios within each vertical alphabetically by title, and the
+  // verticals themselves alphabetically (A→Z) by their human-readable display
+  // name — no manual pinning of any vertical.
+  for (const list of Array.from(verticalGroups.values())) {
+    list.sort((a: Scenario, b: Scenario) => a.title.localeCompare(b.title));
+  }
+  const orderedVerticals = Array.from(verticalGroups.keys()).sort((a, b) =>
+    verticalLabel(a).localeCompare(verticalLabel(b)),
+  );
 
   // The level shown/highlighted is the one for the selected track — the two are
   // tracked independently per user.
@@ -341,7 +329,7 @@ export default function Scenarios() {
               <Card key={vertical} data-testid={`card-vertical-${vertical}`}>
                 <CardHeader>
                   <div className="flex items-center justify-between gap-3">
-                    <CardTitle className="text-lg">{VERTICAL_LABELS[vertical] ?? vertical}</CardTitle>
+                    <CardTitle className="text-lg">{verticalLabel(vertical)}</CardTitle>
                     {avatarUrls.length > 0 && (
                       <div className="flex -space-x-3 shrink-0" data-testid={`avatars-preview-${vertical}`}>
                         {avatarUrls.map((url, i) => (
