@@ -7,10 +7,10 @@ import { ConsultantRoster, type RosterReadOnlyData } from "@/components/consulta
 const NAVY = "#0A1A30";
 const ORANGE = "#E06D00";
 
-// Where the persistent banner's "Request Access" button points. This is the
-// request-access form on the marketing site. ASSUMPTION: the anchor is
-// `/#request-access` — confirm before merge (see PR description).
-const REQUEST_ACCESS_URL = "https://www.solveframework.com/#request-access";
+// Where the persistent banner's "Request Access" button points. The marketing
+// site's "Request Access" is a JS-triggered modal (no page anchor), so we link
+// to the pricing section where the real Request Access buttons live.
+const REQUEST_ACCESS_URL = "https://www.solveframework.com/#pricing";
 
 type DemoDashboardResponse = {
   office: { name: string; inviteCode: string; subscriptionStatus: string };

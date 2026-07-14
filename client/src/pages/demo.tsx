@@ -57,18 +57,44 @@ function isLeadershipRubric(r: Record<string, number>): r is LeadershipRubricSco
 
 type Step = "landing" | "email" | "code" | "roleplay" | "results";
 
+// Industry options shown in the pre-demo picker. Keys MUST match the server's
+// DEMO_SCENARIO_OPTIONS (server/demo.ts), which is the source of truth for the
+// key→scenario mapping; the client only sends the chosen key. Automotive is
+// listed first and is the default so it renders pre-selected.
+const DEMO_SCENARIO_CHOICES = [
+  {
+    key: "auto",
+    label: "Automotive Sales / F&I",
+    blurb: "A car buyer whose real priorities sit beneath the features they open with.",
+  },
+  {
+    key: "real_estate",
+    label: "Real Estate",
+    blurb: "A motivated home buyer who needs to purchase within the next 30 days.",
+  },
+] as const;
+const DEFAULT_SCENARIO_KEY = DEMO_SCENARIO_CHOICES[0].key;
+
+// Brand palette (shared with the rest of the app).
+const ORANGE = "#E06D00";
+
 export default function Demo() {
   const [step, setStep] = useState<Step>("landing");
   const [email, setEmail] = useState("");
   const [token, setToken] = useState<string | null>(null);
   const [limitReached, setLimitReached] = useState(false);
   const [finalSession, setFinalSession] = useState<DemoSession | null>(null);
+  const [scenarioKey, setScenarioKey] = useState<string>(DEFAULT_SCENARIO_KEY);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto w-full max-w-2xl px-4 py-8">
         {step === "landing" && (
-          <Landing onStart={() => setStep("email")} />
+          <Landing
+            scenarioKey={scenarioKey}
+            setScenarioKey={setScenarioKey}
+            onStart={() => setStep("email")}
+          />
         )}
         {step === "email" && (
           <EmailStep
@@ -98,6 +124,7 @@ export default function Demo() {
         {step === "roleplay" && token && (
           <StartAndPlay
             token={token}
+            scenarioKey={scenarioKey}
             onCompleted={(s) => {
               setFinalSession(s);
               setStep("results");
@@ -120,26 +147,82 @@ export default function Demo() {
   );
 }
 
-function Landing({ onStart }: { onStart: () => void }) {
+function Landing({
+  scenarioKey,
+  setScenarioKey,
+  onStart,
+}: {
+  scenarioKey: string;
+  setScenarioKey: (k: string) => void;
+  onStart: () => void;
+}) {
   return (
     <div className="space-y-6 text-center">
       <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-        <Phone className="h-3.5 w-3.5" /> Free live voice roleplay
+        <Phone className="h-3.5 w-3.5" /> Free live voice practice
       </div>
       <h1 className="text-3xl font-bold tracking-tight" data-testid="text-demo-heading">
-        Practice a real estate discovery call — out loud, right now.
+        Practice a discovery conversation — out loud, right now.
       </h1>
       <p className="mx-auto max-w-xl text-muted-foreground">
-        Step into the role of the real estate agent. Our AI plays a motivated
-        buyer who needs to purchase a home within the next 30 days. Talk to them
-        like a real call, uncover what they actually need, and get scored on your
-        discovery. It's a beginner-friendly conversation, and it's completely free —
-        no signup required.
+        Pick an industry below, then step into the consultant's seat. Our AI plays
+        a real customer whose real needs sit beneath what they first say. Talk to
+        them like a real call, uncover what they actually need, and get scored on
+        your discovery. It's beginner-friendly and completely free — no signup
+        required.
       </p>
+
+      <div className="space-y-2 text-left">
+        <p className="text-center text-sm font-medium text-foreground">Choose your industry</p>
+        <div
+          className="grid gap-3 sm:grid-cols-2"
+          role="radiogroup"
+          aria-label="Choose your industry"
+          data-testid="demo-scenario-picker"
+        >
+          {DEMO_SCENARIO_CHOICES.map((choice) => {
+            const selected = scenarioKey === choice.key;
+            return (
+              <button
+                key={choice.key}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setScenarioKey(choice.key)}
+                className="relative flex flex-col items-start gap-1.5 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
+                style={
+                  selected
+                    ? { borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }
+                    : { borderColor: "var(--border)" }
+                }
+                data-testid={`demo-scenario-option-${choice.key}`}
+              >
+                {selected && (
+                  <span
+                    className="absolute top-3 right-3 flex h-5 w-5 items-center justify-center rounded-full"
+                    style={{ backgroundColor: ORANGE }}
+                    aria-hidden="true"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5 text-white" />
+                  </span>
+                )}
+                <span
+                  className="text-base font-semibold"
+                  style={selected ? { color: ORANGE } : undefined}
+                >
+                  {choice.label}
+                </span>
+                <span className="text-xs text-muted-foreground">{choice.blurb}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          Speak naturally — the buyer talks back with a real voice.
+          Speak naturally — the customer talks back with a real voice.
         </li>
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -151,7 +234,7 @@ function Landing({ onStart }: { onStart: () => void }) {
         </li>
       </ul>
       <Button size="lg" onClick={onStart} data-testid="button-demo-start">
-        Start my free voice roleplay
+        Start my free voice practice
       </Button>
     </div>
   );
@@ -349,10 +432,12 @@ function CodeStep({
 // mount.
 function StartAndPlay({
   token,
+  scenarioKey,
   onCompleted,
   onLimitReached,
 }: {
   token: string;
+  scenarioKey: string;
   onCompleted: (s: DemoSession) => void;
   onLimitReached: () => void;
 }) {
@@ -364,7 +449,7 @@ function StartAndPlay({
   const startedRef = useRef(false);
 
   const start = useMutation({
-    mutationFn: () => demoApi.startSession(token),
+    mutationFn: () => demoApi.startSession(token, scenarioKey),
     onSuccess: (data) => setStarted({ session: data.session, scenario: data.scenario }),
     onError: (e: Error & { limitReached?: boolean }) => {
       if (e.limitReached) onLimitReached();
@@ -399,7 +484,7 @@ function StartAndPlay({
   if (!started) {
     return (
       <div className="flex items-center justify-center py-24 text-muted-foreground">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Connecting you to the buyer...
+        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Connecting you to the customer...
       </div>
     );
   }

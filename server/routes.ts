@@ -30,6 +30,7 @@ import {
 import {
   MAX_DEMO_SESSIONS,
   DEMO_SCENARIO_SLUG,
+  demoScenarioSlugForKey,
   normalizeEmail,
   generateVerificationCode,
   codeExpiryFrom,
@@ -1074,10 +1075,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   // Anonymous demo traffic lives in demo_signups/demo_sessions and never touches
   // the seat-gated users/sessions tables, office analytics, or level progression.
 
-  // Load the fixed demo scenario (by slug). It's seeded active:false so it never
-  // appears in the trainee picker; the demo reaches it by slug only.
-  async function getDemoScenario() {
-    return storage.getScenarioBySlug(DEMO_SCENARIO_SLUG);
+  // Load the demo scenario for the visitor's chosen industry option (by slug).
+  // An unknown/missing key resolves to the default (automotive). The lead route
+  // calls this with no key to get the default scenario's track.
+  async function getDemoScenario(choiceKey?: string | null) {
+    return storage.getScenarioBySlug(demoScenarioSlugForKey(choiceKey));
   }
 
   // Resolve the caller's verified signup from the signed token in the body.
@@ -1195,7 +1197,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
       return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0 });
     }
-    const scenario = await getDemoScenario();
+    const scenario = await getDemoScenario(typeof req.body?.scenario === "string" ? req.body.scenario : undefined);
     if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
 
     // Increment usage FIRST so a failure after this point can't grant a free retry.
