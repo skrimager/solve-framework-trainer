@@ -860,6 +860,8 @@ export async function registerRoutes(
 
   registerManagerRosterRoutes(app);
 
+  registerPublicDemoDashboardRoute(app);
+
   registerPublicAndAdminRoutes(app);
 
   // Start the Opportunity Intelligence drip sender (every ~20 min it sends any
@@ -2241,6 +2243,112 @@ export function registerManagerRosterRoutes(app: Express): void {
     res.json({
       consultant: buildConsultantSummary(target, userSessions, allScenarios),
       sessions,
+    });
+  });
+}
+
+// ===========================================================================
+// Public, UNAUTHENTICATED demo dashboard.
+//
+// Serves ONLY the seeded "Demo Office" (invite code DEMO2024) sample roster —
+// the same fabricated dataset used for live sales demos (Sofia Castellano et
+// al.), never a real customer's office. This route:
+//   - reads NO session/cookie and uses NO auth middleware, and
+//   - resolves a single fixed demo office by its known invite code, so there
+//     is no code path from here into any real office's data, and
+//   - is strictly read-only (returns data; exposes no mutation), and
+//   - replaces the office invite code with the literal string "DEMO" so the
+//     real seeded code (DEMO2024) never leaves the server.
+// The whole per-consultant detail history is included so the client renders
+// the entire dashboard (including the drill-down panel) from this one payload,
+// never issuing a second, authenticated request.
+// ===========================================================================
+const PUBLIC_DEMO_OFFICE_INVITE_CODE = "DEMO2024";
+
+export function registerPublicDemoDashboardRoute(app: Express): void {
+  app.get("/api/public/demo-dashboard", async (_req, res) => {
+    const office = await storage.getOfficeByInviteCode(PUBLIC_DEMO_OFFICE_INVITE_CODE);
+    if (!office) {
+      return res.status(503).json({ message: "Demo dashboard is temporarily unavailable." });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(office.id),
+      storage.listSessionsByOffice(office.id),
+      storage.listScenarios(),
+    ]);
+
+    const sessionsByUser = new Map<number, Session[]>();
+    for (const s of officeSessions) {
+      const list = sessionsByUser.get(s.userId) ?? [];
+      list.push(s);
+      sessionsByUser.set(s.userId, list);
+    }
+    const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+
+    const consultantUsers = officeUsers.filter((u) => u.role === "consultant");
+    const consultants = consultantUsers.map((u) =>
+      buildConsultantSummary(u, sessionsByUser.get(u.id) ?? [], allScenarios),
+    );
+
+    // Per-consultant session history keyed by consultant id, mirroring the
+    // authenticated detail route's shape so the client's read-only drill-down
+    // panel needs no second call.
+    const details: Record<number, unknown> = {};
+    for (const u of consultantUsers) {
+      const userSessions = sessionsByUser.get(u.id) ?? [];
+      const sessions = userSessions
+        .map((s) => {
+          const scenario = scenarioById.get(s.scenarioId);
+          let rubricScores: unknown = null;
+          if (s.rubricScores) {
+            try {
+              rubricScores = JSON.parse(s.rubricScores);
+            } catch {
+              rubricScores = null;
+            }
+          }
+          return {
+            id: s.id,
+            scenarioTitle: scenario?.title ?? `Conversation #${s.scenarioId}`,
+            scenarioVertical: scenario?.vertical ?? null,
+            track: scenarioTrack(scenario?.track),
+            status: s.status,
+            score: s.score,
+            rubricScores,
+            createdAt: s.createdAt,
+            completedAt: s.completedAt,
+          };
+        })
+        .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt));
+      details[u.id] = {
+        consultant: buildConsultantSummary(u, userSessions, allScenarios),
+        sessions,
+      };
+    }
+
+    // Office-wide stat cards, mirroring the authenticated manager dashboard.
+    const completedSessions = officeSessions.filter((s) => s.status === "completed");
+    const scored = completedSessions.filter((s) => s.score !== null);
+    const avgScore = scored.length
+      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+      : null;
+
+    res.json({
+      office: {
+        name: office.name,
+        // Literal override for the public route — the real seeded invite code
+        // (DEMO2024) is intentionally never sent to the client.
+        inviteCode: "DEMO",
+        subscriptionStatus: office.subscriptionStatus,
+      },
+      stats: {
+        completed: completedSessions.length,
+        avgScore,
+        inProgress: officeSessions.length - completedSessions.length,
+      },
+      consultants,
+      details,
     });
   });
 }

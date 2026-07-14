@@ -75,6 +75,7 @@ const LEADERSHIP_VERTICAL_ORDER = [
 ];
 
 const VERTICAL_ORDER = [
+  "auto_sales",
   "manufactured_housing_community",
   "manufactured_housing",
   "real_estate",
@@ -83,7 +84,6 @@ const VERTICAL_ORDER = [
   "hvac_service",
   "financial_advisor",
   "insurance_auto",
-  "auto_sales",
   "plumbing",
   "home_improvement",
   "pool_landscaping",

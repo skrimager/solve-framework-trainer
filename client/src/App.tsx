@@ -15,6 +15,7 @@ import Certification from "@/pages/certification";
 import AdminLogin from "@/pages/admin-login";
 import AdminDashboard from "@/pages/admin-dashboard";
 import Demo from "@/pages/demo";
+import DemoDashboard from "@/pages/dashboard-demo";
 import { AuthProvider, useAuth } from "@/lib/auth";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -32,6 +33,11 @@ function AppRouter() {
           signed demo token gate it server-side, so it stays outside RequireAuth
           and never touches the trainee/admin login flows. */}
       <Route path="/demo" component={Demo} />
+      {/* Public, read-only demo of the manager dashboard: no auth, seeded
+          sample data only. Served by the no-auth GET /api/public/demo-dashboard
+          endpoint; intentionally outside RequireAuth and with no path into the
+          authenticated app. */}
+      <Route path="/dashboard-demo" component={DemoDashboard} />
       <Route path="/scenarios">
         <RequireAuth>
           <Scenarios />
