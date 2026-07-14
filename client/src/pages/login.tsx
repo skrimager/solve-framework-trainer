@@ -123,6 +123,17 @@ export default function Login() {
                 Create an account
               </button>
             </p>
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+              Manager?{" "}
+              <button
+                type="button"
+                onClick={() => navigate("/manager-login")}
+                className="font-medium hover:underline"
+                data-testid="link-manager-login"
+              >
+                Command center login
+              </button>
+            </p>
           </CardContent>
         </Card>
         <div className="text-center">

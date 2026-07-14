@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Login from "@/pages/login";
+import ManagerLogin from "@/pages/manager-login";
 import Register from "@/pages/register";
 import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
@@ -28,6 +29,11 @@ function AppRouter() {
   return (
     <Switch>
       <Route path="/" component={Login} />
+      {/* Manager command-center login: same /api/login flow as the consultant
+          login at "/", just a distinct dark "control room" chrome so managers
+          have their own recognizable entry point. Role-based redirect is still
+          backend-derived and handled inside the page. */}
+      <Route path="/manager-login" component={ManagerLogin} />
       <Route path="/register" component={Register} />
       {/* Public free voice demo: no auth. The email+code verification and a
           signed demo token gate it server-side, so it stays outside RequireAuth
