@@ -67,9 +67,38 @@ export const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // (no login). Kept short-lived; a visitor re-verifies if they let it lapse.
 const DEMO_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-// The single fixed scenario every demo uses. Seeded by server/seed.ts. There is
-// deliberately no scenario selection in the demo.
+// The real-estate demo scenario. Seeded by server/seed.ts (active:false so it
+// never shows in the trainee picker; the demo reaches it by slug only).
 export const DEMO_SCENARIO_SLUG = "real-estate-demo-buyer-30-days";
+
+// Industry options a visitor can pick from before starting the free demo. Each
+// maps to an existing seeded scenario (reused as-is — no new content). All are
+// consulting-track discovery conversations, so downstream wording/scoring is
+// identical regardless of choice. Automotive is first and the default.
+export type DemoScenarioOption = { key: string; label: string; blurb: string; slug: string };
+export const DEMO_SCENARIO_OPTIONS: DemoScenarioOption[] = [
+  {
+    key: "auto",
+    label: "Automotive Sales / F&I",
+    blurb: "A car buyer whose real priorities sit beneath the features they open with.",
+    slug: "auto-sales-tech-worker-upgrade",
+  },
+  {
+    key: "real_estate",
+    label: "Real Estate",
+    blurb: "A motivated home buyer who needs to purchase within the next 30 days.",
+    slug: DEMO_SCENARIO_SLUG,
+  },
+];
+export const DEFAULT_DEMO_SCENARIO_KEY = "auto";
+
+// Resolve a visitor's chosen option key to a scenario slug. Unknown/missing keys
+// fall back to the default (automotive) so the demo always starts.
+export function demoScenarioSlugForKey(key: string | undefined | null): string {
+  const opt = DEMO_SCENARIO_OPTIONS.find((o) => o.key === key);
+  if (opt) return opt.slug;
+  return DEMO_SCENARIO_OPTIONS.find((o) => o.key === DEFAULT_DEMO_SCENARIO_KEY)!.slug;
+}
 
 function demoSecret(): string {
   return process.env.DEMO_SESSION_SECRET || "solve-demo-dev-secret-change-me";

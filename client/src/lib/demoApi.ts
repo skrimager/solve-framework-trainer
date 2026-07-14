@@ -56,8 +56,8 @@ export const demoApi = {
     return data as { verified: true; token?: string; limitReached?: boolean; remaining?: number };
   },
 
-  async startSession(token: string) {
-    const { ok, data } = await post("/api/demo/session", { token });
+  async startSession(token: string, scenario?: string) {
+    const { ok, data } = await post("/api/demo/session", { token, scenario });
     if (!ok) {
       const err = new Error(data.message ?? "Couldn't start the demo.") as Error & { limitReached?: boolean };
       err.limitReached = !!data.limitReached;

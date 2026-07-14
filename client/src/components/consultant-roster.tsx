@@ -151,14 +151,35 @@ function SortHeader({
   );
 }
 
-export function ConsultantRoster({ officeId, requesterId }: { officeId: number; requesterId: number }) {
+// Read-only data source for the public demo dashboard: the full roster plus
+// each consultant's detail history, so the component renders entirely from this
+// payload and never issues an authenticated (session-scoped) request.
+export type RosterReadOnlyData = {
+  consultants: ConsultantSummary[];
+  details: Record<number, ConsultantDetail>;
+};
+
+export function ConsultantRoster({
+  officeId,
+  requesterId,
+  readOnlyData,
+}: {
+  officeId: number;
+  requesterId: number;
+  // When provided, the roster is fully read-only: it uses this data and makes
+  // no network calls at all (the authenticated queries below are disabled).
+  readOnlyData?: RosterReadOnlyData;
+}) {
   const [sortKey, setSortKey] = useState<SortKey>("lastActive");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  const { data: consultants, isLoading } = useQuery<ConsultantSummary[]>({
+  const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantSummary[]>({
     queryKey: [`/api/offices/${officeId}/consultants?requesterId=${requesterId}`],
+    enabled: !readOnlyData,
   });
+  const consultants = readOnlyData ? readOnlyData.consultants : fetched;
+  const isLoading = readOnlyData ? false : fetchedLoading;
 
   function onSort(key: SortKey) {
     if (key === sortKey) {
@@ -247,6 +268,7 @@ export function ConsultantRoster({ officeId, requesterId }: { officeId: number; 
             officeId={officeId}
             requesterId={requesterId}
             userId={selectedId}
+            readOnlyDetail={readOnlyData?.details[selectedId]}
             onClose={() => setSelectedId(null)}
           />
         )}
@@ -259,16 +281,22 @@ function ConsultantDetailPanel({
   officeId,
   requesterId,
   userId,
+  readOnlyDetail,
   onClose,
 }: {
   officeId: number;
   requesterId: number;
   userId: number;
+  // When provided (public demo), render from this and make no network call.
+  readOnlyDetail?: ConsultantDetail;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useQuery<ConsultantDetail>({
+  const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantDetail>({
     queryKey: [`/api/offices/${officeId}/consultants/${userId}?requesterId=${requesterId}`],
+    enabled: !readOnlyDetail,
   });
+  const data = readOnlyDetail ?? fetched;
+  const isLoading = readOnlyDetail ? false : fetchedLoading;
 
   return (
     <div className="mt-6 rounded-lg border p-4" style={{ borderColor: ORANGE }} data-testid="panel-consultant-detail">
