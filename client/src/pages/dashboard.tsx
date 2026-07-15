@@ -472,7 +472,7 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
   const total = pie.reduce((sum, p) => sum + p.value, 0);
   return (
     <div className="flex flex-col sm:flex-row items-center gap-4">
-      <div className="h-56 w-full sm:w-1/2 min-w-0">
+      <div className="h-56 w-full sm:w-2/5 min-w-0">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie data={pie} dataKey="value" nameKey="name" innerRadius="55%" outerRadius="85%" paddingAngle={2} stroke="none">
@@ -484,7 +484,7 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <ul className="w-full sm:w-1/2 space-y-1.5" data-testid="list-vertical-legend">
+      <ul className="w-full sm:w-3/5 space-y-1.5" data-testid="list-vertical-legend">
         {pie.map((p, i) => (
           <li key={p.name} className="flex items-center justify-between gap-2 text-sm">
             <span className="flex items-center gap-2 min-w-0">
@@ -493,7 +493,9 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
                 style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }}
                 aria-hidden="true"
               />
-              <span className="text-white/75 truncate">{p.name}</span>
+              <span className="text-white/75 line-clamp-2" title={p.name}>
+                {p.name}
+              </span>
             </span>
             <span className="text-white/50 shrink-0">
               {p.value} ({Math.round((p.value / total) * 100)}%)
