@@ -281,6 +281,21 @@ describe("admin + public HTTP routes", () => {
     (storage as any).listVisitorPageViews = async () => [...views].reverse();
     (storage as any).listOffices = async () => offices;
     (storage as any).listUsers = async () => users;
+    (storage as any).getOffice = async (id: number) => offices.find((o) => o.id === id);
+    (storage as any).updateOffice = async (id: number, patch: Partial<Office>) => {
+      const o = offices.find((x) => x.id === id);
+      if (!o) return undefined;
+      Object.assign(o, patch);
+      return o;
+    };
+    (storage as any).listUsersByOffice = async (officeId: number) =>
+      users.filter((u) => u.officeId === officeId);
+    (storage as any).updateUser = async (id: number, patch: Partial<User>) => {
+      const u = users.find((x) => x.id === id);
+      if (!u) return undefined;
+      Object.assign(u, patch);
+      return u;
+    };
   });
 
   // Each public POST uses a distinct forwarded IP so the per-IP rate limiter
@@ -430,6 +445,72 @@ describe("admin + public HTTP routes", () => {
     const leadsCsv = await (await fetch(`${baseUrl}/api/admin/leads?format=csv`, { headers: { cookie: cookie! } })).text();
     assert.ok(leadsCsv.includes('"CSV, Tester"'));
     assert.ok(leadsCsv.includes('"has ""quotes"""'));
+  });
+
+  test("grant-demo-access requires an admin session (401)", async () => {
+    const res = await fetch(`${baseUrl}/api/admin/offices/1/grant-demo-access`, { method: "POST" });
+    assert.equal(res.status, 401);
+  });
+
+  test("grant-demo-access unlocks the office and marks every user demo (Stripe-free)", async () => {
+    // Start locked out with a paying (non-demo) user, mimicking a real office.
+    offices[0].subscriptionStatus = "incomplete";
+    users[0].isDemoAccount = false;
+    users[0].seatActive = false;
+    users.push({
+      id: 2, officeId: 1, username: "consultant1", password: "x", role: "consultant",
+      displayName: "Consultant One", currentLevel: "beginner", seatActive: false, isDemoAccount: false,
+    });
+
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/offices/1/grant-demo-access`, {
+      method: "POST", headers: { cookie: cookie! },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.usersUpdated, 2);
+    assert.equal(offices[0].subscriptionStatus, "active");
+    for (const u of users) {
+      assert.equal(u.isDemoAccount, true);
+      assert.equal(u.seatActive, true);
+    }
+    // No Stripe fields are ever touched.
+    assert.equal(offices[0].stripeCustomerId, "cus_1");
+    assert.equal(offices[0].stripeSubscriptionId, "sub_1");
+  });
+
+  test("grant-demo-access is idempotent (calling twice is harmless)", async () => {
+    const cookie = await login();
+    const url = `${baseUrl}/api/admin/offices/1/grant-demo-access`;
+    const first = await fetch(url, { method: "POST", headers: { cookie: cookie! } });
+    const second = await fetch(url, { method: "POST", headers: { cookie: cookie! } });
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(offices[0].subscriptionStatus, "active");
+    assert.equal(users[0].isDemoAccount, true);
+    assert.equal(users[0].seatActive, true);
+  });
+
+  test("grant-demo-access returns 404 for an unknown office", async () => {
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/offices/999/grant-demo-access`, {
+      method: "POST", headers: { cookie: cookie! },
+    });
+    assert.equal(res.status, 404);
+  });
+
+  test("revoke-demo-access reverses a grant", async () => {
+    const cookie = await login();
+    await fetch(`${baseUrl}/api/admin/offices/1/grant-demo-access`, {
+      method: "POST", headers: { cookie: cookie! },
+    });
+    const res = await fetch(`${baseUrl}/api/admin/offices/1/revoke-demo-access`, {
+      method: "POST", headers: { cookie: cookie! },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(offices[0].subscriptionStatus, "incomplete");
+    assert.equal(users[0].isDemoAccount, false);
+    assert.equal(users[0].seatActive, false);
   });
 
   test("CORS headers are returned for an allowed marketing origin", async () => {

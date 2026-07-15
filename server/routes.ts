@@ -1669,6 +1669,46 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     res.json({ rows, totalMrr, activeOffices });
   });
 
+  // Grant an office permanent free "demo" access with zero Stripe involvement —
+  // the exact state the seeded DEMO2024 office runs in (see server/seed.ts):
+  // subscriptionStatus "active" (no Stripe ids), and every user in the office
+  // marked isDemoAccount + seatActive so the whole office bypasses both the
+  // office billing gate (officeIsActive) and the per-seat gate (checkSeatAccess).
+  // Internal founder tool only: admin-guarded, never surfaced in the app UI, and
+  // touches no Stripe code. Idempotent — re-running just re-asserts the same state.
+  app.post("/api/admin/offices/:id/grant-demo-access", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const office = await storage.getOffice(id);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    const updatedOffice = await storage.updateOffice(id, { subscriptionStatus: "active" });
+    const officeUsers = await storage.listUsersByOffice(id);
+    for (const u of officeUsers) {
+      await storage.updateUser(u.id, { isDemoAccount: true, seatActive: true });
+    }
+    res.json({ office: updatedOffice, usersUpdated: officeUsers.length });
+  });
+
+  // Reverse a demo grant: lock the office back out (subscriptionStatus
+  // "incomplete", the default for an office with no live subscription) and clear
+  // the demo flags on its users. Idempotent, and provided only as a safety hatch —
+  // it does not touch Stripe, so an office that actually has a paid subscription
+  // will be re-synced to its true status by the next Stripe webhook.
+  app.post("/api/admin/offices/:id/revoke-demo-access", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const office = await storage.getOffice(id);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    const updatedOffice = await storage.updateOffice(id, { subscriptionStatus: "incomplete" });
+    const officeUsers = await storage.listUsersByOffice(id);
+    for (const u of officeUsers) {
+      await storage.updateUser(u.id, { isDemoAccount: false, seatActive: false });
+    }
+    res.json({ office: updatedOffice, usersUpdated: officeUsers.length });
+  });
+
   // Free Voice Demo usage: one row per email with verification state, all-time
   // sessions used (capped at 3), and how many of those were completed/scored.
   app.get("/api/admin/demo", requireAdmin, async (req, res) => {
