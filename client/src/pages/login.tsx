@@ -68,13 +68,13 @@ export default function Login() {
           >
             <SolveMark />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">SOLVE Platform™</h1>
-          <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
+          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">Practice Scenarios</h1>
+          <p className="text-sm text-muted-foreground">Consultant access to SOLVE Platform™ discovery practice.</p>
         </div>
         <Card className="border-2" style={{ borderColor: "#E06D00" }}>
           <CardHeader>
-            <CardTitle className="text-lg">Sign in</CardTitle>
-            <CardDescription>Use your pilot credentials to continue.</CardDescription>
+            <CardTitle className="text-lg">Consultant Access</CardTitle>
+            <CardDescription>Sign in with your pilot credentials to start practicing.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
