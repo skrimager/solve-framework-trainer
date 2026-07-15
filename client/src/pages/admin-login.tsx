@@ -40,7 +40,7 @@ export default function AdminLogin() {
         <div className="text-center space-y-3">
           <div
             className="mx-auto w-16 h-16 rounded-2xl flex items-center justify-center"
-            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(224,109,0,0.35)" }}
+            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(198,241,53,0.35)" }}
             aria-hidden="true"
           >
             <span className="text-2xl font-bold" style={{ color: "#F1830D" }}>S</span>
@@ -48,7 +48,7 @@ export default function AdminLogin() {
           <h1 className="text-2xl font-bold tracking-tight text-white">Solve Admin</h1>
           <p className="text-sm text-white/60">Internal administration console.</p>
         </div>
-        <Card className="border-2" style={{ borderColor: "#E06D00", backgroundColor: "#0A1A30" }}>
+        <Card className="border-2" style={{ borderColor: "#C6F135", backgroundColor: "#0A1A30" }}>
           <CardHeader>
             <CardTitle className="text-lg text-white">Sign in</CardTitle>
             <CardDescription className="text-white/60">Authorized personnel only.</CardDescription>

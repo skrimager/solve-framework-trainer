@@ -145,7 +145,7 @@ function ManagerForm({ onBack }: { onBack: () => void }) {
             type="button"
             className="w-full"
             style={{ backgroundColor: "#E06D00", color: "white" }}
-            onClick={() => navigate("/")}
+            onClick={() => navigate("/manager-login")}
             data-testid="button-go-to-signin"
           >
             Continue to sign in
