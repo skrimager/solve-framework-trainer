@@ -861,6 +861,8 @@ export async function registerRoutes(
 
   registerManagerRosterRoutes(app);
 
+  registerManagerDashboardRoutes(app);
+
   registerPublicDemoDashboardRoute(app);
 
   registerPublicAndAdminRoutes(app);
@@ -2246,6 +2248,217 @@ export function registerManagerRosterRoutes(app: Express): void {
       consultant: buildConsultantSummary(target, userSessions, allScenarios),
       sessions,
     });
+  });
+}
+
+// ===========================================================================
+// Manager command-center dashboard analytics. A single aggregate payload the
+// redesigned manager dashboard renders from, computed entirely from REAL office
+// data (users/sessions/scenarios). Every widget honestly reports zero/empty
+// state when the office has no consultants or completed sessions yet.
+//
+// IMPORTANT (per-stage SOLVE scoring): the AI coach persists a five-DIMENSION
+// discovery rubric per session (sessions.rubricScores JSON: needsDiscovery,
+// objectionPrevention, trustBuilding, naturalClose, relationshipContinuity), NOT
+// scores keyed to the SOLVE stage names (Situation/Open/Listen/Visualize/
+// Engineer). `discoveryDimensions` below aggregates those REAL persisted rubric
+// dimensions; it never fabricates stage-named scores.
+// ===========================================================================
+
+// The consulting discovery-rubric dimensions, in display order, with the short
+// labels used on the radar. Mirrors RUBRIC_LABELS in results.tsx but trimmed for
+// a compact axis tick. These are the only per-session sub-scores actually stored.
+const DISCOVERY_DIMENSIONS: { key: string; label: string }[] = [
+  { key: "needsDiscovery", label: "Needs discovery" },
+  { key: "objectionPrevention", label: "Objection prevention" },
+  { key: "trustBuilding", label: "Trust building" },
+  { key: "naturalClose", label: "Natural close" },
+  { key: "relationshipContinuity", label: "Relationship continuity" },
+];
+
+// One trailing week of practice counts as "this period" for the KPI strip.
+const DASHBOARD_PERIOD_DAYS = 7;
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+// The four real certification tiers, in progression order. A consultant's tier
+// is their consulting level UNLESS they've earned consulting certification, in
+// which case they sit at the top "Certified" tier (matches the roster CertPill,
+// which keys off consultingCertified).
+const TIER_ORDER = ["Beginner", "Intermediate", "Advanced", "Certified"] as const;
+
+function consultantTier(user: User): string {
+  if (user.consultingCertified) return "Certified";
+  const lvl = capitalize(user.currentLevel);
+  return (TIER_ORDER as readonly string[]).includes(lvl) ? lvl : "Beginner";
+}
+
+// Pure aggregation of the manager dashboard payload, split out from the route so
+// it can be unit-tested with in-memory fixtures. `now` is injectable so the
+// "this period" window is deterministic in tests.
+export function buildDashboardStats(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  now: Date = new Date(),
+) {
+  const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+  const consultants = officeUsers.filter((u) => u.role === "consultant");
+
+  const completed = officeSessions.filter((s) => s.status === "completed");
+  const scored = completed.filter((s) => s.score !== null);
+
+  const teamAverageScore = scored.length
+    ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+    : null;
+
+  const periodSince = new Date(now.getTime() - DASHBOARD_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  const practiceSessionsThisPeriod = completed.filter(
+    (s) => s.completedAt && new Date(s.completedAt) >= periodSince,
+  ).length;
+
+  const certificationsEarned = consultants.filter((u) => u.consultingCertified).length;
+  const activeConsultants = consultants.filter((u) => u.seatActive).length;
+
+  // Team average score by calendar day (UTC) of completion. Only scored sessions
+  // contribute; days with no scored session simply don't appear.
+  const byDay = new Map<string, { total: number; count: number }>();
+  for (const s of scored) {
+    const day = (s.completedAt ?? s.createdAt).slice(0, 10);
+    const bucket = byDay.get(day) ?? { total: 0, count: 0 };
+    bucket.total += s.score as number;
+    bucket.count += 1;
+    byDay.set(day, bucket);
+  }
+  const scoreOverTime = Array.from(byDay.entries())
+    .map(([date, { total, count }]) => ({
+      date,
+      averageScore: Math.round(total / count),
+      sessions: count,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // Per-dimension discovery-rubric averages across completed CONSULTING sessions
+  // whose stored rubric parses to the consulting shape. Null when there are none,
+  // so the client shows an honest empty state instead of a flat zero radar.
+  const dimTotals = new Map<string, { total: number; count: number }>();
+  for (const s of completed) {
+    const scenario = scenarioById.get(s.scenarioId);
+    if (scenarioTrack(scenario?.track) !== "consulting") continue;
+    if (!s.rubricScores) continue;
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(s.rubricScores);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || typeof parsed.needsDiscovery !== "number") continue;
+    for (const { key } of DISCOVERY_DIMENSIONS) {
+      const value = parsed[key];
+      if (typeof value !== "number") continue;
+      const bucket = dimTotals.get(key) ?? { total: 0, count: 0 };
+      bucket.total += value;
+      bucket.count += 1;
+      dimTotals.set(key, bucket);
+    }
+  }
+  const discoveryDimensions = dimTotals.size
+    ? DISCOVERY_DIMENSIONS.map(({ key, label }) => {
+        const bucket = dimTotals.get(key);
+        return {
+          key,
+          label,
+          average: bucket ? Math.round(bucket.total / bucket.count) : 0,
+        };
+      })
+    : null;
+
+  // Leaderboard: every consultant with their average over scored sessions,
+  // ranked best-first. Consultants with no scored sessions (averageScore null)
+  // sort to the bottom so the client can show them with an honest empty score.
+  const sessionsByUser = new Map<number, Session[]>();
+  for (const s of officeSessions) {
+    const list = sessionsByUser.get(s.userId) ?? [];
+    list.push(s);
+    sessionsByUser.set(s.userId, list);
+  }
+  const leaderboard = consultants
+    .map((u) => {
+      const userScored = (sessionsByUser.get(u.id) ?? []).filter(
+        (s) => s.status === "completed" && s.score !== null,
+      );
+      const averageScore = userScored.length
+        ? Math.round(userScored.reduce((sum, s) => sum + (s.score as number), 0) / userScored.length)
+        : null;
+      return {
+        id: u.id,
+        displayName: u.displayName,
+        averageScore,
+        sessionsCompleted: userScored.length,
+        tier: consultantTier(u),
+      };
+    })
+    .sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1));
+
+  const levelDistribution = TIER_ORDER.map((tier) => ({
+    tier,
+    count: consultants.filter((u) => consultantTier(u) === tier).length,
+  }));
+
+  const vertTotals = new Map<string, number>();
+  for (const s of completed) {
+    const scenario = scenarioById.get(s.scenarioId);
+    const vertical = scenario?.vertical ?? "unknown";
+    vertTotals.set(vertical, (vertTotals.get(vertical) ?? 0) + 1);
+  }
+  const verticalBreakdown = Array.from(vertTotals.entries())
+    .map(([vertical, count]) => ({ vertical, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    period: { label: "This week", days: DASHBOARD_PERIOD_DAYS, since: periodSince.toISOString() },
+    kpis: {
+      teamAverageScore,
+      practiceSessionsThisPeriod,
+      certificationsEarned,
+      activeConsultants,
+      consultantCount: consultants.length,
+    },
+    scoreOverTime,
+    discoveryDimensions,
+    leaderboard,
+    levelDistribution,
+    verticalBreakdown,
+    totals: {
+      completed: completed.length,
+      inProgress: officeSessions.length - completed.length,
+    },
+  };
+}
+
+export function registerManagerDashboardRoutes(app: Express): void {
+  // Office-scoped aggregate analytics for the manager command center. Reuses the
+  // same manager/QA + own-office authorization as the roster routes.
+  app.get("/api/manager/dashboard-stats", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+
+    res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios));
   });
 }
 
