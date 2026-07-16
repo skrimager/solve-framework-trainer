@@ -40,6 +40,11 @@ export const users = pgTable("users", {
   // quantity has been incremented for this user (consultants and managers who buy
   // their own training seat). Gates access to roleplay/session creation.
   seatActive: boolean("seat_active").notNull().default(false),
+  // ISO timestamp of when this user's paid seat was first activated. Set the first
+  // time seatActive flips true. Used to gate SOLVE Success Investment credit
+  // earning behind the "seat active for at least 60 days" ToS rule (see
+  // server/credits.ts). Null for users who never held a paid seat.
+  seatActivatedAt: text("seat_activated_at"),
   // QA/demo accounts are permanently free: they never consume a paid seat nor count
   // toward activeSeatCount, and are exempt from the seat access gate.
   isDemoAccount: boolean("is_demo_account").notNull().default(false),
@@ -62,6 +67,7 @@ export const insertUserSchema = createInsertSchema(users).pick({
   currentLevel: true,
   leadershipLevel: true,
   seatActive: true,
+  seatActivatedAt: true,
   isDemoAccount: true,
   consultingCertified: true,
   consultingCertifiedAt: true,
@@ -179,6 +185,7 @@ export const certificationAttempts = pgTable("certification_attempts", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
   track: text("track").notNull(), // 'consulting' | 'leadership'
+  vertical: text("vertical"), // industry vertical this attempt certifies in (null for legacy whole-track attempts)
   startedAt: text("started_at").notNull(),
   questionIds: text("question_ids").notNull().default("[]"), // JSON array of the 30 drawn question ids, so grading re-derives the exact set
   writtenScore: integer("written_score"), // percent correct (0-100), set on written submission
@@ -196,6 +203,46 @@ export const insertCertificationAttemptSchema = createInsertSchema(certification
 
 export type InsertCertificationAttempt = z.infer<typeof insertCertificationAttemptSchema>;
 export type CertificationAttempt = typeof certificationAttempts.$inferSelect;
+
+// Per-industry certification progress. Where the legacy per-track flags on
+// `users` (consultingCertified/leadershipCertified + currentLevel/leadershipLevel)
+// track a consultant's progress at the track level only, this table tracks it
+// independently for each (track, vertical) combination a consultant practices.
+// A consultant advances through the same beginner -> intermediate -> advanced
+// progression per vertical, then reaches "certified" once they pass the
+// certification exam whose final expert scenario belongs to that vertical.
+// Unique on (userId, track, vertical): one progress row per industry per track.
+export const industryCertifications = pgTable("industry_certifications", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  track: text("track").notNull(), // 'consulting' | 'leadership' (matches scenarios.track)
+  vertical: text("vertical").notNull(), // matches scenarios.vertical
+  currentLevel: text("current_level").notNull().default("beginner"), // 'beginner' | 'intermediate' | 'advanced' | 'certified'
+  certifiedAt: text("certified_at"), // ISO timestamp set when currentLevel reaches 'certified'
+});
+
+export const insertIndustryCertificationSchema = createInsertSchema(industryCertifications).omit({ id: true });
+export type InsertIndustryCertification = z.infer<typeof insertIndustryCertificationSchema>;
+export type IndustryCertification = typeof industryCertifications.$inferSelect;
+
+// SOLVE Success Investment credit ledger. One row per credit-earning event: a
+// consultant reaching one of the four sequential Academy levels earns a $50
+// ($5,000-cent) credit for their office. Levels are earned strictly in order
+// (1 -> 2 -> 3 -> 4), each awarded at most once per consultant (unique on
+// userId, level), capping a consultant's lifetime credit at $200. See
+// server/credits.ts for the level definitions and sequencing rules.
+export const academyCredits = pgTable("academy_credits", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  officeId: integer("office_id").notNull().references(() => offices.id), // denormalized for office-level rollups
+  level: integer("level").notNull(), // 1 | 2 | 3 | 4
+  amountCents: integer("amount_cents").notNull().default(5000), // $50 per level
+  earnedAt: text("earned_at").notNull(), // ISO timestamp of the award
+});
+
+export const insertAcademyCreditSchema = createInsertSchema(academyCredits).omit({ id: true });
+export type InsertAcademyCredit = z.infer<typeof insertAcademyCreditSchema>;
+export type AcademyCredit = typeof academyCredits.$inferSelect;
 
 // Transcript message shape (stored as JSON text in sessions.transcript)
 export const transcriptMessageSchema = z.object({

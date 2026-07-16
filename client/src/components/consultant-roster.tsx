@@ -44,7 +44,26 @@ type ConsultantSummary = {
   qualifyingSessionsAtCurrentTier: number;
   requiredQualifyingSessions: number;
   lastSessionDate: string | null;
+  industries?: {
+    consulting: IndustryTrackBreakdown;
+    leadership: IndustryTrackBreakdown;
+  };
+  academyLevel?: number;
+  academyRankLabel?: string | null;
+  academyCreditCents?: number;
 };
+
+type IndustryTrackBreakdown = {
+  started: { vertical: string; level: string; certified: boolean }[];
+  certifiedCount: number;
+};
+
+function prettyVertical(vertical: string): string {
+  return vertical
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 type DetailSession = {
   id: number;
@@ -277,6 +296,37 @@ export function ConsultantRoster({
   );
 }
 
+// Per-track industry breakdown: one chip per vertical the consultant has started,
+// marked certified vs in progress. Powers the manager's "started vs certified"
+// per-industry view.
+function IndustryTrackCard({ title, breakdown }: { title: string; breakdown: IndustryTrackBreakdown }) {
+  return (
+    <div className="rounded-lg border p-3" data-testid={`industry-card-${title.toLowerCase().replace(/\s+/g, "-")}`}>
+      <div className="flex items-baseline justify-between">
+        <p className="text-sm font-semibold">{title}</p>
+        <p className="text-xs text-muted-foreground">{breakdown.certifiedCount} certified</p>
+      </div>
+      {breakdown.started.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">No industries started yet.</p>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {breakdown.started.map((ind) => (
+            <span
+              key={ind.vertical}
+              className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs"
+              style={ind.certified ? { backgroundColor: ORANGE, color: "white", borderColor: ORANGE } : undefined}
+              data-testid={`industry-chip-${ind.vertical}`}
+            >
+              {prettyVertical(ind.vertical)}
+              {ind.certified ? " · Certified" : ` · ${TIER_META[ind.level]?.medal ?? ind.level}`}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConsultantDetailPanel({
   officeId,
   requesterId,
@@ -310,6 +360,11 @@ function ConsultantDetailPanel({
               {TIER_META[data.consultant.currentLevel]?.medal ?? data.consultant.currentLevel} · {data.consultant.totalSessionsCompleted} conversations completed · avg {data.consultant.averageScore ?? "—"}
             </p>
           )}
+          {data?.consultant.academyRankLabel && (
+            <p className="mt-1 text-sm font-semibold" style={{ color: ORANGE }} data-testid="text-academy-rank">
+              {data.consultant.academyRankLabel}
+            </p>
+          )}
         </div>
         <button
           type="button"
@@ -321,6 +376,13 @@ function ConsultantDetailPanel({
           <X className="h-4 w-4" />
         </button>
       </div>
+
+      {data?.consultant.industries && (
+        <div className="mt-4 grid gap-4 sm:grid-cols-2" data-testid="industry-breakdown">
+          <IndustryTrackCard title="Consulting" breakdown={data.consultant.industries.consulting} />
+          <IndustryTrackCard title="Conflict Management" breakdown={data.consultant.industries.leadership} />
+        </div>
+      )}
 
       <div className="mt-4">
         {isLoading && <Skeleton className="h-32 rounded-lg" />}

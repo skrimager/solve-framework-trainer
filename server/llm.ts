@@ -892,7 +892,7 @@ export function scenarioTrack(track: string | null | undefined): string {
 }
 
 type ScoredSession = { scenarioId: number; status: string; score: number | null };
-type LeveledScenario = { id: number; track?: string | null; difficulty: string };
+type LeveledScenario = { id: number; track?: string | null; difficulty: string; vertical?: string | null };
 
 // Collects a user's completed scores that count toward advancement on ONE track
 // at ONE difficulty level. This is what keeps the two tracks independent: a
@@ -911,6 +911,32 @@ export function scoresForTrackAtLevel(
       const scenario = byId.get(s.scenarioId);
       if (!scenario) return false;
       return scenarioTrack(scenario.track) === track && scenario.difficulty === level;
+    })
+    .map((s) => s.score as number);
+}
+
+// Like scoresForTrackAtLevel, but ALSO scoped to a single industry vertical. This
+// is what keeps per-industry certification progress (industry_certifications)
+// independent per vertical: a consultant advancing in Manufactured Housing never
+// advances their Real Estate progress, even on the same track and difficulty.
+export function scoresForVerticalAtLevel(
+  track: string,
+  vertical: string,
+  level: string,
+  sessions: ScoredSession[],
+  scenarios: LeveledScenario[]
+): number[] {
+  const byId = new Map(scenarios.map((s) => [s.id, s]));
+  return sessions
+    .filter((s) => s.status === "completed" && s.score !== null)
+    .filter((s) => {
+      const scenario = byId.get(s.scenarioId);
+      if (!scenario) return false;
+      return (
+        scenarioTrack(scenario.track) === track &&
+        scenario.difficulty === level &&
+        (scenario.vertical ?? null) === vertical
+      );
     })
     .map((s) => s.score as number);
 }

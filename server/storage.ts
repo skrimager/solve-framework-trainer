@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -80,6 +80,19 @@ export interface IStorage {
   getCertificationAttemptByScenarioSession(sessionId: number): Promise<CertificationAttempt | undefined>;
   updateCertificationAttempt(id: number, patch: Partial<InsertCertificationAttempt>): Promise<CertificationAttempt | undefined>;
   listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]>;
+
+  // --- Per-industry certification progress ---
+  getIndustryCertification(userId: number, track: string, vertical: string): Promise<IndustryCertification | undefined>;
+  listIndustryCertificationsByUser(userId: number): Promise<IndustryCertification[]>;
+  listIndustryCertificationsByUserIds(userIds: number[]): Promise<IndustryCertification[]>;
+  createIndustryCertification(cert: InsertIndustryCertification): Promise<IndustryCertification>;
+  updateIndustryCertification(id: number, patch: Partial<InsertIndustryCertification>): Promise<IndustryCertification | undefined>;
+
+  // --- SOLVE Success Investment academy credits ---
+  createAcademyCredit(credit: InsertAcademyCredit): Promise<AcademyCredit>;
+  listAcademyCreditsByUser(userId: number): Promise<AcademyCredit[]>;
+  listAcademyCreditsByOffice(officeId: number): Promise<AcademyCredit[]>;
+  listAllAcademyCredits(): Promise<AcademyCredit[]>;
 
   // Public "Free Voice Demo". Signups are keyed by email (one row per email, holds
   // verification-code state + the all-time usage counter). Sessions are anonymous
@@ -373,6 +386,58 @@ export class DatabaseStorage implements IStorage {
 
   async listCertificationAttemptsByUser(userId: number): Promise<CertificationAttempt[]> {
     return db.select().from(certificationAttempts).where(eq(certificationAttempts.userId, userId)).orderBy(desc(certificationAttempts.id));
+  }
+
+  // --- Per-industry certification progress ---
+  async getIndustryCertification(userId: number, track: string, vertical: string): Promise<IndustryCertification | undefined> {
+    const rows = await db
+      .select()
+      .from(industryCertifications)
+      .where(
+        and(
+          eq(industryCertifications.userId, userId),
+          eq(industryCertifications.track, track),
+          eq(industryCertifications.vertical, vertical),
+        ),
+      );
+    return rows[0];
+  }
+
+  async listIndustryCertificationsByUser(userId: number): Promise<IndustryCertification[]> {
+    return db.select().from(industryCertifications).where(eq(industryCertifications.userId, userId));
+  }
+
+  async listIndustryCertificationsByUserIds(userIds: number[]): Promise<IndustryCertification[]> {
+    if (userIds.length === 0) return [];
+    return db.select().from(industryCertifications).where(inArray(industryCertifications.userId, userIds));
+  }
+
+  async createIndustryCertification(cert: InsertIndustryCertification): Promise<IndustryCertification> {
+    const rows = await db.insert(industryCertifications).values(cert).returning();
+    return rows[0];
+  }
+
+  async updateIndustryCertification(id: number, patch: Partial<InsertIndustryCertification>): Promise<IndustryCertification | undefined> {
+    const rows = await db.update(industryCertifications).set(patch).where(eq(industryCertifications.id, id)).returning();
+    return rows[0];
+  }
+
+  // --- SOLVE Success Investment academy credits ---
+  async createAcademyCredit(credit: InsertAcademyCredit): Promise<AcademyCredit> {
+    const rows = await db.insert(academyCredits).values(credit).returning();
+    return rows[0];
+  }
+
+  async listAcademyCreditsByUser(userId: number): Promise<AcademyCredit[]> {
+    return db.select().from(academyCredits).where(eq(academyCredits.userId, userId)).orderBy(academyCredits.level);
+  }
+
+  async listAcademyCreditsByOffice(officeId: number): Promise<AcademyCredit[]> {
+    return db.select().from(academyCredits).where(eq(academyCredits.officeId, officeId));
+  }
+
+  async listAllAcademyCredits(): Promise<AcademyCredit[]> {
+    return db.select().from(academyCredits);
   }
 
   async getDemoSignupByEmail(email: string): Promise<DemoSignup | undefined> {

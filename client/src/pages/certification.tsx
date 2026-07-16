@@ -28,6 +28,16 @@ type PublicQuestion =
   | { id: string; type: "fill_blank"; prompt: string }
   | { id: string; type: "written"; prompt: string };
 
+type IndustryStatus = {
+  vertical: string;
+  level: string;
+  certified: boolean;
+  certifiedAt: string | null;
+  qualifyingAdvancedSessions: number;
+  requiredSessions: number;
+  eligible: boolean;
+};
+
 type TrackStatus = {
   track: Track;
   credential: string;
@@ -37,6 +47,7 @@ type TrackStatus = {
   qualifyingAdvancedSessions: number;
   requiredSessions: number;
   eligible: boolean;
+  industries: IndustryStatus[];
   latestAttempt: {
     id: number;
     writtenScore: number | null;
@@ -47,6 +58,13 @@ type TrackStatus = {
     completedAt: string | null;
   } | null;
 };
+
+function prettyVertical(vertical: string): string {
+  return vertical
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 type StartResponse = {
   attemptId: number;
@@ -112,8 +130,8 @@ export default function Certification() {
   const status = statuses?.[track];
 
   const startExam = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/certification/start", { userId: user!.id, track });
+    mutationFn: async (vertical?: string) => {
+      const res = await apiRequest("POST", "/api/certification/start", { userId: user!.id, track, vertical });
       return res.json() as Promise<StartResponse>;
     },
     onSuccess: (data) => {
@@ -222,12 +240,19 @@ export default function Certification() {
 
         {/* Overview / gating when no exam is in progress. */}
         {!exam && !writtenResult && status && (
-          <OverviewCard
-            status={status}
-            starting={startExam.isPending}
-            onStart={() => startExam.mutate()}
-            onGoToScenario={(sessionId) => navigate(`/roleplay/${sessionId}`)}
-          />
+          <>
+            <OverviewCard
+              status={status}
+              starting={startExam.isPending}
+              onStart={() => startExam.mutate(undefined)}
+              onGoToScenario={(sessionId) => navigate(`/roleplay/${sessionId}`)}
+            />
+            <IndustriesCard
+              status={status}
+              starting={startExam.isPending}
+              onStartVertical={(vertical) => startExam.mutate(vertical)}
+            />
+          </>
         )}
       </div>
     </AppShell>
@@ -336,6 +361,70 @@ function OverviewCard({
             {starting ? "Preparing exam…" : "Start written test"}
           </Button>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Per-industry certification breakdown: one row per vertical the consultant has
+// practiced in on this track, showing progress and letting them start the exam
+// for any industry whose Advanced bar they've cleared. Certifying in three
+// distinct industries is what earns the Cross-Industry Academy credits.
+function IndustriesCard({
+  status,
+  starting,
+  onStartVertical,
+}: {
+  status: TrackStatus;
+  starting: boolean;
+  onStartVertical: (vertical: string) => void;
+}) {
+  if (!status.industries || status.industries.length === 0) return null;
+  return (
+    <Card data-testid="card-industries">
+      <CardHeader>
+        <CardTitle className="text-lg">Industries</CardTitle>
+        <CardDescription>
+          Your certification progress by industry. Certify in three distinct industries to earn
+          Cross-Industry recognition.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {status.industries.map((ind) => (
+          <div
+            key={ind.vertical}
+            className="flex items-center justify-between gap-3 rounded-md border p-3"
+            data-testid={`industry-row-${ind.vertical}`}
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{prettyVertical(ind.vertical)}</p>
+              <p className="text-xs text-muted-foreground">
+                {ind.certified
+                  ? "Certified"
+                  : `${Math.min(ind.qualifyingAdvancedSessions, ind.requiredSessions)} of ${ind.requiredSessions} qualifying Advanced sessions`}
+              </p>
+            </div>
+            {ind.certified ? (
+              <Badge style={{ backgroundColor: "#E06D00", color: "white" }} data-testid={`industry-certified-${ind.vertical}`}>
+                <Award className="mr-1 h-3.5 w-3.5" /> Certified
+              </Badge>
+            ) : ind.eligible ? (
+              <Button
+                size="sm"
+                onClick={() => onStartVertical(ind.vertical)}
+                disabled={starting}
+                style={{ backgroundColor: "#E06D00", color: "white" }}
+                data-testid={`button-start-industry-${ind.vertical}`}
+              >
+                {starting ? "Preparing…" : "Start exam"}
+              </Button>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground" data-testid={`industry-locked-${ind.vertical}`}>
+                <Lock className="h-3.5 w-3.5" /> Locked
+              </span>
+            )}
+          </div>
+        ))}
       </CardContent>
     </Card>
   );

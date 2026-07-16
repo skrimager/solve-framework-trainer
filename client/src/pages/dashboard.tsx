@@ -94,6 +94,7 @@ type DashboardStats = {
     outOf: number;
   }[];
   totals: { completed: number; inProgress: number };
+  academyCredits: { totalCents: number; availableCents: number; display: string };
 };
 
 type Section = "dashboard" | "team" | "scenarios" | "leaderboard";
@@ -382,6 +383,7 @@ function DashboardSection({
     { label: "Certifications earned", value: kpis.certificationsEarned, testId: "kpi-certifications" },
     { label: "Active consultants", value: kpis.activeConsultants, testId: "kpi-active-consultants" },
     { label: "Conversations completed", value: stats.totals.completed, testId: "kpi-conversations-completed" },
+    { label: "Academy Credits available", value: stats.academyCredits.display, testId: "kpi-academy-credits" },
   ];
 
   return (
@@ -389,7 +391,7 @@ function DashboardSection({
       {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
 
       {/* 1. KPI strip */}
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-5" data-testid="kpi-strip">
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6" data-testid="kpi-strip">
         {kpiCards.map((c) => (
           <div
             key={c.label}
