@@ -343,6 +343,14 @@ export const demoSessions = pgTable("demo_sessions", {
   feedback: text("feedback"),
   createdAt: text("created_at").notNull(),
   completedAt: text("completed_at"),
+  // Abuse-protection signals captured at session start. deviceFingerprint is the
+  // client-side FingerprintJS hash (nullable: privacy tools can block it), used
+  // for the 3-sessions-per-device cap. ipAddress backs the durable 6-per-IP /
+  // 30-day cap. sessionNumber is this session's 1-based ordinal for the email,
+  // used to unlock voice only on the third (final) free session.
+  deviceFingerprint: text("device_fingerprint"),
+  ipAddress: text("ip_address"),
+  sessionNumber: integer("session_number").notNull().default(1),
 });
 
 export const insertDemoSessionSchema = createInsertSchema(demoSessions).omit({ id: true });

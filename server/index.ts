@@ -9,6 +9,14 @@ import { createServer } from "node:http";
 const app = express();
 const httpServer = createServer(app);
 
+// Render (and most PaaS) terminate TLS at a single proxy hop and forward the
+// real client IP in X-Forwarded-For. Trusting exactly one hop makes req.ip the
+// genuine client address while ignoring any client-forged XFF entries beyond it,
+// so the durable per-IP demo cap (see clientIp in routes.ts) cannot be bypassed
+// with a spoofed header. One hop is correct for Render's documented setup; raise
+// the count only if additional trusted proxies are ever added in front.
+app.set("trust proxy", 1);
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;

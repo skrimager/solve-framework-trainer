@@ -1,5 +1,6 @@
 import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
-import type { DemoSignup, InsertDemoSignup } from "@shared/schema";
+import { createRequire } from "node:module";
+import type { DemoSignup, InsertDemoSignup, DemoSession } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
 // Public "Free Voice Demo" logic. This is intentionally self-contained and
@@ -151,6 +152,168 @@ export function isSessionLimitReached(sessionsUsed: number, email?: string): boo
 export function remainingSessions(sessionsUsed: number, email?: string): number {
   if (email && isUnlimitedDemoEmail(email)) return Infinity;
   return Math.max(0, MAX_DEMO_SESSIONS - sessionsUsed);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-layer abuse protection. These caps sit BEHIND the marketed "3 free
+// sessions per email" promise and only ever surface when someone exceeds fair
+// use (a new email on an already-used device, or many emails from one IP). The
+// legitimate first-time flow never sees them. Every cap is bypassed for
+// allowlisted (founder) emails via isUnlimitedDemoEmail so live sales demos are
+// never locked out. All logic here is pure so it can be unit-tested directly.
+// ---------------------------------------------------------------------------
+
+// A single device gets this many free sessions total, regardless of how many
+// different emails are used from it. Same number as the per-email cap: a new
+// email on an already-capped device does not reset the count.
+export const MAX_DEMO_SESSIONS_PER_DEVICE = 3;
+
+// A single IP address gets this many free sessions in any rolling 30-day window.
+// Higher than the per-device cap so a shared office/household NAT is not caught
+// by ordinary legitimate use, but low enough to stop scripted email churn.
+export const MAX_DEMO_SESSIONS_PER_IP = 6;
+
+// The rolling window for the per-IP cap. Must survive restarts/deploys, which is
+// why the IP counter is derived from durable demo_sessions rows, not the
+// in-memory RateLimiter.
+export const IP_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+// True once a device fingerprint has consumed all of its free sessions. A
+// missing/blocked fingerprint (count derived as 0) never trips this on its own.
+export function isDeviceLimitReached(deviceSessionCount: number, email?: string): boolean {
+  if (email && isUnlimitedDemoEmail(email)) return false;
+  return deviceSessionCount >= MAX_DEMO_SESSIONS_PER_DEVICE;
+}
+
+// True once an IP has consumed all of its free sessions inside the rolling
+// window. `ipSessionCountInWindow` is the count already filtered to the window
+// (see countDemoSessionsInIpWindow).
+export function isIpLimitReached(ipSessionCountInWindow: number, email?: string): boolean {
+  if (email && isUnlimitedDemoEmail(email)) return false;
+  return ipSessionCountInWindow >= MAX_DEMO_SESSIONS_PER_IP;
+}
+
+// Count how many of the given sessions fall inside the rolling 30-day IP window
+// ending at `now`. A session created exactly IP_WINDOW_MS ago (or older) is
+// OUTSIDE the window and does not count, so a session from 31 days ago never
+// blocks a fresh one. Unparseable timestamps are ignored (treated as outside).
+export function countDemoSessionsInIpWindow(
+  sessions: Pick<DemoSession, "createdAt">[],
+  now = Date.now(),
+): number {
+  const cutoff = now - IP_WINDOW_MS;
+  let count = 0;
+  for (const s of sessions) {
+    const t = Date.parse(s.createdAt);
+    if (!Number.isNaN(t) && t > cutoff) count += 1;
+  }
+  return count;
+}
+
+// Admin abuse-protection analytics, derived purely from durable demo_sessions
+// rows so the view survives restarts. Kept pure (no DB) for direct unit testing.
+// A "blocked" device/IP is one that has reached its cap, i.e. any further email
+// from it would be turned away at session start. `emails` is the count of
+// distinct emails seen from that device/IP (the abuse signal the ticket asks
+// for: how many emails one device or IP churned through).
+export type DemoAbuseAnalytics = {
+  totalSessions: number;
+  uniqueDevices: number;
+  sessionsPerDay: { date: string; count: number }[];
+  blockedDevices: { fingerprint: string; sessions: number; emails: number; lastAt: string }[];
+  blockedIps: { ip: string; sessions: number; emails: number; lastAt: string }[];
+};
+
+type AnalyticsSession = Pick<DemoSession, "createdAt" | "deviceFingerprint" | "ipAddress" | "email">;
+
+export function demoAbuseAnalytics(
+  sessions: AnalyticsSession[],
+  now = Date.now(),
+): DemoAbuseAnalytics {
+  const perDay = new Map<string, number>();
+  const deviceSessions = new Map<string, AnalyticsSession[]>();
+  const ipSessions = new Map<string, AnalyticsSession[]>();
+  const deviceSet = new Set<string>();
+
+  for (const s of sessions) {
+    const day = (s.createdAt ?? "").slice(0, 10);
+    if (day) perDay.set(day, (perDay.get(day) ?? 0) + 1);
+    if (s.deviceFingerprint) {
+      deviceSet.add(s.deviceFingerprint);
+      const list = deviceSessions.get(s.deviceFingerprint) ?? [];
+      list.push(s);
+      deviceSessions.set(s.deviceFingerprint, list);
+    }
+    if (s.ipAddress) {
+      const list = ipSessions.get(s.ipAddress) ?? [];
+      list.push(s);
+      ipSessions.set(s.ipAddress, list);
+    }
+  }
+
+  const sessionsPerDay = Array.from(perDay.entries())
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const lastAtOf = (rows: AnalyticsSession[]): string =>
+    rows.reduce((max, r) => (r.createdAt > max ? r.createdAt : max), "");
+  const emailsOf = (rows: AnalyticsSession[]): number =>
+    new Set(rows.map((r) => r.email)).size;
+
+  const blockedDevices = Array.from(deviceSessions.entries())
+    .filter(([, rows]) => rows.length >= MAX_DEMO_SESSIONS_PER_DEVICE)
+    .map(([fingerprint, rows]) => ({
+      fingerprint,
+      sessions: rows.length,
+      emails: emailsOf(rows),
+      lastAt: lastAtOf(rows),
+    }))
+    .sort((a, b) => b.sessions - a.sessions);
+
+  const blockedIps = Array.from(ipSessions.entries())
+    .filter(([, rows]) => countDemoSessionsInIpWindow(rows, now) >= MAX_DEMO_SESSIONS_PER_IP)
+    .map(([ip, rows]) => ({
+      ip,
+      sessions: countDemoSessionsInIpWindow(rows, now),
+      emails: emailsOf(rows),
+      lastAt: lastAtOf(rows),
+    }))
+    .sort((a, b) => b.sessions - a.sessions);
+
+  return {
+    totalSessions: sessions.length,
+    uniqueDevices: deviceSet.size,
+    sessionsPerDay,
+    blockedDevices,
+    blockedIps,
+  };
+}
+
+// Voice (server-side TTS) is unlocked only on the third free session for cost
+// containment; the first two default to text mode. Allowlisted founder emails
+// always get voice so live sales demos are never text-only. `sessionNumber` is
+// the session's 1-based ordinal for the email.
+export function isVoiceUnlockedForDemo(sessionNumber: number, email?: string): boolean {
+  if (email && isUnlimitedDemoEmail(email)) return true;
+  return sessionNumber >= MAX_DEMO_SESSIONS;
+}
+
+// Disposable/temporary email domains (mailinator, 10minutemail, guerrillamail,
+// and ~120k more) come from the maintained open-source `disposable-email-domains`
+// package so the list updates independently of this code. Loaded once via a
+// runtime require (the package ships a JSON array) into a Set for O(1) lookups.
+const require = createRequire(import.meta.url);
+const DISPOSABLE_DOMAINS: Set<string> = new Set(
+  (require("disposable-email-domains") as string[]).map((d) => d.toLowerCase()),
+);
+
+// True if the email's domain is a known disposable/temporary provider. Checked
+// at signup so a throwaway address is rejected before any code is sent.
+export function isDisposableEmail(email: string): boolean {
+  const at = normalizeEmail(email).lastIndexOf("@");
+  if (at === -1) return false;
+  const domain = normalizeEmail(email).slice(at + 1);
+  return DISPOSABLE_DOMAINS.has(domain);
 }
 
 // --- Signed demo access token (mirrors the admin HMAC session token) --------

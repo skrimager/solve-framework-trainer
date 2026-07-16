@@ -6,6 +6,7 @@ import type { Server } from "node:http";
 import { storage } from "./storage";
 import { registerPublicAndAdminRoutes } from "./routes";
 import { __setFetchForTests } from "./notifications";
+import { hashPassword } from "./admin";
 import {
   MAX_DEMO_SESSIONS,
   normalizeEmail,
@@ -20,6 +21,15 @@ import {
   verifyDemoToken,
   ctaSeatQuestion,
   buildVerificationEmail,
+  isDeviceLimitReached,
+  isIpLimitReached,
+  countDemoSessionsInIpWindow,
+  isVoiceUnlockedForDemo,
+  isDisposableEmail,
+  demoAbuseAnalytics,
+  MAX_DEMO_SESSIONS_PER_DEVICE,
+  MAX_DEMO_SESSIONS_PER_IP,
+  IP_WINDOW_MS,
 } from "./demo";
 import type { DemoSignup, DemoSession, Scenario, Contact } from "@shared/schema";
 
@@ -209,6 +219,126 @@ describe("buildVerificationEmail", () => {
   });
 });
 
+describe("device and IP cap helpers (pure)", () => {
+  test("device limit trips only at or above the per-device cap", () => {
+    assert.equal(isDeviceLimitReached(MAX_DEMO_SESSIONS_PER_DEVICE - 1), false);
+    assert.equal(isDeviceLimitReached(MAX_DEMO_SESSIONS_PER_DEVICE), true);
+    assert.equal(isDeviceLimitReached(MAX_DEMO_SESSIONS_PER_DEVICE + 3), true);
+  });
+
+  test("IP limit trips only at or above the per-IP cap", () => {
+    assert.equal(isIpLimitReached(MAX_DEMO_SESSIONS_PER_IP - 1), false);
+    assert.equal(isIpLimitReached(MAX_DEMO_SESSIONS_PER_IP), true);
+    assert.equal(isIpLimitReached(MAX_DEMO_SESSIONS_PER_IP + 10), true);
+  });
+
+  test("allowlisted founder email bypasses both device and IP caps", () => {
+    const email = "wadeskrimager@icloud.com";
+    assert.equal(isDeviceLimitReached(MAX_DEMO_SESSIONS_PER_DEVICE + 50, email), false);
+    assert.equal(isIpLimitReached(MAX_DEMO_SESSIONS_PER_IP + 50, email), false);
+  });
+});
+
+describe("countDemoSessionsInIpWindow (rolling 30-day window)", () => {
+  const now = Date.parse("2026-07-16T12:00:00.000Z");
+
+  test("counts sessions inside the window and excludes ones at/older than 30 days", () => {
+    const sessions = [
+      { createdAt: new Date(now - 1_000).toISOString() }, // just now: in
+      { createdAt: new Date(now - IP_WINDOW_MS + 60_000).toISOString() }, // 30d - 1m: in
+      { createdAt: new Date(now - IP_WINDOW_MS).toISOString() }, // exactly 30d: out
+      { createdAt: new Date(now - IP_WINDOW_MS - 1).toISOString() }, // 31st day: out
+    ];
+    assert.equal(countDemoSessionsInIpWindow(sessions, now), 2);
+  });
+
+  test("a session from 31 days ago never blocks a fresh one", () => {
+    const day31 = [{ createdAt: new Date(now - 31 * 24 * 60 * 60 * 1000).toISOString() }];
+    assert.equal(countDemoSessionsInIpWindow(day31, now), 0);
+    assert.equal(isIpLimitReached(countDemoSessionsInIpWindow(day31, now)), false);
+  });
+
+  test("ignores unparseable timestamps", () => {
+    assert.equal(countDemoSessionsInIpWindow([{ createdAt: "not-a-date" }], now), 0);
+  });
+});
+
+describe("isVoiceUnlockedForDemo (cost containment: text default, voice on session 3)", () => {
+  test("sessions 1 and 2 are text-only; session 3 unlocks voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(1), false);
+    assert.equal(isVoiceUnlockedForDemo(2), false);
+    assert.equal(isVoiceUnlockedForDemo(3), true);
+  });
+
+  test("allowlisted founder email always has voice, even on session 1", () => {
+    assert.equal(isVoiceUnlockedForDemo(1, "wadeskrimager@icloud.com"), true);
+  });
+});
+
+describe("isDisposableEmail", () => {
+  test("flags a known disposable domain", () => {
+    assert.equal(isDisposableEmail("someone@mailinator.com"), true);
+  });
+
+  test("allows an ordinary provider domain", () => {
+    assert.equal(isDisposableEmail("dana@gmail.com"), false);
+  });
+
+  test("returns false for a malformed address with no domain", () => {
+    assert.equal(isDisposableEmail("no-at-sign"), false);
+  });
+});
+
+describe("demoAbuseAnalytics", () => {
+  const now = Date.parse("2026-07-16T12:00:00.000Z");
+  function s(patch: Partial<DemoSession>): DemoSession {
+    return {
+      deviceFingerprint: null,
+      ipAddress: null,
+      email: "a@example.com",
+      createdAt: new Date(now).toISOString(),
+      ...patch,
+    } as DemoSession;
+  }
+
+  test("surfaces a blocked device with its session count and distinct email count", () => {
+    const sessions = [
+      s({ deviceFingerprint: "fp1", email: "a@example.com" }),
+      s({ deviceFingerprint: "fp1", email: "b@example.com" }),
+      s({ deviceFingerprint: "fp1", email: "c@example.com" }),
+      s({ deviceFingerprint: "fp2", email: "d@example.com" }),
+    ];
+    const a = demoAbuseAnalytics(sessions, now);
+    assert.equal(a.uniqueDevices, 2);
+    assert.equal(a.blockedDevices.length, 1);
+    assert.equal(a.blockedDevices[0].fingerprint, "fp1");
+    assert.equal(a.blockedDevices[0].sessions, 3);
+    assert.equal(a.blockedDevices[0].emails, 3);
+  });
+
+  test("surfaces a blocked IP once it reaches the per-IP cap in the window", () => {
+    const sessions = Array.from({ length: MAX_DEMO_SESSIONS_PER_IP }, (_, i) =>
+      s({ ipAddress: "1.2.3.4", email: `e${i}@example.com` }),
+    );
+    const a = demoAbuseAnalytics(sessions, now);
+    assert.equal(a.blockedIps.length, 1);
+    assert.equal(a.blockedIps[0].ip, "1.2.3.4");
+    assert.equal(a.blockedIps[0].sessions, MAX_DEMO_SESSIONS_PER_IP);
+    assert.equal(a.blockedIps[0].emails, MAX_DEMO_SESSIONS_PER_IP);
+  });
+
+  test("does not flag devices/IPs below their caps", () => {
+    const sessions = [
+      s({ deviceFingerprint: "fp1", ipAddress: "9.9.9.9" }),
+      s({ deviceFingerprint: "fp1", ipAddress: "9.9.9.9" }),
+    ];
+    const a = demoAbuseAnalytics(sessions, now);
+    assert.equal(a.blockedDevices.length, 0);
+    assert.equal(a.blockedIps.length, 0);
+    assert.equal(a.totalSessions, 2);
+  });
+});
+
 // ===========================================================================
 // HTTP endpoint tests (bare express + monkeypatched storage)
 // ===========================================================================
@@ -291,6 +421,12 @@ describe("public demo endpoints", () => {
       leads.push(created);
       return created;
     };
+    (storage as any).listDemoSessionsByFingerprint = async (fp: string) =>
+      sessions.filter((s) => s.deviceFingerprint === fp);
+    (storage as any).listDemoSessionsByIp = async (ip: string) =>
+      sessions.filter((s) => s.ipAddress === ip);
+    (storage as any).listDemoSignups = async () => signups;
+    (storage as any).listDemoSessions = async () => sessions;
   });
 
   afterEach(() => {
@@ -309,6 +445,50 @@ describe("public demo endpoints", () => {
       headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() },
       body: JSON.stringify(body),
     });
+  }
+  // Same as post() but pins the client IP, so a test can exercise the durable
+  // per-IP cap (multiple session starts that must all resolve to one IP).
+  function postFromIp(path: string, body: unknown, ip: string) {
+    return fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": ip },
+      body: JSON.stringify(body),
+    });
+  }
+  function verifiedSignup(email: string, sessionsUsed = 0): DemoSignup {
+    const row = {
+      id: signups.length + 1,
+      email: normalizeEmail(email),
+      code: null,
+      codeExpiresAt: null,
+      verified: true,
+      sessionsUsed,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastSentAt: null,
+    } as DemoSignup;
+    signups.push(row);
+    return row;
+  }
+  function seedSession(patch: Partial<DemoSession>): DemoSession {
+    const row = {
+      id: sessions.length + 1,
+      signupId: 0,
+      email: "seed@example.com",
+      scenarioId: scenario.id,
+      status: "in_progress",
+      transcript: "[]",
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      deviceFingerprint: null,
+      ipAddress: null,
+      sessionNumber: 1,
+      ...patch,
+    } as DemoSession;
+    sessions.push(row);
+    return row;
   }
 
   test("request-code creates a signup and 'sends' a code", async () => {
@@ -447,5 +627,168 @@ describe("public demo endpoints", () => {
     assert.match(leads[0].message!, /consultants/);
     assert.match(leads[0].message!, /8/);
     assert.match(leads[0].message!, /Interested/);
+  });
+
+  // ---- Layer 3: disposable email blocked before any code is sent -----------
+  test("request-code rejects a disposable domain before sending a code", async () => {
+    let sent = false;
+    __setFetchForTests(async () => {
+      sent = true;
+      return new Response(JSON.stringify({ id: "x" }), { status: 200 });
+    });
+    const res = await post("/api/demo/request-code", { email: "throwaway@mailinator.com" });
+    assert.equal(res.status, 400);
+    assert.equal(sent, false, "no verification email for a disposable address");
+    assert.equal(signups.length, 0, "no signup row created for a disposable address");
+  });
+
+  // ---- Verification gate: an unverified email cannot start a session -------
+  test("an unverified email cannot start a session even with a signed token", async () => {
+    signups.push({
+      id: 1,
+      email: "unverified@example.com",
+      code: "111111",
+      codeExpiresAt: codeExpiryFrom(Date.now()),
+      verified: false,
+      sessionsUsed: 0,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastSentAt: null,
+    } as DemoSignup);
+    const token = signDemoToken("unverified@example.com");
+    const res = await post("/api/demo/session", { token });
+    assert.equal(res.status, 401);
+    assert.equal(sessions.length, 0);
+  });
+
+  // ---- Layer 1: same email across many devices is still capped by email ----
+  test("the per-email cap holds across different devices (a new device does not reset it)", async () => {
+    verifiedSignup("multidevice@example.com", MAX_DEMO_SESSIONS);
+    const token = signDemoToken("multidevice@example.com");
+    const res = await post("/api/demo/session", { token, fingerprint: "brand-new-device" });
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.equal(body.reason, "email");
+    assert.equal(sessions.length, 0);
+  });
+
+  // ---- Layer 1: same device across many emails is capped by device --------
+  test("a new email on an already-capped device is blocked by the device cap", async () => {
+    const fp = "shared-device-fp";
+    for (let i = 0; i < MAX_DEMO_SESSIONS_PER_DEVICE; i++) {
+      seedSession({ deviceFingerprint: fp, email: `prev${i}@example.com`, ipAddress: "5.5.5.5" });
+    }
+    verifiedSignup("fresh@example.com", 0);
+    const token = signDemoToken("fresh@example.com");
+    const res = await post("/api/demo/session", { token, fingerprint: fp });
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.equal(body.reason, "device");
+  });
+
+  // ---- Layer 2: durable per-IP cap blocks the 7th session from one IP -----
+  test("the 7th session from one IP is blocked by the durable per-IP cap", async () => {
+    const ip = "203.0.113.7";
+    // Six existing sessions from this IP, all inside the window.
+    for (let i = 0; i < MAX_DEMO_SESSIONS_PER_IP; i++) {
+      seedSession({ ipAddress: ip, email: `ip${i}@example.com` });
+    }
+    verifiedSignup("seventh@example.com", 0);
+    const token = signDemoToken("seventh@example.com");
+    // No fingerprint so the device cap can't interfere; email is fresh so the
+    // email cap can't interfere. Only the IP cap should trip.
+    const res = await postFromIp("/api/demo/session", { token }, ip);
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.equal(body.reason, "ip");
+  });
+
+  // ---- Allowlist bypass: founder email is never caught by device/IP caps ---
+  test("an allowlisted founder email bypasses the device and IP caps", async () => {
+    const founder = "wadeskrimager@icloud.com";
+    const fp = "founder-device";
+    const ip = "198.51.100.9";
+    // Pre-load enough sessions to trip both device and IP caps for anyone else.
+    for (let i = 0; i < MAX_DEMO_SESSIONS_PER_IP; i++) {
+      seedSession({ deviceFingerprint: fp, ipAddress: ip, email: `x${i}@example.com` });
+    }
+    verifiedSignup(founder, MAX_DEMO_SESSIONS + 5);
+    const token = signDemoToken(founder);
+    const res = await postFromIp("/api/demo/session", { token, fingerprint: fp, scenario: "real_estate" }, ip);
+    assert.equal(res.status, 200, "founder is never walled by fair-use caps");
+    const body = await res.json();
+    assert.ok(body.session);
+    assert.equal(body.voiceEnabled, true, "founder always gets voice");
+  });
+});
+
+// ===========================================================================
+// Admin visibility: GET /api/admin/demo surfaces abuse-protection analytics
+// ===========================================================================
+
+describe("admin demo analytics endpoint", () => {
+  let server: Server;
+  let baseUrl: string;
+  let signups: DemoSignup[];
+  let sessions: DemoSession[];
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerPublicAndAdminRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  after(() => {
+    server?.close();
+  });
+
+  beforeEach(() => {
+    signups = [];
+    sessions = [];
+    (storage as any).listDemoSignups = async () => signups;
+    (storage as any).listDemoSessions = async () => sessions;
+    (storage as any).getAdminByUsername = async (username: string) =>
+      username === "admin"
+        ? { id: 1, username: "admin", passwordHash: hashPassword("pw") }
+        : undefined;
+  });
+
+  async function loginCookie(): Promise<string> {
+    const res = await fetch(`${baseUrl}/api/admin/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "pw" }),
+    });
+    return res.headers.get("set-cookie")!.split(";")[0];
+  }
+
+  test("returns blocked devices and IPs alongside the signup rows", async () => {
+    const fp = "abusive-fp";
+    const ip = "192.0.2.44";
+    for (let i = 0; i < MAX_DEMO_SESSIONS_PER_DEVICE; i++) {
+      sessions.push({
+        id: i + 1,
+        email: `churn${i}@example.com`,
+        deviceFingerprint: fp,
+        ipAddress: ip,
+        createdAt: new Date().toISOString(),
+      } as DemoSession);
+    }
+    signups.push({ id: 1, email: "churn0@example.com", verified: true, sessionsUsed: 3, createdAt: "2026-07-01T00:00:00.000Z", lastSentAt: null } as DemoSignup);
+
+    const cookie = await loginCookie();
+    const res = await fetch(`${baseUrl}/api/admin/demo`, { headers: { cookie } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.rows));
+    assert.equal(body.analytics.blockedDevices.length, 1);
+    assert.equal(body.analytics.blockedDevices[0].fingerprint, fp);
+    assert.equal(body.analytics.blockedDevices[0].emails, MAX_DEMO_SESSIONS_PER_DEVICE);
+    assert.equal(body.analytics.uniqueDevices, 1);
   });
 });
