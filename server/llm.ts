@@ -45,7 +45,13 @@ export async function synthesizeSpeech(text: string, voice: string, instructions
 // themselves by first name, used to start a session so the consultant walks in
 // cold (no pre-roleplay briefing) and must uncover the situation through
 // discovery. The persona's underlying needs/concerns must NOT be revealed here.
-export async function getCustomerOpening(customerPersona: string, track: string = "consulting"): Promise<string> {
+export async function getCustomerOpening(
+  customerPersona: string,
+  track: string = "consulting",
+  // The per-session persona rendition block (personality, motivation, objections).
+  // Empty string keeps the prompt byte-identical to the pre-variation behavior.
+  variantSection: string = ""
+): Promise<string> {
   // Consulting (discovery) counterparts open cold and hide their real need. In
   // a Leadership/Conflict-Management scenario the counterpart is already upset
   // or in conflict, so they open by surfacing that frustration (but not the
@@ -54,9 +60,12 @@ export async function getCustomerOpening(customerPersona: string, track: string 
     track === "leadership"
       ? `You are starting the conversation already frustrated, upset, or in conflict about something. Open with a short, natural line that introduces yourself by first name and makes your annoyance/complaint clear in one or two sentences (for example: "I'm Dana, and honestly I'm pretty frustrated right now — this is the second time this has happened"). Do NOT calmly explain the full root cause or what would satisfy you; the consultant has to draw that out. Output ONLY the spoken line, no labels or narration.`
       : `You are starting the conversation — the consultant has just arrived / greeted you is imminent. Open with a short, natural greeting and introduce yourself by your first name in one or two sentences (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal your underlying needs, concerns, budget, or the reason you're really here; those are for the consultant to uncover through questions. Output ONLY the spoken line, no labels or narration.`;
-  // Persona (stable across a session) leads; the per-track opening instruction
-  // follows. Ordering the stable persona first lets the provider cache it.
-  const input = `${customerPersona}\n\n${openingInstruction}`;
+  // Fixed persona core + per-track opening instruction lead (both stable per
+  // scenario, so they cache), then the per-session variant rendition comes LAST.
+  // Keying the cache on the fixed prefix keeps sessions of the same scenario
+  // routed together even though their variant tails differ.
+  const fixedPrefix = `${customerPersona}\n\n${openingInstruction}`;
+  const input = variantSection ? `${fixedPrefix}\n\n${variantSection}` : fixedPrefix;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -157,7 +166,12 @@ export function buildCustomerReplyPrompt(
   customerPersona: string,
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
-  escalationTier: number = 0
+  escalationTier: number = 0,
+  // The per-session persona rendition block. Sits AFTER the cacheable stable
+  // prefix (so the fixed portion still caches across sessions) but BEFORE the
+  // volatile transcript. Empty string reproduces the pre-variation prompt byte
+  // for byte, so scenarios without variant pools are unaffected.
+  variantSection: string = ""
 ): string {
   const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
 
@@ -166,7 +180,8 @@ export function buildCustomerReplyPrompt(
     .join("\n");
   const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character, following the conversation realism rules above. Output ONLY the spoken line, no labels or narration.`;
 
-  return `${stablePrefix}\n\n${volatile}`;
+  const variantBlock = variantSection ? `${variantSection}\n\n` : "";
+  return `${stablePrefix}\n\n${variantBlock}${volatile}`;
 }
 
 // Generates the simulated customer's next reply in a discovery-training role-play.
@@ -174,9 +189,10 @@ export async function getCustomerReply(
   customerPersona: string,
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
-  escalationTier: number = 0
+  escalationTier: number = 0,
+  variantSection: string = ""
 ): Promise<string> {
-  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier);
+  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
 
   const response = await client.responses.create({
     model: CHAT_MODEL,

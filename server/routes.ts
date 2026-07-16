@@ -16,6 +16,13 @@ import {
   TRACK_CREDENTIAL,
   type Track,
 } from "./certification";
+import {
+  selectPersonaVariant,
+  buildPersonaVariantSection,
+  scenarioPersonaVariants,
+  personaCoreFor,
+  sessionVariantSection,
+} from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
 import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
@@ -457,11 +464,19 @@ export async function registerRoutes(
     // walks in cold (no pre-roleplay briefing) and must uncover the situation
     // through discovery. Falls back to an empty transcript if generation fails,
     // so a flaky LLM call never blocks starting a session.
+    // Draw this session's persona rendition (personality, motivation, objections)
+    // once at start and store it resolved on the session, so every turn replays
+    // the same customer while a fresh session gets a different one. Selection is
+    // a no-op for scenarios without variant pools (variantSection is "").
     let openingTranscript = "[]";
+    let personaVariant: string | null = null;
     try {
       const scenario = await storage.getScenario(scenarioId);
       if (scenario) {
-        const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
+        const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
+        personaVariant = JSON.stringify(selected);
+        const variantSection = buildPersonaVariantSection(selected);
+        const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
         if (openingText) {
           const openingMsg = transcriptMessageSchema.parse({
             role: "customer",
@@ -491,6 +506,7 @@ export async function registerRoutes(
       userId,
       scenarioId,
       status: "in_progress",
+      personaVariant,
       transcript: openingTranscript,
       score: null,
       rubricScores: null,
@@ -576,7 +592,8 @@ export async function registerRoutes(
         escalationTier = 0;
       }
 
-      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty, escalationTier);
+      const variantSection = sessionVariantSection(scenario, session);
+      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
 
       const msgId = randomUUID();
       const customerMsg = transcriptMessageSchema.parse({
@@ -1035,8 +1052,14 @@ async function createScenarioSession(
   scenario: import("@shared/schema").Scenario,
 ) {
   let openingTranscript = "[]";
+  const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
+  const personaVariant = JSON.stringify(selected);
   try {
-    const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
+    const openingText = await getCustomerOpening(
+      personaCoreFor(scenario),
+      scenario.track,
+      buildPersonaVariantSection(selected)
+    );
     if (openingText) {
       const openingMsg = transcriptMessageSchema.parse({
         role: "customer",
@@ -1054,6 +1077,7 @@ async function createScenarioSession(
     userId,
     scenarioId: scenario.id,
     status: "in_progress",
+    personaVariant,
     transcript: openingTranscript,
     score: null,
     rubricScores: null,
@@ -1323,29 +1347,17 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
     const voiceEnabled = isVoiceUnlockedForDemo(sessionNumber, signup.email);
 
-    let openingTranscript = "[]";
-    try {
-      const openingText = await getCustomerOpening(scenario.customerPersona, scenario.track);
-      if (openingText) {
-        const openingMsg = transcriptMessageSchema.parse({
-          role: "customer",
-          content: openingText,
-          audioStatus: "none",
-          msgId: randomUUID(),
-          timestamp: new Date().toISOString(),
-        });
-        openingTranscript = JSON.stringify([openingMsg]);
-      }
-    } catch (err) {
-      console.error("Demo opening generation failed; starting empty:", err);
-    }
-
-    const session = await storage.createDemoSession({
+    // Create the session first so its id can seed a stable persona rendition.
+    // Demo sessions have no persona_variant column, so the rendition is
+    // re-derived deterministically from the session id (via resolveSessionVariant)
+    // on both the opening and every reply, keeping the customer consistent for
+    // the whole demo conversation while still varying replay to replay.
+    let session = await storage.createDemoSession({
       signupId: signup.id,
       email: signup.email,
       scenarioId: scenario.id,
       status: "in_progress",
-      transcript: openingTranscript,
+      transcript: "[]",
       score: null,
       rubricScores: null,
       feedback: null,
@@ -1355,6 +1367,25 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       ipAddress: ip,
       sessionNumber,
     });
+
+    try {
+      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
+      const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
+      if (openingText) {
+        const openingMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: openingText,
+          audioStatus: "none",
+          msgId: randomUUID(),
+          timestamp: new Date().toISOString(),
+        });
+        session = (await storage.updateDemoSession(session.id, {
+          transcript: JSON.stringify([openingMsg]),
+        })) ?? session;
+      }
+    } catch (err) {
+      console.error("Demo opening generation failed; starting empty:", err);
+    }
 
     res.json({
       session: publicDemoSession(session),
@@ -1414,7 +1445,8 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       });
       transcript.push(consultantMsg);
 
-      const customerReplyText = await getCustomerReply(scenario.customerPersona, transcript, scenario.difficulty);
+      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
+      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
       const msgId = randomUUID();
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",

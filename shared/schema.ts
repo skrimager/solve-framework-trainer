@@ -88,7 +88,17 @@ export const scenarios = pgTable("scenarios", {
   // null for every non-real-estate / non-manufactured-housing scenario.
   transactionType: text("transaction_type"),
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
-  customerPersona: text("customer_persona").notNull(), // system prompt describing the simulated customer
+  customerPersona: text("customer_persona").notNull(), // LEGACY freeform system prompt. Retained for rollback; no longer used to build prompts once personaCore is populated (see server/persona.ts).
+  // Structured persona fields (replace the single freeform customerPersona for
+  // prompt construction). personaCore is the FIXED identity, situation, opening
+  // stance, and designed ideal-outcome behavior that never varies session to
+  // session. The three *Variants pools are JSON string arrays a per-session
+  // selection draws from so each replay feels different while the same core
+  // customer and ideal outcome are preserved (see selectPersonaVariant).
+  personaCore: text("persona_core").notNull().default(""), // fixed identity + situation + opening stance + ideal-outcome behavior
+  personalityVariants: text("personality_variants").notNull().default("[]"), // JSON string[]: personality / communication-style renditions
+  motivationVariants: text("motivation_variants").notNull().default("[]"), // JSON string[]: plausible primary motivation drivers
+  objectionPool: text("objection_pool").notNull().default("[]"), // JSON string[]: plausible objections a session draws a subset from
   gender: text("gender").notNull(), // 'male' | 'female' — single source of truth that must match the persona's avatar image; deterministically gates TTS voice selection so the heard voice can never be the wrong gender for the shown face
   difficulty: text("difficulty").notNull(), // 'beginner' | 'intermediate' | 'advanced'
   briefing: text("briefing").notNull().default(""), // consultant-facing setup: the setting + any technical terms shown before the role-play starts
@@ -108,6 +118,12 @@ export const sessions = pgTable("sessions", {
   userId: integer("user_id").notNull(),
   scenarioId: integer("scenario_id").notNull(),
   status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed'
+  // The per-session persona variant chosen when this session started (JSON:
+  // {personality, motivation, objections[]}). Stored resolved so every turn of
+  // this session reconstructs the exact same customer, while a different session
+  // for the same scenario gets a different rendition. Null for legacy rows and
+  // scenarios that carry no variant pools (those fall back to the fixed core).
+  personaVariant: text("persona_variant"),
   transcript: text("transcript").notNull().default("[]"), // JSON array of {role, content, audioUrl?}
   score: integer("score"), // 0-100 overall, set on completion
   rubricScores: text("rubric_scores"), // JSON: per-dimension scores, set on completion
