@@ -25,6 +25,7 @@ import {
   Users,
   ListChecks,
   Trophy,
+  Flame,
   LogOut,
   ArrowLeft,
 } from "lucide-react";
@@ -85,6 +86,13 @@ type DashboardStats = {
   }[];
   levelDistribution: { tier: string; count: number }[];
   verticalBreakdown: { vertical: string; count: number }[];
+  streaksAndRankings: {
+    id: number;
+    displayName: string;
+    streak: number;
+    rank: number | null;
+    outOf: number;
+  }[];
   totals: { completed: number; inProgress: number };
 };
 
@@ -111,7 +119,7 @@ export default function Dashboard() {
     refetchInterval: (query) => (officeActive(query.state.data as Office | undefined) ? false : 4000),
   });
 
-  const { data: stats, isLoading: statsLoading } = useQuery<DashboardStats>({
+  const { data: stats, isLoading: statsLoading, isError: statsError } = useQuery<DashboardStats>({
     queryKey: [`/api/manager/dashboard-stats?requesterId=${user?.id}`],
     enabled: !!user,
   });
@@ -217,6 +225,7 @@ export default function Dashboard() {
             <DashboardSection
               stats={stats}
               loading={statsLoading}
+              locked={statsError}
               office={office}
               isManager={user?.role === "manager"}
             />
@@ -224,8 +233,8 @@ export default function Dashboard() {
           {section === "team" && (
             <TeamSection office={office} isManager={user?.role === "manager"} userId={user?.id} officeId={user?.officeId} />
           )}
-          {section === "scenarios" && <ScenariosSection stats={stats} loading={statsLoading} />}
-          {section === "leaderboard" && <LeaderboardSection stats={stats} loading={statsLoading} full />}
+          {section === "scenarios" && <ScenariosSection stats={stats} loading={statsLoading} locked={statsError} />}
+          {section === "leaderboard" && <LeaderboardSection stats={stats} loading={statsLoading} locked={statsError} full />}
         </main>
       </div>
     </div>
@@ -278,6 +287,23 @@ function EmptyState({ message, testId }: { message: string; testId?: string }) {
   );
 }
 
+// Shown when the dashboard-stats endpoint reports the office is not entitled to
+// the paid Manager Dashboard add-on (HTTP 403). A calm informational state, not
+// a hard error or a pushy upsell.
+function AddOnLocked() {
+  return (
+    <Panel testId="panel-dashboard-locked">
+      <div className="py-8 text-center">
+        <p className="text-sm font-medium text-white">Manager Dashboard add-on not active</p>
+        <p className="mx-auto mt-1 max-w-md text-xs text-white/50">
+          Your office does not currently include the Manager Dashboard add-on, so team analytics,
+          streaks, and rankings are unavailable.
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
 function InitialsAvatar({ name, highlight }: { name: string; highlight?: boolean }) {
   const initials = name
     .split(/\s+/)
@@ -321,14 +347,17 @@ function chartTooltipStyle() {
 function DashboardSection({
   stats,
   loading,
+  locked,
   office,
   isManager,
 }: {
   stats?: DashboardStats;
   loading: boolean;
+  locked?: boolean;
   office?: Office;
   isManager: boolean;
 }) {
+  if (locked) return <AddOnLocked />;
   if (loading || !stats) {
     return (
       <div className="space-y-6">
@@ -460,7 +489,53 @@ function DashboardSection({
           <VerticalBreakdown data={stats.verticalBreakdown} />
         </Panel>
       </div>
+
+      {/* 7. Streaks & rankings */}
+      <Panel
+        title="Streaks & rankings"
+        caption="Each consultant's current practice streak and office rank"
+        testId="panel-streaks-rankings"
+      >
+        <StreaksAndRankings rows={stats.streaksAndRankings} />
+      </Panel>
     </div>
+  );
+}
+
+function StreaksAndRankings({ rows }: { rows: DashboardStats["streaksAndRankings"] }) {
+  if (rows.length === 0) {
+    return <EmptyState message="No consultants have joined yet" testId="empty-streaks-rankings" />;
+  }
+  return (
+    <ul className="space-y-2" data-testid="list-streaks-rankings">
+      {rows.map((r) => (
+        <li
+          key={r.id}
+          className="flex items-center gap-3 rounded-lg px-3 py-2"
+          style={{ backgroundColor: PANEL }}
+          data-testid={`streaks-row-${r.id}`}
+        >
+          <span
+            className="w-10 shrink-0 text-center text-sm font-bold"
+            style={{ color: r.rank === 1 ? ORANGE_LIGHT : "rgba(255,255,255,0.5)" }}
+          >
+            {r.rank != null ? `#${r.rank}` : "-"}
+          </span>
+          <InitialsAvatar name={r.displayName} highlight={r.rank === 1} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-white">{r.displayName}</p>
+            <p className="text-xs text-white/45">Rank {r.rank != null ? `${r.rank} of ${r.outOf}` : "unranked"}</p>
+          </div>
+          <span
+            className="flex items-center gap-1.5 text-sm font-semibold shrink-0"
+            style={{ color: r.streak > 0 ? ORANGE_LIGHT : "rgba(255,255,255,0.4)" }}
+          >
+            <Flame className="h-4 w-4" aria-hidden="true" />
+            {r.streak} {r.streak === 1 ? "day" : "days"}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -580,9 +655,10 @@ function TeamSection({
 // Scenarios section: real practice distribution across verticals.
 // ---------------------------------------------------------------------------
 
-function ScenariosSection({ stats, loading }: { stats?: DashboardStats; loading: boolean }) {
+function ScenariosSection({ stats, loading, locked }: { stats?: DashboardStats; loading: boolean; locked?: boolean }) {
   const { data: scenarios } = useQuery<Scenario[]>({ queryKey: ["/api/scenarios"] });
 
+  if (locked) return <AddOnLocked />;
   if (loading || !stats) {
     return <Skeleton className="h-72 rounded-xl" />;
   }
@@ -644,7 +720,8 @@ function ScenariosSection({ stats, loading }: { stats?: DashboardStats; loading:
 // Leaderboard section: full ranked list.
 // ---------------------------------------------------------------------------
 
-function LeaderboardSection({ stats, loading }: { stats?: DashboardStats; loading: boolean; full?: boolean }) {
+function LeaderboardSection({ stats, loading, locked }: { stats?: DashboardStats; loading: boolean; locked?: boolean; full?: boolean }) {
+  if (locked) return <AddOnLocked />;
   if (loading || !stats) {
     return <Skeleton className="h-72 rounded-xl" />;
   }

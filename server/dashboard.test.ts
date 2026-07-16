@@ -4,7 +4,14 @@ import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerManagerDashboardRoutes, buildDashboardStats } from "./routes";
+import {
+  registerManagerDashboardRoutes,
+  registerConsultantDashboardRoutes,
+  buildDashboardStats,
+  computeStreak,
+  buildConsultantDashboard,
+  STREAK_QUALIFYING_SCORE,
+} from "./routes";
 import type { User, Session, Scenario } from "@shared/schema";
 
 // ===========================================================================
@@ -223,6 +230,8 @@ describe("manager dashboard HTTP endpoint", () => {
       const ids = users.filter((u) => u.officeId === officeId).map((u) => u.id);
       return sessions.filter((s) => ids.includes(s.userId));
     };
+    // The office holds the paid Manager Dashboard add-on by default.
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: "si_dash" });
   });
 
   test("requires a requesterId", async () => {
@@ -246,5 +255,189 @@ describe("manager dashboard HTTP endpoint", () => {
     const body = await res.json();
     assert.equal(body.kpis.consultantCount, 3);
     assert.ok(Array.isArray(body.leaderboard));
+    assert.ok(Array.isArray(body.streaksAndRankings));
+  });
+
+  test("rejects an office without the Manager Dashboard add-on", async () => {
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    assert.equal(res.status, 403);
+  });
+
+  test("a demo manager sees full stats even when the office lacks the add-on", async () => {
+    // The founder's live sales-demo office is billing-active but never bought the
+    // dashboard add-on (managerItemId null). Its demo manager must still get 200.
+    users.find((u) => u.id === 1)!.isDemoAccount = true;
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.kpis.consultantCount, 3);
+    assert.ok(Array.isArray(body.streaksAndRankings));
+  });
+});
+
+// ===========================================================================
+// Practice streaks + consultant mini dashboard.
+// ===========================================================================
+
+describe("computeStreak", () => {
+  // Fixed "now" so the UTC-day math is deterministic. Today is 2026-03-10.
+  const now = new Date("2026-03-10T12:00:00.000Z");
+  const day = (d: string, score: number | null, id: number) =>
+    mkSession({ id, userId: 3, scenarioId: 10, score, completedAt: `${d}T09:00:00.000Z` });
+
+  test("a consultant with no sessions has streak 0", () => {
+    assert.equal(computeStreak([], now), 0);
+  });
+
+  test("a qualifying session today gives a streak of at least 1", () => {
+    const streak = computeStreak([day("2026-03-10", 80, 1)], now);
+    assert.ok(streak >= 1);
+    assert.equal(streak, 1);
+  });
+
+  test("consecutive qualifying days stack", () => {
+    const sessions = [
+      day("2026-03-10", 90, 1),
+      day("2026-03-09", 75, 2),
+      day("2026-03-08", 100, 3),
+    ];
+    assert.equal(computeStreak(sessions, now), 3);
+  });
+
+  test("a missed day resets the streak", () => {
+    // Qualifying today and two days ago, but nothing yesterday (2026-03-09):
+    // the gap breaks the run, so only today counts.
+    const sessions = [day("2026-03-10", 90, 1), day("2026-03-08", 90, 2)];
+    assert.equal(computeStreak(sessions, now), 1);
+  });
+
+  test("only yesterday still counts today (grace window)", () => {
+    assert.equal(computeStreak([day("2026-03-09", 90, 1)], now), 1);
+  });
+
+  test("a full passed day with no practice resets to 0", () => {
+    // Most recent qualifying day is two days ago: both today and yesterday
+    // passed with no qualifying session.
+    assert.equal(computeStreak([day("2026-03-08", 90, 1)], now), 0);
+  });
+
+  test("a session scored below the qualifying bar does not count", () => {
+    assert.equal(STREAK_QUALIFYING_SCORE, 70);
+    assert.equal(computeStreak([day("2026-03-10", 69, 1)], now), 0);
+    // The bar is inclusive: exactly 70 qualifies.
+    assert.equal(computeStreak([day("2026-03-10", 70, 2)], now), 1);
+  });
+
+  test("multiple qualifying sessions on one day count once", () => {
+    const sessions = [day("2026-03-10", 80, 1), day("2026-03-10", 95, 2)];
+    assert.equal(computeStreak(sessions, now), 1);
+  });
+
+  test("in-progress or unscored sessions never contribute", () => {
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: null, status: "in_progress", completedAt: null, createdAt: "2026-03-10T09:00:00.000Z" }),
+      mkSession({ id: 2, userId: 3, scenarioId: 10, score: null, status: "completed", completedAt: "2026-03-10T09:00:00.000Z" }),
+    ];
+    assert.equal(computeStreak(sessions, now), 0);
+  });
+});
+
+describe("buildConsultantDashboard", () => {
+  const now = new Date("2026-03-05T12:00:00.000Z");
+
+  test("returns streak, peer rank, and certification progress", () => {
+    const { users, sessions, scenarios } = fixtures();
+    const alice = users.find((u) => u.username === "alice")!;
+    const payload = buildConsultantDashboard(alice, users, sessions, scenarios, now);
+    assert.equal(payload.entitled, true);
+    // Alice has a qualifying (90) session on 2026-03-01 but nothing 03-02..03-05,
+    // so multiple days have passed with no practice: streak resets to 0.
+    assert.equal(payload.streak.current, 0);
+    assert.equal(payload.streak.qualifyingScore, 70);
+    // Ranked by average score: Bob (100) is #1, Alice (85) is #2 of three consultants.
+    assert.equal(payload.rank.position, 2);
+    assert.equal(payload.rank.outOf, 3);
+    assert.equal(payload.rank.metric, "averageScore");
+    assert.equal(payload.certification.level, "beginner");
+    assert.equal(payload.certification.nextLevel, "intermediate");
+    assert.equal(payload.certification.requiredSessions, 5);
+  });
+
+  test("a consultant with a fresh qualifying session shows a live streak", () => {
+    const { users, scenarios } = fixtures();
+    const alice = users.find((u) => u.username === "alice")!;
+    const todaySession = mkSession({ id: 900, userId: alice.id, scenarioId: 10, score: 88, completedAt: "2026-03-05T08:00:00.000Z" });
+    const payload = buildConsultantDashboard(alice, users, [todaySession], scenarios, now);
+    assert.equal(payload.streak.current, 1);
+  });
+});
+
+describe("consultant dashboard HTTP endpoint", () => {
+  let server: Server;
+  let baseUrl: string;
+  let users: User[];
+  let sessions: Session[];
+  let scenarios: Scenario[];
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerConsultantDashboardRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  after(() => {
+    server?.close();
+  });
+
+  beforeEach(() => {
+    const f = fixtures();
+    users = f.users;
+    sessions = f.sessions;
+    scenarios = f.scenarios;
+    (storage as any).getUser = async (id: number) => users.find((u) => u.id === id);
+    (storage as any).listScenarios = async () => scenarios;
+    (storage as any).listUsersByOffice = async (officeId: number) => users.filter((u) => u.officeId === officeId);
+    (storage as any).listSessionsByOffice = async (officeId: number) => {
+      const ids = users.filter((u) => u.officeId === officeId).map((u) => u.id);
+      return sessions.filter((s) => ids.includes(s.userId));
+    };
+    // The office holds the paid Manager Dashboard add-on by default.
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: "si_dash" });
+  });
+
+  test("an entitled office returns the full payload", async () => {
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, true);
+    assert.ok(body.streak);
+    assert.ok(body.rank);
+  });
+
+  test("a non-demo office without the add-on gets the clean locked-out empty state", async () => {
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, false);
+    assert.equal(body.streak, undefined, "no streak data leaks when not entitled");
+  });
+
+  test("a demo consultant is entitled even when the office lacks the add-on", async () => {
+    users.find((u) => u.id === 3)!.isDemoAccount = true;
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, true);
+    assert.ok(body.streak);
   });
 });

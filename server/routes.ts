@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   normalizeTrack,
   drawExam,
@@ -862,6 +862,8 @@ export async function registerRoutes(
   registerManagerRosterRoutes(app);
 
   registerManagerDashboardRoutes(app);
+
+  registerConsultantDashboardRoutes(app);
 
   registerPublicDemoDashboardRoute(app);
 
@@ -2335,6 +2337,167 @@ function consultantTier(user: User): string {
   return (TIER_ORDER as readonly string[]).includes(lvl) ? lvl : "Beginner";
 }
 
+// ===========================================================================
+// Practice streaks + peer rankings (gamified layer). Both are DERIVED from the
+// same real session/score data the roster and manager dashboard already read,
+// so they can never disagree with those views. Gated behind the paid Manager
+// Dashboard add-on (office.managerItemId) at the route layer.
+// ===========================================================================
+
+// A session counts toward a streak day only if it INDIVIDUALLY scored at or
+// above this bar. This is deliberately its OWN threshold, separate from the
+// 85-point certification-advancement bar (ADVANCE_THRESHOLD): a "keep showing
+// up" streak is easier to sustain than certification progress on purpose.
+export const STREAK_QUALIFYING_SCORE = 70;
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function utcDayKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+// Current practice streak: the number of consecutive calendar days (server/UTC
+// day) ending today on which the consultant completed at least one session
+// scored >= STREAK_QUALIFYING_SCORE. Multiple qualifying sessions on one day
+// count once. Today gets a grace window: if there is no qualifying session yet
+// today but there was one yesterday, the streak is still alive (the current day
+// has not fully "passed"). A calendar day that passes with no qualifying
+// session resets the streak to 0.
+export function computeStreak(
+  sessions: Pick<Session, "status" | "score" | "completedAt" | "createdAt">[],
+  now: Date = new Date(),
+): number {
+  const qualifyingDays = new Set<string>();
+  for (const s of sessions) {
+    if (s.status !== "completed" || s.score === null || (s.score as number) < STREAK_QUALIFYING_SCORE) continue;
+    const when = s.completedAt ?? s.createdAt;
+    if (!when) continue;
+    qualifyingDays.add(when.slice(0, 10));
+  }
+  if (qualifyingDays.size === 0) return 0;
+
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  let cursor = today;
+  if (!qualifyingDays.has(utcDayKey(cursor))) {
+    // Grace: the current day may simply not be done yet, so fall back to
+    // yesterday. If neither today nor yesterday qualifies, a full day has
+    // passed with no practice and the streak has reset.
+    cursor = new Date(cursor.getTime() - ONE_DAY_MS);
+    if (!qualifyingDays.has(utcDayKey(cursor))) return 0;
+  }
+
+  let streak = 0;
+  while (qualifyingDays.has(utcDayKey(cursor))) {
+    streak += 1;
+    cursor = new Date(cursor.getTime() - ONE_DAY_MS);
+  }
+  return streak;
+}
+
+function groupSessionsByUser(sessions: Session[]): Map<number, Session[]> {
+  const byUser = new Map<number, Session[]>();
+  for (const s of sessions) {
+    const list = byUser.get(s.userId) ?? [];
+    list.push(s);
+    byUser.set(s.userId, list);
+  }
+  return byUser;
+}
+
+// Peer ranking metric (documented once, used by BOTH the consultant mini
+// dashboard and the manager Streaks & Rankings block so they always agree):
+// consultants are ranked by their AVERAGE score across completed, scored
+// sessions, highest first. A consultant with no scored sessions has a null
+// average and sorts to the bottom, but is still assigned a rank so "#12 of 12"
+// stays meaningful.
+export function rankConsultantsByAverageScore(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+): { id: number; averageScore: number | null }[] {
+  return consultants
+    .map((u) => {
+      const scored = (sessionsByUser.get(u.id) ?? []).filter(
+        (s) => s.status === "completed" && s.score !== null,
+      );
+      const averageScore = scored.length
+        ? scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length
+        : null;
+      return { id: u.id, averageScore };
+    })
+    .sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1));
+}
+
+// Pure builder for the consultant mini-dashboard payload, split out from the
+// route so it can be unit-tested with in-memory fixtures. Assumes entitlement
+// has already been checked by the caller (the route gates on managerItemId).
+export function buildConsultantDashboard(
+  user: User,
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  now: Date = new Date(),
+) {
+  const consultants = officeUsers.filter((u) => u.role === "consultant");
+  const sessionsByUser = groupSessionsByUser(officeSessions);
+  const mySessions = sessionsByUser.get(user.id) ?? [];
+
+  const ranking = rankConsultantsByAverageScore(consultants, sessionsByUser);
+  const position = ranking.findIndex((r) => r.id === user.id);
+
+  // Progress toward the next certification level on the consulting track. Reuses
+  // the exact advancement logic (scoresForTrackAtLevel/countQualifyingSessions)
+  // so this never disagrees with the scenarios-page banner. Read-only: it never
+  // triggers or alters advancement.
+  const level = user.currentLevel;
+  const scoresAtLevel = scoresForTrackAtLevel("consulting", level, mySessions, allScenarios);
+  const qualifyingSessions = Math.min(countQualifyingSessions(scoresAtLevel), REQUIRED_QUALIFYING_SESSIONS);
+  const levelIdx = (LEVEL_ORDER as readonly string[]).indexOf(level);
+  const nextLevel = levelIdx >= 0 && levelIdx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[levelIdx + 1] : null;
+
+  return {
+    entitled: true as const,
+    streak: {
+      current: computeStreak(mySessions, now),
+      qualifyingScore: STREAK_QUALIFYING_SCORE,
+    },
+    rank: {
+      // 1-based position among office consultants; null if this user is not a
+      // consultant (e.g. a manager viewing their own stats).
+      position: position === -1 ? null : position + 1,
+      outOf: consultants.length,
+      metric: "averageScore" as const,
+    },
+    certification: {
+      level,
+      nextLevel,
+      certified: user.consultingCertified,
+      qualifyingSessions,
+      requiredSessions: REQUIRED_QUALIFYING_SESSIONS,
+    },
+  };
+}
+
+// Manager Streaks & Rankings block: one row per consultant with their current
+// practice streak and peer rank, sorted by rank (best first). Same ranking
+// metric as the consultant view (see rankConsultantsByAverageScore).
+export function buildStreaksAndRankings(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  now: Date,
+) {
+  const ranking = rankConsultantsByAverageScore(consultants, sessionsByUser);
+  const rankById = new Map(ranking.map((r, i) => [r.id, i + 1]));
+  return consultants
+    .map((u) => ({
+      id: u.id,
+      displayName: u.displayName,
+      streak: computeStreak(sessionsByUser.get(u.id) ?? [], now),
+      rank: rankById.get(u.id) ?? null,
+      outOf: consultants.length,
+    }))
+    .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+}
+
 // Pure aggregation of the manager dashboard payload, split out from the route so
 // it can be unit-tested with in-memory fixtures. `now` is injectable so the
 // "this period" window is deterministic in tests.
@@ -2447,6 +2610,11 @@ export function buildDashboardStats(
     count: consultants.filter((u) => consultantTier(u) === tier).length,
   }));
 
+  // Streaks & rankings: each consultant's current practice streak and peer rank.
+  // Only reachable once the route has confirmed the office holds the paid
+  // Manager Dashboard add-on, so no additional gating is needed here.
+  const streaksAndRankings = buildStreaksAndRankings(consultants, sessionsByUser, now);
+
   const vertTotals = new Map<string, number>();
   for (const s of completed) {
     const scenario = scenarioById.get(s.scenarioId);
@@ -2471,6 +2639,7 @@ export function buildDashboardStats(
     leaderboard,
     levelDistribution,
     verticalBreakdown,
+    streaksAndRankings,
     totals: {
       completed: completed.length,
       inProgress: officeSessions.length - completed.length,
@@ -2492,6 +2661,17 @@ export function registerManagerDashboardRoutes(app: Express): void {
       return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
     }
 
+    // The manager dashboard itself is the paid add-on: an office without the
+    // Manager Dashboard line (office.managerItemId unset) is not entitled to it.
+    // This route previously had NO such check (role-only); see PR notes.
+    // Demo accounts bypass this gate, matching checkSeatAccess: the founder's
+    // live sales-demo office is billing-active but never bought the add-on, and
+    // must keep showing the full dashboard.
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
     const [officeUsers, officeSessions, allScenarios] = await Promise.all([
       storage.listUsersByOffice(requester.officeId),
       storage.listSessionsByOffice(requester.officeId),
@@ -2499,6 +2679,36 @@ export function registerManagerDashboardRoutes(app: Express): void {
     ]);
 
     res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios));
+  });
+}
+
+export function registerConsultantDashboardRoutes(app: Express): void {
+  // Consultant-facing gamified mini dashboard: current practice streak, peer
+  // rank, and progress toward the next certification level. Gated behind the
+  // paid Manager Dashboard add-on (office.managerItemId): when the office has
+  // not paid, we return a clean { entitled: false } empty state and leak NO
+  // streak/ranking data, so the client can omit the widget entirely.
+  // Demo accounts bypass this gate, matching checkSeatAccess: the founder's
+  // live sales-demo office is billing-active but never bought the add-on, and
+  // must keep showing the widget.
+  app.get("/api/consultant/dashboard", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) return res.status(400).json({ message: "requesterId is required" });
+    const user = await storage.getUser(requesterId);
+    if (!user) return res.status(401).json({ message: "Unknown user" });
+
+    const office = await storage.getOffice(user.officeId);
+    if (!user.isDemoAccount && !office?.managerItemId) {
+      return res.json({ entitled: false });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(user.officeId),
+      storage.listSessionsByOffice(user.officeId),
+      storage.listScenarios(),
+    ]);
+
+    res.json(buildConsultantDashboard(user, officeUsers, officeSessions, allScenarios));
   });
 }
 

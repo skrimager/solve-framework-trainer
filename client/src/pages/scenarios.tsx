@@ -9,6 +9,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
+import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
 import { PlayCircle, Award, Handshake, ShieldAlert, Check } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
@@ -185,6 +186,9 @@ export default function Scenarios() {
   return (
     <AppShell title="Training conversations">
       <div className="space-y-4">
+        {/* Gamified practice stats: streak, office rank, and certification
+            progress. Self-hides unless the office holds the paid dashboard add-on. */}
+        <PracticeStatsPanel />
         {/* Track picker — two distinct, separately-selectable cards (not a
             toggle). Each is its own square with its own icon, name, and
             description so Consulting and Leadership read as separate
