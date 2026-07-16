@@ -99,6 +99,13 @@
       "when": 1783106659000,
       "tag": "0013_lead_drip_emails",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1783106659500,
+      "tag": "0014_session_duration",
+      "breakpoints": true
     }
   ]
 }
