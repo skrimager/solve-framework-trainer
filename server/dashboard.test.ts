@@ -6,6 +6,7 @@ import type { Server } from "node:http";
 import { storage } from "./storage";
 import {
   registerManagerDashboardRoutes,
+  registerConsultantDashboardRoutes,
   buildDashboardStats,
   computeStreak,
   buildConsultantDashboard,
@@ -262,6 +263,18 @@ describe("manager dashboard HTTP endpoint", () => {
     const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
     assert.equal(res.status, 403);
   });
+
+  test("a demo manager sees full stats even when the office lacks the add-on", async () => {
+    // The founder's live sales-demo office is billing-active but never bought the
+    // dashboard add-on (managerItemId null). Its demo manager must still get 200.
+    users.find((u) => u.id === 1)!.isDemoAccount = true;
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.kpis.consultantCount, 3);
+    assert.ok(Array.isArray(body.streaksAndRankings));
+  });
 });
 
 // ===========================================================================
@@ -358,5 +371,73 @@ describe("buildConsultantDashboard", () => {
     const todaySession = mkSession({ id: 900, userId: alice.id, scenarioId: 10, score: 88, completedAt: "2026-03-05T08:00:00.000Z" });
     const payload = buildConsultantDashboard(alice, users, [todaySession], scenarios, now);
     assert.equal(payload.streak.current, 1);
+  });
+});
+
+describe("consultant dashboard HTTP endpoint", () => {
+  let server: Server;
+  let baseUrl: string;
+  let users: User[];
+  let sessions: Session[];
+  let scenarios: Scenario[];
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerConsultantDashboardRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  after(() => {
+    server?.close();
+  });
+
+  beforeEach(() => {
+    const f = fixtures();
+    users = f.users;
+    sessions = f.sessions;
+    scenarios = f.scenarios;
+    (storage as any).getUser = async (id: number) => users.find((u) => u.id === id);
+    (storage as any).listScenarios = async () => scenarios;
+    (storage as any).listUsersByOffice = async (officeId: number) => users.filter((u) => u.officeId === officeId);
+    (storage as any).listSessionsByOffice = async (officeId: number) => {
+      const ids = users.filter((u) => u.officeId === officeId).map((u) => u.id);
+      return sessions.filter((s) => ids.includes(s.userId));
+    };
+    // The office holds the paid Manager Dashboard add-on by default.
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: "si_dash" });
+  });
+
+  test("an entitled office returns the full payload", async () => {
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, true);
+    assert.ok(body.streak);
+    assert.ok(body.rank);
+  });
+
+  test("a non-demo office without the add-on gets the clean locked-out empty state", async () => {
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, false);
+    assert.equal(body.streak, undefined, "no streak data leaks when not entitled");
+  });
+
+  test("a demo consultant is entitled even when the office lacks the add-on", async () => {
+    users.find((u) => u.id === 3)!.isDemoAccount = true;
+    (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
+    const res = await fetch(`${baseUrl}/api/consultant/dashboard?requesterId=3`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.entitled, true);
+    assert.ok(body.streak);
   });
 });

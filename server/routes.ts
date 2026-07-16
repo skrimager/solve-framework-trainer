@@ -2664,8 +2664,11 @@ export function registerManagerDashboardRoutes(app: Express): void {
     // The manager dashboard itself is the paid add-on: an office without the
     // Manager Dashboard line (office.managerItemId unset) is not entitled to it.
     // This route previously had NO such check (role-only); see PR notes.
+    // Demo accounts bypass this gate, matching checkSeatAccess: the founder's
+    // live sales-demo office is billing-active but never bought the add-on, and
+    // must keep showing the full dashboard.
     const office = await storage.getOffice(requester.officeId);
-    if (!office?.managerItemId) {
+    if (!requester.isDemoAccount && !office?.managerItemId) {
       return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
     }
 
@@ -2685,6 +2688,9 @@ export function registerConsultantDashboardRoutes(app: Express): void {
   // paid Manager Dashboard add-on (office.managerItemId): when the office has
   // not paid, we return a clean { entitled: false } empty state and leak NO
   // streak/ranking data, so the client can omit the widget entirely.
+  // Demo accounts bypass this gate, matching checkSeatAccess: the founder's
+  // live sales-demo office is billing-active but never bought the add-on, and
+  // must keep showing the widget.
   app.get("/api/consultant/dashboard", async (req, res) => {
     const requesterId = Number(req.query.requesterId);
     if (!requesterId) return res.status(400).json({ message: "requesterId is required" });
@@ -2692,7 +2698,7 @@ export function registerConsultantDashboardRoutes(app: Express): void {
     if (!user) return res.status(401).json({ message: "Unknown user" });
 
     const office = await storage.getOffice(user.officeId);
-    if (!office?.managerItemId) {
+    if (!user.isDemoAccount && !office?.managerItemId) {
       return res.json({ entitled: false });
     }
 
