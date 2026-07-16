@@ -123,6 +123,10 @@ describe("manager roster HTTP endpoints", () => {
       return sessions.filter((s) => ids.includes(s.userId));
     };
     (storage as any).listSessionsByUser = async (userId: number) => sessions.filter((s) => s.userId === userId);
+    (storage as any).listIndustryCertificationsByUserIds = async () => [];
+    (storage as any).listIndustryCertificationsByUser = async () => [];
+    (storage as any).listAcademyCreditsByOffice = async () => [];
+    (storage as any).listAcademyCreditsByUser = async () => [];
   });
 
   // --- Authorization ---

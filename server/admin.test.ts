@@ -290,6 +290,7 @@ describe("admin + public HTTP routes", () => {
     };
     (storage as any).listUsersByOffice = async (officeId: number) =>
       users.filter((u) => u.officeId === officeId);
+    (storage as any).listAllAcademyCredits = async () => [];
     (storage as any).updateUser = async (id: number, patch: Partial<User>) => {
       const u = users.find((x) => x.id === id);
       if (!u) return undefined;

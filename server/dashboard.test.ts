@@ -232,6 +232,7 @@ describe("manager dashboard HTTP endpoint", () => {
     };
     // The office holds the paid Manager Dashboard add-on by default.
     (storage as any).getOffice = async (id: number) => ({ id, managerItemId: "si_dash" });
+    (storage as any).listAcademyCreditsByOffice = async () => [];
   });
 
   test("requires a requesterId", async () => {
