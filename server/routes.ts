@@ -2,7 +2,17 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import {
+  computeAwardableLevels,
+  countDistinctCertifiedVerticals,
+  isSeatCreditEligible,
+  officeEarnsCredits,
+  formatCents,
+  CREDIT_AMOUNT_CENTS,
+  LEVEL_LABELS,
+  type AcademyLevel,
+} from "./credits";
 import {
   normalizeTrack,
   drawExam,
@@ -262,7 +272,12 @@ export async function registerRoutes(
     try {
       const targetQty = (await storage.countPaidSeats(office.id)) + 1;
       await setSeatQuantity(office, targetQty);
-      const updated = await storage.updateUser(user.id, { seatActive: true });
+      // Stamp seat activation on first activation only so the 60-day credit
+      // eligibility window is measured from when the seat first went live.
+      const updated = await storage.updateUser(user.id, {
+        seatActive: true,
+        ...(user.seatActivatedAt ? {} : { seatActivatedAt: new Date().toISOString() }),
+      });
       await storage.updateOffice(office.id, { activeSeatCount: targetQty });
       res.json({ user: publicUser(updated!) });
     } catch (err: any) {
@@ -370,6 +385,9 @@ export async function registerRoutes(
       displayName,
       currentLevel: "beginner",
       seatActive,
+      // Stamp seat activation now so the 60-day credit-eligibility clock starts
+      // the moment the consultant's paid seat goes live.
+      seatActivatedAt: seatActive ? new Date().toISOString() : null,
     });
 
     res.json({ user: publicUser(user) });
@@ -690,6 +708,13 @@ export async function registerRoutes(
             track === "leadership" ? { leadershipLevel: nextLevel } : { currentLevel: nextLevel },
           );
         }
+
+        // Mirror the same advancement per-industry: record progress against the
+        // specific (track, vertical) this scenario belongs to, tracked
+        // independently from every other industry the consultant practices.
+        if (scenario?.vertical) {
+          await advanceIndustryCertification(user.id, track, scenario.vertical, allSessions, allScenarios);
+        }
       }
 
       res.json(updated);
@@ -791,14 +816,15 @@ export async function registerRoutes(
   app.get("/api/users/:userId/certification", async (req, res) => {
     const user = await storage.getUser(Number(req.params.userId));
     if (!user) return res.status(404).json({ message: "Not found" });
-    const [allSessions, allScenarios, attempts] = await Promise.all([
+    const [allSessions, allScenarios, attempts, industryCerts] = await Promise.all([
       storage.listSessionsByUser(user.id),
       storage.listScenarios(),
       storage.listCertificationAttemptsByUser(user.id),
+      storage.listIndustryCertificationsByUser(user.id),
     ]);
     const tracks: Track[] = ["consulting", "leadership"];
     const status = Object.fromEntries(
-      tracks.map((t) => [t, certStatusForTrack(user, t, allSessions, allScenarios, attempts)]),
+      tracks.map((t) => [t, certStatusForTrack(user, t, allSessions, allScenarios, attempts, industryCerts)]),
     );
     res.json(status);
   });
@@ -807,8 +833,9 @@ export async function registerRoutes(
   // bank. Requires the user to be exam-eligible (Advanced + 5 qualifying
   // Advanced sessions) and not already certified on that track.
   app.post("/api/certification/start", async (req, res) => {
-    const { userId, track: rawTrack } = req.body ?? {};
+    const { userId, track: rawTrack, vertical: rawVertical } = req.body ?? {};
     const track = normalizeTrack(rawTrack);
+    const vertical = typeof rawVertical === "string" && rawVertical.trim() ? rawVertical.trim() : null;
     const gate = await checkSeatAccess(Number(userId));
     if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
@@ -832,19 +859,37 @@ export async function registerRoutes(
       storage.listSessionsByUser(user.id),
       storage.listScenarios(),
     ]);
-    if (isTrackCertified(user, track)) {
-      return res.status(409).json({ message: "You are already certified on this track." });
-    }
-    const level = track === "leadership" ? user.leadershipLevel : user.currentLevel;
-    const advancedScores = scoresForTrackAtLevel(track, "advanced", allSessions, allScenarios);
-    if (!isExamEligible(level, advancedScores)) {
-      return res.status(403).json({ message: "You are not eligible for the certification exam yet." });
+    // Per-industry exam: when a vertical is supplied, eligibility and the
+    // already-certified check are scoped to that single industry (so a
+    // consultant can certify in several distinct verticals, which is what
+    // Cross-Industry credits require). Without a vertical we fall back to the
+    // legacy whole-track gate.
+    if (vertical) {
+      const industryCert = await storage.getIndustryCertification(user.id, track, vertical);
+      if (industryCert?.currentLevel === "certified") {
+        return res.status(409).json({ message: "You are already certified in this industry." });
+      }
+      const industryLevel = industryCert?.currentLevel ?? "beginner";
+      const advancedScores = scoresForVerticalAtLevel(track, vertical, "advanced", allSessions, allScenarios);
+      if (!isExamEligible(industryLevel, advancedScores)) {
+        return res.status(403).json({ message: "You are not eligible for the certification exam in this industry yet." });
+      }
+    } else {
+      if (isTrackCertified(user, track)) {
+        return res.status(409).json({ message: "You are already certified on this track." });
+      }
+      const level = track === "leadership" ? user.leadershipLevel : user.currentLevel;
+      const advancedScores = scoresForTrackAtLevel(track, "advanced", allSessions, allScenarios);
+      if (!isExamEligible(level, advancedScores)) {
+        return res.status(403).json({ message: "You are not eligible for the certification exam yet." });
+      }
     }
 
     const questionIds = drawExam(track, EXAM_QUESTION_COUNT);
     const attempt = await storage.createCertificationAttempt({
       userId: user.id,
       track,
+      vertical,
       startedAt: new Date().toISOString(),
       questionIds: JSON.stringify(questionIds),
       writtenScore: null,
@@ -858,6 +903,7 @@ export async function registerRoutes(
     res.json({
       attemptId: attempt.id,
       track,
+      vertical,
       credential: TRACK_CREDENTIAL[track],
       passMark: WRITTEN_PASS_CORRECT,
       total: EXAM_QUESTION_COUNT,
@@ -912,7 +958,7 @@ export async function registerRoutes(
         if (cap.blocked) {
           capBlockedMessage = blockedMessage(cap.resetDate);
         } else {
-          const scenario = await pickExpertScenario(track);
+          const scenario = await pickExpertScenario(track, attempt.vertical);
           if (scenario) {
             const session = await createScenarioSession(attempt.userId, scenario);
             scenarioSessionId = session.id;
@@ -979,8 +1025,9 @@ function certStatusForTrack(
   user: User,
   track: Track,
   allSessions: { scenarioId: number; status: string; score: number | null }[],
-  allScenarios: { id: number; track?: string | null; difficulty: string }[],
+  allScenarios: { id: number; track?: string | null; difficulty: string; vertical?: string | null }[],
   attempts: import("@shared/schema").CertificationAttempt[],
+  industryCerts: import("@shared/schema").IndustryCertification[] = [],
 ) {
   const level = track === "leadership" ? user.leadershipLevel : user.currentLevel;
   const advancedScores = scoresForTrackAtLevel(track, "advanced", allSessions, allScenarios);
@@ -1001,7 +1048,36 @@ function certStatusForTrack(
     qualifyingThreshold: ADVANCE_THRESHOLD,
     eligible,
     latestAttempt: latestAttempt ?? null,
+    industries: industryStatusForTrack(track, allSessions, allScenarios, industryCerts),
   };
+}
+
+// Per-industry certification breakdown for one track: one entry per vertical the
+// consultant has started or certified in, with its level, certified flag, and
+// whether that specific industry's exam is now unlocked. Powers the rep profile
+// and manager roster "started vs certified" per-industry view.
+function industryStatusForTrack(
+  track: Track,
+  allSessions: { scenarioId: number; status: string; score: number | null }[],
+  allScenarios: { id: number; track?: string | null; difficulty: string; vertical?: string | null }[],
+  industryCerts: import("@shared/schema").IndustryCertification[],
+) {
+  const rows = industryCerts.filter((c) => normalizeTrack(c.track) === track);
+  return rows
+    .map((row) => {
+      const advancedScores = scoresForVerticalAtLevel(track, row.vertical, "advanced", allSessions, allScenarios);
+      const certified = row.currentLevel === "certified";
+      return {
+        vertical: row.vertical,
+        level: row.currentLevel,
+        certified,
+        certifiedAt: row.certifiedAt ?? null,
+        qualifyingAdvancedSessions: countQualifyingSessions(advancedScores),
+        requiredSessions: REQUIRED_QUALIFYING_SESSIONS,
+        eligible: !certified && isExamEligible(row.currentLevel, advancedScores),
+      };
+    })
+    .sort((a, b) => a.vertical.localeCompare(b.vertical));
 }
 
 function isTrackCertified(user: User, track: Track): boolean {
@@ -1033,15 +1109,126 @@ async function finalizeCertificationScenario(
         ? { leadershipCertified: true, leadershipCertifiedAt: now }
         : { consultingCertified: true, consultingCertifiedAt: now },
     );
+    // Certification is earned in a specific industry: the vertical of the final
+    // expert scenario the consultant just passed. Record it against that
+    // (track, vertical), then re-check whether any SOLVE Success Investment
+    // credits are now earned (awarded automatically, in the same code path).
+    const vertical = await verticalForCertAttempt(attempt);
+    if (vertical) {
+      await certifyIndustry(attempt.userId, track, vertical, now);
+    }
+    await awardAcademyCreditsForUser(attempt.userId, new Date());
+  }
+}
+
+// The industry vertical a certification attempt certifies in: the vertical of the
+// scenario used for the attempt's final expert roleplay.
+async function verticalForCertAttempt(
+  attempt: import("@shared/schema").CertificationAttempt,
+): Promise<string | null> {
+  // Prefer the vertical the attempt was started for; fall back to the vertical of
+  // the final expert scenario (legacy attempts started before the column existed).
+  if (attempt.vertical) return attempt.vertical;
+  if (!attempt.scenarioSessionId) return null;
+  const session = await storage.getSession(attempt.scenarioSessionId);
+  if (!session) return null;
+  const scenario = await storage.getScenario(session.scenarioId);
+  return scenario?.vertical ?? null;
+}
+
+// Advance a consultant's per-industry certification progress for one (track,
+// vertical) after a practice session, mirroring the global level advancement but
+// scoped to that single vertical. Never touches an already-certified industry.
+async function advanceIndustryCertification(
+  userId: number,
+  track: string,
+  vertical: string,
+  allSessions: Session[],
+  allScenarios: Scenario[],
+): Promise<void> {
+  const existing = await storage.getIndustryCertification(userId, track, vertical);
+  const currentLevel = existing?.currentLevel ?? "beginner";
+  if (currentLevel === "certified") return;
+  const scores = scoresForVerticalAtLevel(track, vertical, currentLevel, allSessions, allScenarios);
+  const nextLevel = computeLevelAdvancement(currentLevel, scores);
+  if (existing) {
+    if (nextLevel) await storage.updateIndustryCertification(existing.id, { currentLevel: nextLevel });
+  } else {
+    // First practiced session in this industry: open a progress row so the rep
+    // profile can show "started" even before the first advancement.
+    await storage.createIndustryCertification({
+      userId,
+      track,
+      vertical,
+      currentLevel: nextLevel ?? "beginner",
+      certifiedAt: null,
+    });
+  }
+}
+
+// Mark a (track, vertical) as fully certified for a consultant, creating the
+// progress row if the exam was passed without any prior practice row.
+async function certifyIndustry(userId: number, track: string, vertical: string, now: string): Promise<void> {
+  const existing = await storage.getIndustryCertification(userId, track, vertical);
+  if (existing) {
+    await storage.updateIndustryCertification(existing.id, {
+      currentLevel: "certified",
+      certifiedAt: existing.certifiedAt ?? now,
+    });
+  } else {
+    await storage.createIndustryCertification({
+      userId,
+      track,
+      vertical,
+      currentLevel: "certified",
+      certifiedAt: now,
+    });
+  }
+}
+
+// Award any newly-earned SOLVE Success Investment credits for a consultant,
+// immediately after a certification event. Gated by the 60-day seat tenure rule
+// and by excluding the Apptix demo office. Levels are awarded strictly in
+// sequence (see computeAwardableLevels); the unique (userId, level) constraint is
+// the final guard against double-awarding under concurrent events.
+async function awardAcademyCreditsForUser(userId: number, now: Date): Promise<void> {
+  const user = await storage.getUser(userId);
+  if (!user) return;
+  if (!officeEarnsCredits(user.officeId)) return;
+  if (!isSeatCreditEligible(user.seatActivatedAt, now)) return;
+
+  const [industryCerts, existingCredits] = await Promise.all([
+    storage.listIndustryCertificationsByUser(userId),
+    storage.listAcademyCreditsByUser(userId),
+  ]);
+  const toAward = computeAwardableLevels({
+    consultingCertifiedVerticals: countDistinctCertifiedVerticals(industryCerts, "consulting"),
+    leadershipCertifiedVerticals: countDistinctCertifiedVerticals(industryCerts, "leadership"),
+    alreadyAwarded: existingCredits.map((c) => c.level),
+  });
+  for (const level of toAward) {
+    await storage.createAcademyCredit({
+      userId,
+      officeId: user.officeId,
+      level,
+      amountCents: CREDIT_AMOUNT_CENTS,
+      earnedAt: now.toISOString(),
+    });
   }
 }
 
 // Pick a random active Advanced-difficulty scenario for the given track to serve
 // as the certification's final expert roleplay. Reuses the existing scenario
 // pool rather than seeding a special one.
-async function pickExpertScenario(track: Track) {
+async function pickExpertScenario(track: Track, vertical?: string | null) {
   const all = await storage.listScenarios();
-  const pool = all.filter((s) => s.active && scenarioTrack(s.track) === track && s.difficulty === "advanced");
+  let pool = all.filter((s) => s.active && scenarioTrack(s.track) === track && s.difficulty === "advanced");
+  if (vertical) {
+    const scoped = pool.filter((s) => (s.vertical ?? null) === vertical);
+    // If the industry has no advanced scenario of its own, fall back to the
+    // full track pool rather than blocking certification.
+    if (scoped.length > 0) pool = scoped;
+  }
   if (pool.length === 0) return undefined;
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -1813,8 +2000,22 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   });
 
   app.get("/api/admin/sales", requireAdmin, async (req, res) => {
-    const allOffices = await storage.listOffices();
-    const { rows, totalMrr, activeOffices } = summarizeSales(allOffices);
+    const [allOffices, allCredits] = await Promise.all([
+      storage.listOffices(),
+      storage.listAllAcademyCredits(),
+    ]);
+    const { rows: baseRows, totalMrr, activeOffices } = summarizeSales(allOffices);
+    const creditCentsByOffice = new Map<number, number>();
+    for (const c of allCredits) {
+      creditCentsByOffice.set(c.officeId, (creditCentsByOffice.get(c.officeId) ?? 0) + c.amountCents);
+    }
+    // Enrich each office row with its total earned SOLVE Success Investment
+    // credit (sum of academy_credits.amountCents). Read-only; touches no billing.
+    const rows = baseRows.map((r) => {
+      const academyCreditCents = creditCentsByOffice.get(r.officeId) ?? 0;
+      return { ...r, academyCreditCents, academyCreditDisplay: formatCents(academyCreditCents) };
+    });
+    const totalAcademyCreditCents = Array.from(creditCentsByOffice.values()).reduce((sum, c) => sum + c, 0);
     const csvRows = rows.map((r) => ({
       officeId: r.officeId,
       officeName: r.officeName,
@@ -1823,6 +2024,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       seatsMrr: r.seatsMrr,
       managerMrr: r.managerMrr,
       mrr: r.mrr,
+      academyCreditCents: r.academyCreditCents,
     }));
     if (req.query.format === "csv") {
       return sendData(req, res, "sales.csv", [
@@ -1833,9 +2035,10 @@ export function registerPublicAndAdminRoutes(app: Express): void {
         { key: "seatsMrr", header: "Seat MRR" },
         { key: "managerMrr", header: "Manager MRR" },
         { key: "mrr", header: "MRR" },
+        { key: "academyCreditCents", header: "Academy Credit (cents)" },
       ], csvRows);
     }
-    res.json({ rows, totalMrr, activeOffices });
+    res.json({ rows, totalMrr, activeOffices, totalAcademyCreditCents, totalAcademyCreditDisplay: formatCents(totalAcademyCreditCents) });
   });
 
   // Grant an office permanent free "demo" access with zero Stripe involvement —
@@ -2323,6 +2526,8 @@ function buildConsultantSummary(
   user: User,
   userSessions: Session[],
   allScenarios: Scenario[],
+  industryCerts: import("@shared/schema").IndustryCertification[] = [],
+  academyCredits: import("@shared/schema").AcademyCredit[] = [],
 ) {
   const completed = userSessions.filter((s) => s.status === "completed");
   const scored = completed.filter((s) => s.score !== null);
@@ -2364,7 +2569,54 @@ function buildConsultantSummary(
     qualifyingSessionsAtCurrentTier,
     requiredQualifyingSessions: REQUIRED_QUALIFYING_SESSIONS,
     lastSessionDate,
+    industries: consultantIndustryBreakdown(industryCerts),
+    academyLevel: highestAcademyLevel(academyCredits),
+    academyRankLabel: academyRankLabel(academyCredits),
+    academyCreditCents: sumCreditCents(academyCredits),
   };
+}
+
+// Group a consultant's per-industry certification rows by track into a compact
+// {started, certified} breakdown for the manager roster.
+function consultantIndustryBreakdown(
+  industryCerts: import("@shared/schema").IndustryCertification[],
+) {
+  const byTrack = (track: Track) => {
+    const rows = industryCerts.filter((c) => normalizeTrack(c.track) === track);
+    return {
+      started: rows
+        .map((r) => ({ vertical: r.vertical, level: r.currentLevel, certified: r.currentLevel === "certified" }))
+        .sort((a, b) => a.vertical.localeCompare(b.vertical)),
+      certifiedCount: rows.filter((r) => r.currentLevel === "certified").length,
+    };
+  };
+  return { consulting: byTrack("consulting"), leadership: byTrack("leadership") };
+}
+
+// The highest Academy level a consultant has earned (their rank), or 0 if none.
+function highestAcademyLevel(academyCredits: import("@shared/schema").AcademyCredit[]): number {
+  return academyCredits.reduce((max, c) => Math.max(max, c.level), 0);
+}
+
+// The display label for a consultant's Academy rank (highest earned level), or null.
+function academyRankLabel(academyCredits: import("@shared/schema").AcademyCredit[]): string | null {
+  const level = highestAcademyLevel(academyCredits);
+  return level >= 1 ? LEVEL_LABELS[level as AcademyLevel] : null;
+}
+
+function sumCreditCents(academyCredits: import("@shared/schema").AcademyCredit[]): number {
+  return academyCredits.reduce((sum, c) => sum + c.amountCents, 0);
+}
+
+function groupBy<T, K>(items: T[], keyOf: (item: T) => K): Map<K, T[]> {
+  const map = new Map<K, T[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    const list = map.get(key) ?? [];
+    list.push(item);
+    map.set(key, list);
+  }
+  return map;
 }
 
 // Authorize a manager-roster request: the requester must exist, be a manager or
@@ -2400,16 +2652,32 @@ export function registerManagerRosterRoutes(app: Express): void {
       storage.listScenarios(),
     ]);
 
+    const consultantIds = officeUsers.filter((u) => u.role === "consultant").map((u) => u.id);
+    const [officeIndustryCerts, officeCredits] = await Promise.all([
+      storage.listIndustryCertificationsByUserIds(consultantIds),
+      storage.listAcademyCreditsByOffice(officeId),
+    ]);
+
     const sessionsByUser = new Map<number, Session[]>();
     for (const s of officeSessions) {
       const list = sessionsByUser.get(s.userId) ?? [];
       list.push(s);
       sessionsByUser.set(s.userId, list);
     }
+    const industryCertsByUser = groupBy(officeIndustryCerts, (c) => c.userId);
+    const creditsByUser = groupBy(officeCredits, (c) => c.userId);
 
     const consultants = officeUsers
       .filter((u) => u.role === "consultant")
-      .map((u) => buildConsultantSummary(u, sessionsByUser.get(u.id) ?? [], allScenarios));
+      .map((u) =>
+        buildConsultantSummary(
+          u,
+          sessionsByUser.get(u.id) ?? [],
+          allScenarios,
+          industryCertsByUser.get(u.id) ?? [],
+          creditsByUser.get(u.id) ?? [],
+        ),
+      );
 
     res.json(consultants);
   });
@@ -2428,9 +2696,11 @@ export function registerManagerRosterRoutes(app: Express): void {
       return res.status(404).json({ message: "Consultant not found in this office" });
     }
 
-    const [userSessions, allScenarios] = await Promise.all([
+    const [userSessions, allScenarios, targetIndustryCerts, targetCredits] = await Promise.all([
       storage.listSessionsByUser(userId),
       storage.listScenarios(),
+      storage.listIndustryCertificationsByUser(userId),
+      storage.listAcademyCreditsByUser(userId),
     ]);
     const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
 
@@ -2460,7 +2730,7 @@ export function registerManagerRosterRoutes(app: Express): void {
       .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt));
 
     res.json({
-      consultant: buildConsultantSummary(target, userSessions, allScenarios),
+      consultant: buildConsultantSummary(target, userSessions, allScenarios, targetIndustryCerts, targetCredits),
       sessions,
     });
   });
@@ -2679,6 +2949,7 @@ export function buildDashboardStats(
   officeSessions: Session[],
   allScenarios: Scenario[],
   now: Date = new Date(),
+  academyCredits: import("@shared/schema").AcademyCredit[] = [],
 ) {
   const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
   const consultants = officeUsers.filter((u) => u.role === "consultant");
@@ -2817,6 +3088,14 @@ export function buildDashboardStats(
       completed: completed.length,
       inProgress: officeSessions.length - completed.length,
     },
+    // SOLVE Success Investment credits earned by this office (sum of all earned
+    // credit rows). "available" is simply the total earned: there is no
+    // spend-down ledger, so earned == available.
+    academyCredits: {
+      totalCents: academyCredits.reduce((sum, c) => sum + c.amountCents, 0),
+      availableCents: academyCredits.reduce((sum, c) => sum + c.amountCents, 0),
+      display: formatCents(academyCredits.reduce((sum, c) => sum + c.amountCents, 0)),
+    },
   };
 }
 
@@ -2845,13 +3124,14 @@ export function registerManagerDashboardRoutes(app: Express): void {
       return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
     }
 
-    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+    const [officeUsers, officeSessions, allScenarios, officeCredits] = await Promise.all([
       storage.listUsersByOffice(requester.officeId),
       storage.listSessionsByOffice(requester.officeId),
       storage.listScenarios(),
+      storage.listAcademyCreditsByOffice(requester.officeId),
     ]);
 
-    res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios));
+    res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios, new Date(), officeCredits));
   });
 }
 
