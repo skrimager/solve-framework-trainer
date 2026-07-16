@@ -302,9 +302,18 @@ export function isVoiceUnlockedForDemo(sessionNumber: number, email?: string): b
 // and ~120k more) come from the maintained open-source `disposable-email-domains`
 // package so the list updates independently of this code. Loaded once via a
 // runtime require (the package ships a JSON array) into a Set for O(1) lookups.
-const require = createRequire(import.meta.url);
+//
+// This file runs in two different module contexts: real ESM in dev (via tsx,
+// where import.meta.url is set and there is no ambient `require`), and
+// esbuild-bundled CJS in production (where the bundle format flips this file
+// to CommonJS, so `require` is a real global but import.meta.url is
+// undefined and createRequire would throw). Pick whichever is actually
+// available at runtime instead of assuming one mode.
+declare const require: NodeRequire | undefined;
+const requireFn: NodeRequire =
+  typeof require !== "undefined" ? require : createRequire(import.meta.url);
 const DISPOSABLE_DOMAINS: Set<string> = new Set(
-  (require("disposable-email-domains") as string[]).map((d) => d.toLowerCase()),
+  (requireFn("disposable-email-domains") as string[]).map((d) => d.toLowerCase()),
 );
 
 // True if the email's domain is a known disposable/temporary provider. Checked
