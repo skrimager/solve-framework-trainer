@@ -44,7 +44,7 @@ export interface SelectedPersonaVariant {
 
 // Deterministic, seedable PRNG (mulberry32). Used so a session with no stored
 // variant (a legacy or in-flight row) still reconstructs the SAME rendition on
-// every turn — seeded by the session id — and so tests can draw reproducibly.
+// every turn, seeded by the session id, and so tests can draw reproducibly.
 export function seededRng(seed: number): () => number {
   let a = seed >>> 0;
   return function () {
