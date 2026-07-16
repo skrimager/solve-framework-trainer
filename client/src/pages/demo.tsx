@@ -546,6 +546,10 @@ function Roleplay({
   const voice = useVoiceConversation({
     send: (content, withAudio) => sendMessage.mutate({ content, withAudio }),
     isSending: sendMessage.isPending,
+    // After a streamed reply finishes playing its audio is persisted server-side;
+    // refetch once so the message's replay control appears. Replaces the old poll.
+    onReplyAudioSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["/api/demo/session", sessionId] }),
   });
   voiceRef.current = voice;
 
@@ -557,23 +561,16 @@ function Roleplay({
     micActive,
     voiceStatus,
     micLabel,
-    pendingCount,
     handleMicTap,
     handleVoiceModeToggle,
     handleSend,
-    syncPendingAudio,
   } = voice;
 
   const { data: session } = useQuery<DemoSession>({
     queryKey: ["/api/demo/session", sessionId],
     queryFn: () => demoApi.getSession(token, sessionId),
     initialData: initialSession,
-    refetchInterval: () => (pendingCount > 0 ? 700 : false),
   });
-
-  useEffect(() => {
-    if (session) syncPendingAudio(parseTranscript(session.transcript));
-  }, [session, syncPendingAudio]);
 
   const complete = useMutation({
     mutationFn: () => demoApi.complete(token, sessionId),

@@ -41,6 +41,31 @@ export async function synthesizeSpeech(text: string, voice: string, instructions
   return Buffer.from(arrayBuffer);
 }
 
+// Streaming variant of synthesizeSpeech. Returns the raw audio byte stream so
+// the caller can forward chunks to the client (and tee them to disk) as they
+// arrive from OpenAI, instead of waiting for the whole file to be rendered.
+// This is what lets playback start within about a second of the reply instead
+// of after a full buffer plus a poll cycle. `stream_format: "audio"` asks the
+// API to stream raw audio bytes rather than one buffered response.
+export async function synthesizeSpeechStream(
+  text: string,
+  voice: string,
+  instructions?: string,
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await client.audio.speech.create({
+    model: TTS_MODEL,
+    voice: voice as any,
+    input: text,
+    response_format: "mp3",
+    speed: TTS_SPEED,
+    stream_format: "audio",
+    ...(instructions ? { instructions } : {}),
+  });
+  const body = response.body;
+  if (!body) throw new Error("TTS stream response had no body");
+  return body as ReadableStream<Uint8Array>;
+}
+
 // Generates the customer's OPENING line: a natural greeting that introduces
 // themselves by first name, used to start a session so the consultant walks in
 // cold (no pre-roleplay briefing) and must uncover the situation through

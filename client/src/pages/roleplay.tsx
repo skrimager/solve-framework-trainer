@@ -47,8 +47,8 @@ export default function RolePlay() {
 
   // The shared voice engine (Web Speech API + deterministic voiceMachine + audio
   // playback + auto-send). The caller owns transport: `send` posts the turn and
-  // `handleReply`/`syncPendingAudio` feed replies back in. voiceRef lets the
-  // send mutation reach the latest hook instance without a declaration cycle.
+  // `handleReply` feeds replies back in (which streams the reply audio). voiceRef
+  // lets the send mutation reach the latest hook instance without a declaration cycle.
   const voiceRef = useRef<ReturnType<typeof useVoiceConversation> | null>(null);
 
   const sendMessage = useMutation({
@@ -78,6 +78,9 @@ export default function RolePlay() {
   const voice = useVoiceConversation({
     send: (content, withAudio) => sendMessage.mutate({ content, withAudio }),
     isSending: sendMessage.isPending,
+    // After a streamed reply finishes playing its audio is persisted server-side;
+    // refetch once so the message's replay control appears. Replaces the old poll.
+    onReplyAudioSettled: () => queryClient.invalidateQueries({ queryKey: ["/api/sessions", id] }),
   });
   voiceRef.current = voice;
 
@@ -89,19 +92,13 @@ export default function RolePlay() {
     micActive,
     voiceStatus,
     micLabel,
-    pendingCount,
     handleMicTap,
     handleVoiceModeToggle,
     handleSend,
-    syncPendingAudio,
   } = voice;
 
   const { data: session, isLoading } = useQuery<Session>({
     queryKey: ["/api/sessions", id],
-    // While a voice reply is still generating in the background, poll so it appears
-    // automatically without the consultant waiting or needing to refresh. Kept
-    // tight so the customer's voice starts playing as soon as the audio is ready.
-    refetchInterval: () => (pendingCount > 0 ? 700 : false),
   });
 
   const { data: scenario } = useQuery<Scenario>({
@@ -113,13 +110,6 @@ export default function RolePlay() {
     },
   });
   const avatarUrl = getAvatarUrl(scenario?.slug);
-
-  // Once a pending voice reply finishes generating in the background, play it and
-  // stop polling for it.
-  useEffect(() => {
-    if (!session) return;
-    syncPendingAudio(JSON.parse(session.transcript));
-  }, [session, syncPendingAudio]);
 
   const [scoringFailed, setScoringFailed] = useState(false);
   const [showIncompleteModal, setShowIncompleteModal] = useState(false);
