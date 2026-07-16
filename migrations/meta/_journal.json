@@ -113,6 +113,13 @@
       "when": 1783106660000,
       "tag": "0015_demo_abuse_protection",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1783106660500,
+      "tag": "0016_persona_variants",
+      "breakpoints": true
     }
   ]
 }

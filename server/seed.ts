@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
+import { personaVariantSeed } from "./personaVariants";
 import type { InsertScenario, Office } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
@@ -74,6 +75,25 @@ export async function seed() {
       await storage.createScenario(scenario);
     }
     console.log(`Seeded ${missing.length} new scenario(s) across ${new Set(missing.map((s) => s.vertical)).size} vertical(s).`);
+  }
+
+  // Backfill the structured persona fields onto rows seeded before the persona
+  // variation rewrite. Keyed off an empty personaCore so it runs once per row and
+  // stays idempotent; the legacy customerPersona column is left untouched.
+  const needsPersona = existingScenarios.filter(
+    (s) => (!s.personaCore || s.personaCore.trim().length === 0) && personaVariantSeed[s.slug]
+  );
+  if (needsPersona.length > 0) {
+    for (const s of needsPersona) {
+      const variant = personaVariantSeed[s.slug];
+      await storage.updateScenario(s.id, {
+        personaCore: variant.core,
+        personalityVariants: JSON.stringify(variant.personalities),
+        motivationVariants: JSON.stringify(variant.motivations),
+        objectionPool: JSON.stringify(variant.objections),
+      });
+    }
+    console.log(`Backfilled structured persona fields for ${needsPersona.length} existing scenario(s).`);
   }
 
   // Heal any allowlisted demo email whose stored usage predates the exemption,
@@ -2374,3 +2394,17 @@ Your real situation (reveal gradually, guarding your ego):
 Stay proud, territorial, and defensive early, opening only to respectful, ego-safe, non-siding mediation. One to four sentences per turn. No stage directions, never break character.`,
   },
 ];
+
+// Merge the one-time structured persona rewrite (server/personaVariants.ts) onto
+// each seed scenario by slug. The legacy customerPersona prose is left intact for
+// rollback; personaCore + the three pools drive the new per-session variation.
+// New scenarios inserted by seed() therefore carry the structured fields, and the
+// backfill in seed() applies the same fields to already-seeded database rows.
+for (const scenario of scenarios) {
+  const variant = personaVariantSeed[scenario.slug];
+  if (!variant) continue;
+  scenario.personaCore = variant.core;
+  scenario.personalityVariants = JSON.stringify(variant.personalities);
+  scenario.motivationVariants = JSON.stringify(variant.motivations);
+  scenario.objectionPool = JSON.stringify(variant.objections);
+}
