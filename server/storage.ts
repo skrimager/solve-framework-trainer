@@ -92,6 +92,11 @@ export interface IStorage {
   getDemoSession(id: number): Promise<DemoSession | undefined>;
   updateDemoSession(id: number, patch: Partial<InsertDemoSession>): Promise<DemoSession | undefined>;
   listDemoSessions(): Promise<DemoSession[]>;
+  // Durable per-device / per-IP counters for the abuse caps. Return the raw rows
+  // (small volume per key) so the caller applies the rolling-window filter in
+  // pure, unit-tested logic (see countDemoSessionsInIpWindow).
+  listDemoSessionsByFingerprint(fingerprint: string): Promise<DemoSession[]>;
+  listDemoSessionsByIp(ip: string): Promise<DemoSession[]>;
 
   // --- Opportunity Intelligence (admin-only outbound lead-gen + drip) ---
   createProspectSearch(search: InsertProspectSearch): Promise<ProspectSearch>;
@@ -406,6 +411,14 @@ export class DatabaseStorage implements IStorage {
 
   async listDemoSessions(): Promise<DemoSession[]> {
     return db.select().from(demoSessions).orderBy(desc(demoSessions.id));
+  }
+
+  async listDemoSessionsByFingerprint(fingerprint: string): Promise<DemoSession[]> {
+    return db.select().from(demoSessions).where(eq(demoSessions.deviceFingerprint, fingerprint));
+  }
+
+  async listDemoSessionsByIp(ip: string): Promise<DemoSession[]> {
+    return db.select().from(demoSessions).where(eq(demoSessions.ipAddress, ip));
   }
 
   // --- Opportunity Intelligence ---

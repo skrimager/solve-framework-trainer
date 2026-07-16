@@ -41,6 +41,12 @@ import {
   signDemoToken,
   verifyDemoToken,
   ctaSeatQuestion,
+  isDisposableEmail,
+  isDeviceLimitReached,
+  isIpLimitReached,
+  countDemoSessionsInIpWindow,
+  isVoiceUnlockedForDemo,
+  demoAbuseAnalytics,
 } from "./demo";
 import {
   contactTypeSchema,
@@ -118,6 +124,14 @@ function readCookie(req: Request, name: string): string | undefined {
 }
 
 function clientIp(req: Request): string {
+  // When `trust proxy` is configured (production/Render, set in server/index.ts),
+  // Express derives req.ip from X-Forwarded-For while ignoring hops beyond the
+  // trusted count, so a client-forged XFF header cannot spoof the IP. We rely on
+  // that for the durable per-IP cap. In tests (and any app without trust proxy
+  // set) we fall back to reading XFF directly so per-request IPs still vary.
+  if (req.app?.get("trust proxy")) {
+    return req.ip ?? "unknown";
+  }
   const fwd = req.headers["x-forwarded-for"];
   if (typeof fwd === "string" && fwd.length > 0) return fwd.split(",")[0].trim();
   return req.socket?.remoteAddress ?? "unknown";
@@ -1191,6 +1205,13 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid email" });
     }
     const email = normalizeEmail(parsed.data.email);
+
+    // Block throwaway/temporary domains before a code is ever sent. Allowlisted
+    // founder emails are never blocked (they are real mailboxes anyway).
+    if (!isUnlimitedDemoEmail(email) && isDisposableEmail(email)) {
+      return res.status(400).json({ message: "Please use a permanent email address to start your free demo." });
+    }
+
     const now = new Date();
 
     let signup = await storage.getDemoSignupByEmail(email);
@@ -1260,9 +1281,33 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     }
     const signup = await requireDemoSignup(req, res);
     if (!signup) return;
+
+    // Fair-use caps, checked in parallel with the per-email cap. If ANY of the
+    // three limits (email, device, IP) is hit, block before creating a session.
+    // All are bypassed for allowlisted founder emails via the helpers below.
+    const fingerprint =
+      typeof req.body?.fingerprint === "string" && req.body.fingerprint.trim()
+        ? req.body.fingerprint.trim().slice(0, 128)
+        : null;
+    const ip = clientIp(req);
+
     if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
-      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0 });
+      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0, reason: "email" });
     }
+
+    const deviceCount = fingerprint
+      ? (await storage.listDemoSessionsByFingerprint(fingerprint)).length
+      : 0;
+    if (isDeviceLimitReached(deviceCount, signup.email)) {
+      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "device" });
+    }
+
+    const ipRows = await storage.listDemoSessionsByIp(ip);
+    const ipCount = countDemoSessionsInIpWindow(ipRows);
+    if (isIpLimitReached(ipCount, signup.email)) {
+      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "ip" });
+    }
+
     const scenario = await getDemoScenario(typeof req.body?.scenario === "string" ? req.body.scenario : undefined);
     if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
 
@@ -1271,6 +1316,12 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     const updatedSignup = isUnlimitedDemoEmail(signup.email)
       ? signup
       : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
+    // 1-based ordinal of this session for the email; drives voice unlock. Founder
+    // (unlimited) rows aren't incremented, so derive from the pre-start count + 1.
+    const sessionNumber = isUnlimitedDemoEmail(signup.email)
+      ? signup.sessionsUsed + 1
+      : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
+    const voiceEnabled = isVoiceUnlockedForDemo(sessionNumber, signup.email);
 
     let openingTranscript = "[]";
     try {
@@ -1300,11 +1351,17 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       feedback: null,
       createdAt: new Date().toISOString(),
       completedAt: null,
+      deviceFingerprint: fingerprint,
+      ipAddress: ip,
+      sessionNumber,
     });
 
     res.json({
       session: publicDemoSession(session),
       remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1, signup.email),
+      // Voice (server TTS) is unlocked only on the third free session; the client
+      // hides the voice toggle otherwise. Enforced server-side in the message route.
+      voiceEnabled,
       scenario: {
         id: scenario.id,
         slug: scenario.slug,
@@ -1342,7 +1399,13 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       const scenario = await storage.getScenario(session.scenarioId);
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
+      // Voice (server TTS) is unlocked only on the third free session (see
+      // isVoiceUnlockedForDemo). Gate it here so a frontend-only default cannot
+      // force text-mode sessions 1 and 2 to spend TTS budget: even if the client
+      // sends withAudio, we ignore it unless the session's ordinal unlocks voice.
+      const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
       const { content, withAudio } = req.body ?? {};
+      const useAudio = Boolean(withAudio) && voiceUnlocked;
       const transcript = JSON.parse(session.transcript);
       const consultantMsg = transcriptMessageSchema.parse({
         role: "consultant",
@@ -1356,7 +1419,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",
         content: customerReplyText,
-        audioStatus: withAudio ? "pending" : "none",
+        audioStatus: useAudio ? "pending" : "none",
         msgId,
         timestamp: new Date().toISOString(),
       });
@@ -1365,7 +1428,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
       res.json({ session: publicDemoSession(updated!) });
 
-      if (withAudio) {
+      if (useAudio) {
         synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender), getVoiceInstructionsForScenario(scenario.slug))
           .then(async (audioUrl) => {
             const latest = await storage.getDemoSession(session.id);
@@ -1801,16 +1864,24 @@ export function registerPublicAndAdminRoutes(app: Express): void {
         lastSentAt: s.lastSentAt ?? "",
       };
     });
-    sendData(req, res, "demo.csv", [
-      { key: "id", header: "ID" },
-      { key: "email", header: "Email" },
-      { key: "verified", header: "Verified" },
-      { key: "sessionsUsed", header: "Sessions Used" },
-      { key: "maxSessions", header: "Max" },
-      { key: "completedSessions", header: "Completed" },
-      { key: "createdAt", header: "First Seen" },
-      { key: "lastSentAt", header: "Last Code Sent" },
-    ], rows);
+
+    // CSV export keeps its original per-signup shape so existing tooling and the
+    // download button are unchanged. The richer abuse-protection analytics below
+    // are JSON-only (the admin UI renders them; they do not belong in the CSV).
+    if (req.query.format === "csv") {
+      return sendData(req, res, "demo.csv", [
+        { key: "id", header: "ID" },
+        { key: "email", header: "Email" },
+        { key: "verified", header: "Verified" },
+        { key: "sessionsUsed", header: "Sessions Used" },
+        { key: "maxSessions", header: "Max" },
+        { key: "completedSessions", header: "Completed" },
+        { key: "createdAt", header: "First Seen" },
+        { key: "lastSentAt", header: "Last Code Sent" },
+      ], rows);
+    }
+
+    res.json({ rows, analytics: demoAbuseAnalytics(sessions) });
   });
 
   // ===========================================================================

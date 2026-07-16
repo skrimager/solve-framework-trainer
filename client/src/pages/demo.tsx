@@ -15,6 +15,7 @@ import {
   type DemoScenario,
   type DemoSession,
 } from "@/lib/demoApi";
+import { getDeviceFingerprint } from "@/lib/fingerprint";
 import {
   Volume2,
   Send,
@@ -77,6 +78,12 @@ const DEFAULT_SCENARIO_KEY = DEMO_SCENARIO_CHOICES[0].key;
 
 // Brand palette (shared with the rest of the app).
 const ORANGE = "#E06D00";
+
+// Where the friendly "used all your free sessions" wall sends visitors. Matches
+// the demo dashboard's Request Access target (the marketing site's pricing
+// section, where the real Request Access buttons live) so we reuse the existing
+// destination rather than inventing a new one.
+const REQUEST_ACCESS_URL = "https://www.solveframework.com/#pricing";
 
 export default function Demo() {
   const [step, setStep] = useState<Step>("landing");
@@ -444,13 +451,18 @@ function StartAndPlay({
   const [started, setStarted] = useState<{
     session: DemoSession;
     scenario: DemoScenario;
+    voiceEnabled: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
   const start = useMutation({
-    mutationFn: () => demoApi.startSession(token, scenarioKey),
-    onSuccess: (data) => setStarted({ session: data.session, scenario: data.scenario }),
+    mutationFn: async () => {
+      const fingerprint = await getDeviceFingerprint();
+      return demoApi.startSession(token, scenarioKey, fingerprint);
+    },
+    onSuccess: (data) =>
+      setStarted({ session: data.session, scenario: data.scenario, voiceEnabled: data.voiceEnabled }),
     onError: (e: Error & { limitReached?: boolean }) => {
       if (e.limitReached) onLimitReached();
       else setError(e.message);
@@ -494,6 +506,7 @@ function StartAndPlay({
       token={token}
       initialSession={started.session}
       scenario={started.scenario}
+      voiceEnabled={started.voiceEnabled}
       onCompleted={onCompleted}
     />
   );
@@ -503,11 +516,13 @@ function Roleplay({
   token,
   initialSession,
   scenario,
+  voiceEnabled,
   onCompleted,
 }: {
   token: string;
   initialSession: DemoSession;
   scenario: DemoScenario;
+  voiceEnabled: boolean;
   onCompleted: (s: DemoSession) => void;
 }) {
   const queryClient = useQueryClient();
@@ -593,15 +608,23 @@ function Roleplay({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Volume2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          <Label htmlFor="demo-voice-toggle" className="text-xs text-muted-foreground">
-            Voice mode
-          </Label>
-          <Switch
-            id="demo-voice-toggle"
-            checked={voiceMode}
-            onCheckedChange={handleVoiceModeToggle}
-            data-testid="switch-demo-voice"
-          />
+          {voiceEnabled ? (
+            <>
+              <Label htmlFor="demo-voice-toggle" className="text-xs text-muted-foreground">
+                Voice mode
+              </Label>
+              <Switch
+                id="demo-voice-toggle"
+                checked={voiceMode}
+                onCheckedChange={handleVoiceModeToggle}
+                data-testid="switch-demo-voice"
+              />
+            </>
+          ) : (
+            <span className="text-xs text-muted-foreground" data-testid="text-demo-voice-locked">
+              Voice unlocks on your third session
+            </span>
+          )}
         </div>
       </div>
 
@@ -754,15 +777,22 @@ function ResultsAndCta({
       {limitReached ? (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">You've used all 3 free sessions</CardTitle>
+            <CardTitle className="text-lg">You've used all your free practice sessions</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
+          <CardContent className="space-y-4 text-sm text-muted-foreground">
             <p data-testid="text-limit-reached">
-              Thanks for practicing with the free demo! You've completed all 3 free
-              voice roleplay sessions for <span className="font-medium text-foreground">{email}</span>.
-              To keep training with unlimited conversations and your whole team, grab
-              full access below.
+              Ready for unlimited practice, coaching, and certification? Get full
+              access for you and your whole team below.
             </p>
+            <Button
+              asChild
+              style={{ backgroundColor: ORANGE, color: "white" }}
+              data-testid="button-request-access"
+            >
+              <a href={REQUEST_ACCESS_URL} target="_blank" rel="noopener noreferrer">
+                Request Access
+              </a>
+            </Button>
           </CardContent>
         </Card>
       ) : (

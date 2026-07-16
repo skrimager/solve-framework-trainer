@@ -56,14 +56,14 @@ export const demoApi = {
     return data as { verified: true; token?: string; limitReached?: boolean; remaining?: number };
   },
 
-  async startSession(token: string, scenario?: string) {
-    const { ok, data } = await post("/api/demo/session", { token, scenario });
+  async startSession(token: string, scenario?: string, fingerprint?: string) {
+    const { ok, data } = await post("/api/demo/session", { token, scenario, fingerprint });
     if (!ok) {
       const err = new Error(data.message ?? "Couldn't start the demo.") as Error & { limitReached?: boolean };
       err.limitReached = !!data.limitReached;
       throw err;
     }
-    return data as { session: DemoSession; scenario: DemoScenario; remaining: number };
+    return data as { session: DemoSession; scenario: DemoScenario; remaining: number; voiceEnabled: boolean };
   },
 
   async getSession(token: string, id: number) {

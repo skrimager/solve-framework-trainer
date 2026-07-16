@@ -236,7 +236,7 @@ function GenericSectionView({ section }: { section: AdminSection }) {
             {section === "visitors" && <VisitorsTable rows={data.rows} />}
             {section === "users" && <UsersTable rows={data.rows} />}
             {section === "sales" && <SalesTable rows={data.rows} />}
-            {section === "demo" && <DemoTable rows={data.rows} />}
+            {section === "demo" && <DemoTable rows={data.rows} analytics={data.analytics} />}
           </>
         )}
       </div>
@@ -643,33 +643,147 @@ function UsersTable({ rows }: { rows: any[] }) {
   );
 }
 
-function DemoTable({ rows }: { rows: any[] }) {
+type DemoAnalytics = {
+  totalSessions: number;
+  uniqueDevices: number;
+  sessionsPerDay: { date: string; count: number }[];
+  blockedDevices: { fingerprint: string; sessions: number; emails: number; lastAt: string }[];
+  blockedIps: { ip: string; sessions: number; emails: number; lastAt: string }[];
+};
+
+function DemoStatCard({ label, value }: { label: string; value: number | string }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow className="hover:bg-transparent border-white/10">
-          <TableHead className={headCls}>Email</TableHead>
-          <TableHead className={headCls}>Verified</TableHead>
-          <TableHead className={headCls}>Sessions Used</TableHead>
-          <TableHead className={headCls}>Completed</TableHead>
-          <TableHead className={headCls}>First Seen</TableHead>
-          <TableHead className={headCls}>Last Code Sent</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 && <EmptyRow span={6} />}
-        {rows.map((r) => (
-          <TableRow key={r.id} className="border-white/10" data-testid={`row-demo-${r.id}`}>
-            <TableCell className={cellCls}>{r.email}</TableCell>
-            <TableCell className={cellCls}>{r.verified}</TableCell>
-            <TableCell className={cellCls}>{r.sessionsUsed} / {r.maxSessions}</TableCell>
-            <TableCell className={cellCls}>{r.completedSessions}</TableCell>
-            <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
-            <TableCell className="text-white/60 text-xs">{r.lastSentAt || "-"}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <div className="rounded-lg border border-white/10 p-4" style={{ backgroundColor: NAVY_DARK }}>
+      <div className="text-white/60 text-xs uppercase tracking-wide">{label}</div>
+      <div className="text-2xl font-bold text-white mt-1">{value}</div>
+    </div>
+  );
+}
+
+function DemoTable({ rows, analytics }: { rows: any[]; analytics?: DemoAnalytics }) {
+  const recentDays = (analytics?.sessionsPerDay ?? []).slice(-14).reverse();
+  return (
+    <div className="space-y-6 p-4">
+      {analytics && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <DemoStatCard label="Total Sessions" value={analytics.totalSessions} />
+            <DemoStatCard label="Unique Devices" value={analytics.uniqueDevices} />
+            <DemoStatCard label="Blocked Devices / IPs" value={`${analytics.blockedDevices.length} / ${analytics.blockedIps.length}`} />
+          </div>
+
+          <div>
+            <h2 className="text-sm font-semibold text-white/80 mb-2">Sessions per day (last 14)</h2>
+            <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY_DARK }}>
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent border-white/10">
+                    <TableHead className={headCls}>Date</TableHead>
+                    <TableHead className={headCls}>Sessions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recentDays.length === 0 && <EmptyRow span={2} />}
+                  {recentDays.map((d) => (
+                    <TableRow key={d.date} className="border-white/10" data-testid={`row-demo-day-${d.date}`}>
+                      <TableCell className={cellCls}>{d.date}</TableCell>
+                      <TableCell className={cellCls}>{d.count}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-white/80 mb-2">Blocked devices (cap reached)</h2>
+              <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY_DARK }}>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent border-white/10">
+                      <TableHead className={headCls}>Fingerprint</TableHead>
+                      <TableHead className={headCls}>Sessions</TableHead>
+                      <TableHead className={headCls}>Emails</TableHead>
+                      <TableHead className={headCls}>Last Seen</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {analytics.blockedDevices.length === 0 && <EmptyRow span={4} />}
+                    {analytics.blockedDevices.map((d) => (
+                      <TableRow key={d.fingerprint} className="border-white/10" data-testid={`row-demo-device-${d.fingerprint}`}>
+                        <TableCell className="text-white/80 text-xs font-mono">{d.fingerprint.slice(0, 16)}…</TableCell>
+                        <TableCell className={cellCls}>{d.sessions}</TableCell>
+                        <TableCell className={cellCls}>{d.emails}</TableCell>
+                        <TableCell className="text-white/60 text-xs">{d.lastAt}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-semibold text-white/80 mb-2">Blocked IPs (cap reached in 30 days)</h2>
+              <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY_DARK }}>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent border-white/10">
+                      <TableHead className={headCls}>IP</TableHead>
+                      <TableHead className={headCls}>Sessions</TableHead>
+                      <TableHead className={headCls}>Emails</TableHead>
+                      <TableHead className={headCls}>Last Seen</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {analytics.blockedIps.length === 0 && <EmptyRow span={4} />}
+                    {analytics.blockedIps.map((d) => (
+                      <TableRow key={d.ip} className="border-white/10" data-testid={`row-demo-ip-${d.ip}`}>
+                        <TableCell className="text-white/80 text-xs font-mono">{d.ip}</TableCell>
+                        <TableCell className={cellCls}>{d.sessions}</TableCell>
+                        <TableCell className={cellCls}>{d.emails}</TableCell>
+                        <TableCell className="text-white/60 text-xs">{d.lastAt}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      <div>
+        <h2 className="text-sm font-semibold text-white/80 mb-2">Signups</h2>
+        <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY_DARK }}>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent border-white/10">
+                <TableHead className={headCls}>Email</TableHead>
+                <TableHead className={headCls}>Verified</TableHead>
+                <TableHead className={headCls}>Sessions Used</TableHead>
+                <TableHead className={headCls}>Completed</TableHead>
+                <TableHead className={headCls}>First Seen</TableHead>
+                <TableHead className={headCls}>Last Code Sent</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 && <EmptyRow span={6} />}
+              {rows.map((r) => (
+                <TableRow key={r.id} className="border-white/10" data-testid={`row-demo-${r.id}`}>
+                  <TableCell className={cellCls}>{r.email}</TableCell>
+                  <TableCell className={cellCls}>{r.verified}</TableCell>
+                  <TableCell className={cellCls}>{r.sessionsUsed} / {r.maxSessions}</TableCell>
+                  <TableCell className={cellCls}>{r.completedSessions}</TableCell>
+                  <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
+                  <TableCell className="text-white/60 text-xs">{r.lastSentAt || "-"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    </div>
   );
 }
 

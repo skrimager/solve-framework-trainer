@@ -106,6 +106,13 @@
       "when": 1783106659500,
       "tag": "0014_session_duration",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1783106660000,
+      "tag": "0015_demo_abuse_protection",
+      "breakpoints": true
     }
   ]
 }
