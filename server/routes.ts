@@ -871,12 +871,20 @@ export async function registerRoutes(
       );
 
       // On a pass, create the final expert-level scenario session for this track.
+      // This also creates a practice session, so it must honor the same monthly
+      // fair-use cap as every other session-creation entry point.
       let scenarioSessionId: number | null = null;
+      let capBlockedMessage: string | null = null;
       if (result.passed) {
-        const scenario = await pickExpertScenario(track);
-        if (scenario) {
-          const session = await createScenarioSession(attempt.userId, scenario);
-          scenarioSessionId = session.id;
+        const cap = await checkPracticeCap(attempt.userId);
+        if (cap.blocked) {
+          capBlockedMessage = blockedMessage(cap.resetDate);
+        } else {
+          const scenario = await pickExpertScenario(track);
+          if (scenario) {
+            const session = await createScenarioSession(attempt.userId, scenario);
+            scenarioSessionId = session.id;
+          }
         }
       }
 
@@ -894,6 +902,7 @@ export async function registerRoutes(
         passMark: WRITTEN_PASS_CORRECT,
         passPercent: WRITTEN_PASS_PERCENT,
         scenarioSessionId,
+        practiceCapBlockedMessage: capBlockedMessage,
       });
     } catch (err: any) {
       console.error("Written exam grading failed:", err);
