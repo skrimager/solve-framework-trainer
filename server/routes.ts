@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   normalizeTrack,
   drawExam,
@@ -600,42 +600,21 @@ export async function registerRoutes(
         role: "customer",
         content: customerReplyText,
         audioStatus: withAudio ? "pending" : "none",
+        // Point at the streaming endpoint up front. The client plays it as soon
+        // as the reply arrives (playback starts on the first chunk); the same
+        // URL serves the persisted file for later replays once synthesis ends.
+        audioUrl: withAudio ? `/api/sessions/${session.id}/audio-stream/${msgId}` : undefined,
         msgId,
         timestamp: new Date().toISOString(),
       });
       transcript.push(customerMsg);
 
-      // Respond immediately with the text reply — never make the consultant wait on voice.
+      // Respond immediately with the text reply. Audio is synthesized lazily and
+      // streamed when the client requests the audio-stream URL above.
       const updated = await storage.updateSession(session.id, {
         transcript: JSON.stringify(transcript),
       });
       res.json({ ...updated, closeCheckpoint });
-
-      // Generate audio in the background; the client polls /api/sessions/:id/audio-status/:msgId.
-      if (withAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender), getVoiceInstructionsForScenario(scenario.slug))
-          .then(async (audioUrl) => {
-            const latestSession = await storage.getSession(session.id);
-            if (!latestSession) return;
-            const latestTranscript: TranscriptMessage[] = JSON.parse(latestSession.transcript);
-            const idx = latestTranscript.findIndex((m) => m.msgId === msgId);
-            if (idx !== -1) {
-              latestTranscript[idx] = { ...latestTranscript[idx], audioUrl, audioStatus: "ready" };
-              await storage.updateSession(session.id, { transcript: JSON.stringify(latestTranscript) });
-            }
-          })
-          .catch(async (err) => {
-            console.error("Background TTS generation failed:", err);
-            const latestSession = await storage.getSession(session.id);
-            if (!latestSession) return;
-            const latestTranscript: TranscriptMessage[] = JSON.parse(latestSession.transcript);
-            const idx = latestTranscript.findIndex((m) => m.msgId === msgId);
-            if (idx !== -1) {
-              latestTranscript[idx] = { ...latestTranscript[idx], audioStatus: "failed" };
-              await storage.updateSession(session.id, { transcript: JSON.stringify(latestTranscript) });
-            }
-          });
-      }
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
@@ -779,6 +758,28 @@ export async function registerRoutes(
     if (!fsSync.existsSync(filePath)) return res.status(404).end();
     res.setHeader("Content-Type", "audio/mpeg");
     res.sendFile(filePath);
+  });
+
+  // Stream a customer reply's TTS audio. The client points its audio element at
+  // this URL the moment the reply text arrives, so playback starts on the first
+  // chunk instead of after a fully buffered file plus a poll cycle. The complete
+  // audio is teed to disk under the message id so replays (and any later loads)
+  // reuse it without re-synthesizing, keeping one TTS call per reply.
+  app.get("/api/sessions/:id/audio-stream/:msgId", async (req, res) => {
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+    const msg = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
+    if (!msg) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await streamMessageAudio(res, {
+      msgId: req.params.msgId,
+      text: msg.content,
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      setStatus: (status) => updateSessionMsgAudioStatus(session.id, req.params.msgId, status),
+    });
   });
 
   // ===========================================================================
@@ -1175,7 +1176,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   // Public "Free Voice Demo" (no auth, no seat; the email+code IS the auth)
   // ===========================================================================
   // Reuses the EXACT existing roleplay pipeline: getCustomerOpening /
-  // getCustomerReply / scoreTranscript / synthesizeAudio / getVoiceForScenario.
+  // getCustomerReply / scoreTranscript / streamMessageAudio / getVoiceForScenario.
   // Anonymous demo traffic lives in demo_signups/demo_sessions and never touches
   // the seat-gated users/sessions tables, office analytics, or level progression.
 
@@ -1452,6 +1453,10 @@ export function registerPublicAndAdminRoutes(app: Express): void {
         role: "customer",
         content: customerReplyText,
         audioStatus: useAudio ? "pending" : "none",
+        // Streamed on demand from this URL (see the sessions route for details).
+        // Gated on useAudio (voiceUnlocked && withAudio), not the raw withAudio
+        // flag, so a client can't force TTS budget spend on a locked session.
+        audioUrl: useAudio ? `/api/demo/session/${session.id}/audio-stream/${msgId}` : undefined,
         msgId,
         timestamp: new Date().toISOString(),
       });
@@ -1459,35 +1464,38 @@ export function registerPublicAndAdminRoutes(app: Express): void {
 
       const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
       res.json({ session: publicDemoSession(updated!) });
-
-      if (useAudio) {
-        synthesizeAudio(customerReplyText, getVoiceForScenario(scenario.slug, scenario.gender), getVoiceInstructionsForScenario(scenario.slug))
-          .then(async (audioUrl) => {
-            const latest = await storage.getDemoSession(session.id);
-            if (!latest) return;
-            const t: TranscriptMessage[] = JSON.parse(latest.transcript);
-            const idx = t.findIndex((m) => m.msgId === msgId);
-            if (idx !== -1) {
-              t[idx] = { ...t[idx], audioUrl, audioStatus: "ready" };
-              await storage.updateDemoSession(session.id, { transcript: JSON.stringify(t) });
-            }
-          })
-          .catch(async (err) => {
-            console.error("Demo background TTS failed:", err);
-            const latest = await storage.getDemoSession(session.id);
-            if (!latest) return;
-            const t: TranscriptMessage[] = JSON.parse(latest.transcript);
-            const idx = t.findIndex((m) => m.msgId === msgId);
-            if (idx !== -1) {
-              t[idx] = { ...t[idx], audioStatus: "failed" };
-              await storage.updateDemoSession(session.id, { transcript: JSON.stringify(t) });
-            }
-          });
-      }
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
     }
+  });
+
+  // Stream a demo reply's TTS audio on demand (mirrors the sessions endpoint).
+  // Not signup-gated: the request comes from an <audio> element that cannot send
+  // the demo token, and the unguessable msgId is the capability (this matches
+  // the previous unauthenticated /api/audio/<uuid>.mp3 static file behavior).
+  app.get("/api/demo/session/:id/audio-stream/:msgId", async (req, res) => {
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    // Server-side re-check: voice is only unlocked on the third free session
+    // (see isVoiceUnlockedForDemo). The JSON response only includes audioUrl
+    // when unlocked, but that alone doesn't stop a crafted direct request to
+    // this URL from spending TTS budget on a locked session, so gate here too.
+    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+      return res.status(403).end();
+    }
+    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+    const msg = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
+    if (!msg) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await streamMessageAudio(res, {
+      msgId: req.params.msgId,
+      text: msg.content,
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      setStatus: (status) => updateDemoMsgAudioStatus(session.id, req.params.msgId, status),
+    });
   });
 
   // End & score a demo session with the SAME rubric as real sessions. The demo
@@ -3052,10 +3060,78 @@ async function generateUniqueInviteCode(): Promise<string> {
   throw new Error("Could not generate a unique invite code");
 }
 
-async function synthesizeAudio(text: string, voice: string, instructions?: string): Promise<string> {
-  const filename = `${randomUUID()}.mp3`;
-  const outputPath = path.join(AUDIO_DIR, filename);
-  const audioBuffer = await synthesizeSpeech(text, voice, instructions);
-  await fs.writeFile(outputPath, audioBuffer);
-  return `/api/audio/${filename}`;
+// On-disk cache path for a message's synthesized audio. Keyed by message id so
+// the stream endpoint can reuse a previously rendered file (replay) instead of
+// re-synthesizing.
+function audioPathForMsg(msgId: string): string {
+  return path.join(AUDIO_DIR, `${msgId}.mp3`);
+}
+
+type MsgAudioStatus = "ready" | "failed";
+
+async function updateSessionMsgAudioStatus(sessionId: number, msgId: string, status: MsgAudioStatus): Promise<void> {
+  const latest = await storage.getSession(sessionId);
+  if (!latest) return;
+  const transcript: TranscriptMessage[] = JSON.parse(latest.transcript);
+  const idx = transcript.findIndex((m) => m.msgId === msgId);
+  if (idx === -1) return;
+  transcript[idx] = { ...transcript[idx], audioStatus: status };
+  await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
+}
+
+async function updateDemoMsgAudioStatus(sessionId: number, msgId: string, status: MsgAudioStatus): Promise<void> {
+  const latest = await storage.getDemoSession(sessionId);
+  if (!latest) return;
+  const transcript: TranscriptMessage[] = JSON.parse(latest.transcript);
+  const idx = transcript.findIndex((m) => m.msgId === msgId);
+  if (idx === -1) return;
+  transcript[idx] = { ...transcript[idx], audioStatus: status };
+  await storage.updateDemoSession(sessionId, { transcript: JSON.stringify(transcript) });
+}
+
+interface StreamMessageAudioOptions {
+  msgId: string;
+  text: string;
+  voice: string;
+  instructions?: string;
+  setStatus: (status: MsgAudioStatus) => Promise<void>;
+}
+
+// Stream a reply's TTS audio to the client while teeing it to disk. If the file
+// already exists (a replay or a duplicate request) it is served directly. When
+// synthesis finishes the persisted file is written and the message is marked
+// "ready"; on failure the message is marked "failed" so the client loop moves on.
+async function streamMessageAudio(res: Response, opts: StreamMessageAudioOptions): Promise<void> {
+  const filePath = audioPathForMsg(opts.msgId);
+  res.setHeader("Content-Type", "audio/mpeg");
+
+  if (fsSync.existsSync(filePath)) {
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.sendFile(filePath);
+    return;
+  }
+
+  try {
+    const stream = await synthesizeSpeechStream(opts.text, opts.voice, opts.instructions);
+    const reader = stream.getReader();
+    const chunks: Buffer[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buf = Buffer.from(value);
+      chunks.push(buf);
+      res.write(buf);
+    }
+    res.end();
+    await fs.writeFile(filePath, Buffer.concat(chunks));
+    await opts.setStatus("ready");
+  } catch (err) {
+    console.error("Streaming TTS failed:", err);
+    await opts.setStatus("failed").catch(() => {});
+    if (!res.headersSent) {
+      res.status(500).end();
+    } else {
+      res.end();
+    }
+  }
 }

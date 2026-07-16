@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { voiceTransition, type VoiceState, type VoiceEvent, type VoiceEffect } from "@/lib/voiceMachine";
+import { recommendSilenceMs } from "@/lib/turnDetection";
 import type { TranscriptMessage } from "@shared/schema";
 
 // Web Speech API isn't in TS's default lib — declare the minimal shape we use.
@@ -83,12 +84,11 @@ function isMobileSpeechPlatform(): boolean {
 // desktop, where continuous recognition legitimately stays open silently.
 const MOBILE_LISTEN_WATCHDOG_MS = 12000;
 
-// After the speaker stops talking for this long in voice mode, auto-send.
-// Deliberately on the forgiving side: people pause naturally mid-thought
-// ("I just... don't want any increases in lot rent"), and cutting them off there
-// submits a broken half-sentence to the AI. This must ride over those pauses
-// while still feeling responsive. Overridable per-caller via
-// `UseVoiceConversationOptions.silenceAutoSendMs`.
+// Neutral (ambiguous) silence wait in voice mode. This is the BASE the adaptive
+// heuristic scales around: it waits shorter when the utterance already sounds
+// finished and longer when it clearly is not (see recommendSilenceMs). Kept at
+// the previous fixed value so the ambiguous case is unchanged. Overridable
+// per-caller via `UseVoiceConversationOptions.silenceAutoSendMs`.
 const DEFAULT_SILENCE_AUTOSEND_MS = 1500;
 
 export interface UseVoiceConversationOptions {
@@ -97,9 +97,13 @@ export interface UseVoiceConversationOptions {
   send: (content: string, withAudio: boolean) => void;
   // Whether a send is currently in flight (disables the mic / re-entrancy).
   isSending: boolean;
-  // How long (ms) of continuous silence auto-submits the current utterance in
-  // voice mode. Higher = more forgiving of natural mid-sentence pauses.
+  // Neutral silence wait (ms) used as the base for the adaptive end-of-turn
+  // heuristic. Higher = more forgiving of natural mid-sentence pauses.
   silenceAutoSendMs?: number;
+  // Called once a streamed reply finishes playing (or fails to play), so the
+  // caller can refetch the session to surface the now-ready replay control.
+  // This replaces the old 700ms audio poll loop.
+  onReplyAudioSettled?: () => void;
 }
 
 // The complete, self-contained voice roleplay engine (Web Speech API + the
@@ -107,11 +111,12 @@ export interface UseVoiceConversationOptions {
 // implementation shared by the trainee roleplay page and the public demo page —
 // there is no parallel/forked voice system. The caller owns transport (which
 // endpoint to POST to and how to store the session) and feeds replies back in
-// via handleReply()/syncPendingAudio().
+// via handleReply(), which streams the reply's audio from its stream URL.
 export function useVoiceConversation({
   send,
   isSending,
   silenceAutoSendMs = DEFAULT_SILENCE_AUTOSEND_MS,
+  onReplyAudioSettled,
 }: UseVoiceConversationOptions) {
   // Keep the latest threshold in a ref so the recognition callback (created once
   // on mount) always reads the current value without being re-registered.
@@ -119,6 +124,10 @@ export function useVoiceConversation({
   useEffect(() => {
     silenceAutoSendMsRef.current = silenceAutoSendMs;
   }, [silenceAutoSendMs]);
+  const onReplyAudioSettledRef = useRef(onReplyAudioSettled);
+  useEffect(() => {
+    onReplyAudioSettledRef.current = onReplyAudioSettled;
+  }, [onReplyAudioSettled]);
   const [draft, setDraft] = useState("");
   // A single "Voice mode" toggle governs the whole experience. ON = fully
   // automatic phone-call-style conversation (auto TTS + auto listen). OFF =
@@ -129,7 +138,6 @@ export function useVoiceConversation({
     voiceModeRef.current = voiceMode;
   }, [voiceMode]);
 
-  const [pendingAudioIds, setPendingAudioIds] = useState<Set<string>>(new Set());
   const playedAudioIds = useRef<Set<string>>(new Set());
 
   // `phase` is driven exclusively by voiceMachine. voiceMode ON keeps it cycling
@@ -247,13 +255,21 @@ export function useVoiceConversation({
       // Keep the gain-boosted graph running (contexts can auto-suspend); harmless
       // when no boost is wired.
       if (audioBoostConnectedRef.current) audioContextRef.current?.resume?.().catch(() => {});
-      el.onended = () => dispatchRef.current({ type: "AUDIO_ENDED" });
+      el.onended = () => {
+        dispatchRef.current({ type: "AUDIO_ENDED" });
+        // Streamed reply finished; its file is now persisted server-side. Let the
+        // caller refetch once so the replay control appears (no polling needed).
+        onReplyAudioSettledRef.current?.();
+      };
       el.src = `${API_BASE}${url}`;
       el.muted = false;
       // Element is already at its ceiling; the audible loudness lift comes from
       // the Web Audio gain stage, not from this property.
       el.volume = 1.0;
-      el.play().catch(() => dispatchRef.current({ type: "AUDIO_FAILED" }));
+      el.play().catch(() => {
+        dispatchRef.current({ type: "AUDIO_FAILED" });
+        onReplyAudioSettledRef.current?.();
+      });
     },
     [getAudioEl]
   );
@@ -312,20 +328,24 @@ export function useVoiceConversation({
       }
       const base = draftBeforeListening.current;
       const spoken = (finalTranscript + interimTranscript).trim();
-      setDraft(spoken ? `${base}${base ? " " : ""}${spoken}` : base);
+      const combined = spoken ? `${base}${base ? " " : ""}${spoken}` : base;
+      setDraft(combined);
       if (finalTranscript) {
         draftBeforeListening.current = `${base}${base ? " " : ""}${finalTranscript}`.trim();
       }
 
       // Voice loop only: after a silent gap, auto-send so the speaker can just
-      // keep talking. Text-mode dictation never auto-sends.
+      // keep talking. Text-mode dictation never auto-sends. The wait is adaptive:
+      // shorter when the utterance sounds finished, longer when it trails off on
+      // a conjunction/preposition/filler so a thinking pause is not cut off.
       if (phaseRef.current === "listening") {
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        const waitMs = recommendSilenceMs(combined, silenceAutoSendMsRef.current);
         silenceTimerRef.current = setTimeout(() => {
           if (draftBeforeListening.current.trim()) {
             handleSendRef.current();
           }
-        }, silenceAutoSendMsRef.current);
+        }, waitMs);
       }
     };
     recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
@@ -519,55 +539,25 @@ export function useVoiceConversation({
   });
 
   // Called by the caller after a send resolves, with the new full transcript.
-  // Drives the voice loop's reply-audio handling exactly as the roleplay page did.
+  // In voice mode we start playing the reply's audio immediately from its stream
+  // URL: the endpoint synthesizes and streams the audio on the fly, so playback
+  // begins on the first chunk rather than after a fully buffered file plus a
+  // poll cycle. No pending/polling step is involved anymore.
   const handleReply = useCallback((transcript: TranscriptMessage[]) => {
+    if (!voiceModeRef.current) return;
     const last = transcript[transcript.length - 1];
-    if (last?.msgId && last.audioStatus === "pending") {
-      setPendingAudioIds((prev) => new Set(prev).add(last.msgId!));
-      if (voiceModeRef.current) dispatchRef.current({ type: "REPLY_AUDIO_PENDING" });
-    } else if (
-      voiceModeRef.current &&
-      last?.audioUrl &&
-      last.audioStatus === "ready" &&
-      last.msgId &&
-      !playedAudioIds.current.has(last.msgId)
-    ) {
-      playedAudioIds.current.add(last.msgId);
+    const hasAudio =
+      last?.msgId &&
+      last.audioUrl &&
+      (last.audioStatus === "pending" || last.audioStatus === "ready");
+    if (hasAudio && !playedAudioIds.current.has(last.msgId!)) {
+      playedAudioIds.current.add(last.msgId!);
       dispatchRef.current({ type: "REPLY_AUDIO_READY" }, last.audioUrl);
-    } else if (voiceModeRef.current) {
+    } else if (!hasAudio) {
       // Reply arrived with no audio to play — keep the loop moving.
       dispatchRef.current({ type: "REPLY_NO_AUDIO" });
     }
   }, []);
-
-  // Called by the caller whenever fresh session data arrives (polling). Once a
-  // pending voice reply finishes generating in the background, play it and stop
-  // polling for it.
-  const syncPendingAudio = useCallback(
-    (transcript: TranscriptMessage[]) => {
-      setPendingAudioIds((prev) => {
-        if (prev.size === 0) return prev;
-        let changed = false;
-        const next = new Set(prev);
-        for (const msg of transcript) {
-          if (msg.msgId && next.has(msg.msgId) && msg.audioStatus !== "pending") {
-            next.delete(msg.msgId);
-            changed = true;
-            if (!voiceModeRef.current) continue;
-            if (msg.audioStatus === "ready" && msg.audioUrl && !playedAudioIds.current.has(msg.msgId)) {
-              playedAudioIds.current.add(msg.msgId);
-              dispatchRef.current({ type: "REPLY_AUDIO_READY" }, msg.audioUrl);
-            } else if (msg.audioStatus === "failed") {
-              // TTS generation failed — keep the loop moving instead of stranding it.
-              dispatchRef.current({ type: "REPLY_NO_AUDIO" });
-            }
-          }
-        }
-        return changed ? next : prev;
-      });
-    },
-    []
-  );
 
   const isListening = phase === "listening";
   const micActive = isListening || isDictating;
@@ -605,12 +595,10 @@ export function useVoiceConversation({
     isListening,
     voiceStatus,
     micLabel,
-    pendingCount: pendingAudioIds.size,
     handleMicTap,
     handleVoiceModeToggle,
     handleSend,
     handleReply,
-    syncPendingAudio,
     stopAudio,
   };
 }
