@@ -115,6 +115,12 @@ export const sessions = pgTable("sessions", {
   createdAt: text("created_at").notNull(),
   completedAt: text("completed_at"),
   savedAt: text("saved_at"), // set when the consultant chooses "Save for Later" on an incomplete session
+  // Practice time this session consumed, in seconds. Populated when the session
+  // reaches a terminal state (completed or saved-for-later), computed from
+  // createdAt to that end. Null while in progress. Summed per calendar month to
+  // enforce the monthly fair-use practice cap (see server/fairUse.ts). Attributed
+  // to the month the session was created in, so June time never counts in July.
+  durationSeconds: integer("duration_seconds"),
 });
 
 export const insertSessionSchema = createInsertSchema(sessions).omit({

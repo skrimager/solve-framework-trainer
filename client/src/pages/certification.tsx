@@ -121,10 +121,13 @@ export default function Certification() {
       setAnswers({});
       setWrittenResult(null);
     },
-    onError: () => {
+    onError: (err: any) => {
+      // Surface the server's message when present so a monthly-limit block reads
+      // as a clear explanation (with its reset date) rather than a generic error.
+      const serverMessage = parseServerMessage(err?.message);
       toast({
         title: "Couldn't start the exam",
-        description: "Something went wrong preparing your exam. Please try again.",
+        description: serverMessage ?? "Something went wrong preparing your exam. Please try again.",
         variant: "destructive",
       });
     },

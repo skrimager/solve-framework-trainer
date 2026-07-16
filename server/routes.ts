@@ -63,6 +63,12 @@ import {
   setSeatQuantity,
   handleStripeEvent,
 } from "./billing";
+import {
+  evaluatePracticeCap,
+  computeDurationSeconds,
+  blockedMessage,
+  type PracticeCapStatus,
+} from "./fairUse";
 import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import path from "node:path";
@@ -420,6 +426,19 @@ export async function registerRoutes(
     const gate = await checkSeatAccess(Number(userId));
     if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
+    // Enforce the monthly fair-use practice cap before creating the session. At
+    // the cap, refuse with a friendly message + reset date; in the warn band,
+    // allow the session but carry the warning back so the client can surface it.
+    const cap = await checkPracticeCap(Number(userId));
+    if (cap.blocked) {
+      return res.status(403).json({
+        message: blockedMessage(cap.resetDate),
+        limitReached: true,
+        resetDate: cap.resetDate,
+        practiceCap: cap,
+      });
+    }
+
     // Start every session with the customer's own opening line so the consultant
     // walks in cold (no pre-roleplay briefing) and must uncover the situation
     // through discovery. Falls back to an empty transcript if generation fails,
@@ -465,7 +484,9 @@ export async function registerRoutes(
       createdAt: new Date().toISOString(),
       completedAt: null,
     });
-    res.json(session);
+    // Carry the cap status alongside the session so the client can show the
+    // approaching-limit banner when the user is in the warn band.
+    res.json({ ...session, practiceCap: cap });
   });
 
   app.get("/api/sessions/:id", async (req, res) => {
@@ -614,12 +635,16 @@ export async function registerRoutes(
       const track = scenarioTrack(scenario?.track);
       const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
 
+      const completedAt = new Date().toISOString();
       const updated = await storage.updateSession(session.id, {
         status: "completed",
         score: overall,
         rubricScores: JSON.stringify(rubric),
         feedback,
-        completedAt: new Date().toISOString(),
+        completedAt,
+        // Record practice time consumed (createdAt to now) so it counts toward
+        // the user's monthly fair-use total.
+        durationSeconds: computeDurationSeconds(session.createdAt, completedAt),
       });
 
       // If this completed session is the FINAL expert scenario of a certification
@@ -669,9 +694,13 @@ export async function registerRoutes(
     try {
       const session = await storage.getSession(Number(req.params.id));
       if (!session) return res.status(404).json({ message: "Session not found" });
+      const savedAt = new Date().toISOString();
       const updated = await storage.updateSession(session.id, {
         status: "saved",
-        savedAt: new Date().toISOString(),
+        savedAt,
+        // Practice time spent so far still counts toward the monthly cap even
+        // when the session is paused instead of scored.
+        durationSeconds: computeDurationSeconds(session.createdAt, savedAt),
       });
       res.json(updated);
     } catch (err: any) {
@@ -701,6 +730,16 @@ export async function registerRoutes(
     const user = await storage.getUser(Number(req.params.userId));
     if (!user) return res.status(404).json({ message: "Not found" });
     res.json(publicUser(user));
+  });
+
+  // Current monthly fair-use practice standing for a consultant. Lets the
+  // practice/scenario pages show the approaching-limit banner (warn band) or the
+  // limit-reached message (blocked) without having to attempt a session start.
+  app.get("/api/users/:userId/practice-usage", async (req, res) => {
+    const user = await storage.getUser(Number(req.params.userId));
+    if (!user) return res.status(404).json({ message: "Not found" });
+    const cap = await checkPracticeCap(user.id);
+    res.json(cap);
   });
 
   // Serve generated audio files
@@ -740,6 +779,20 @@ export async function registerRoutes(
     const track = normalizeTrack(rawTrack);
     const gate = await checkSeatAccess(Number(userId));
     if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+    // The certification exam ends in a graded practice scenario, so honor the
+    // same monthly fair-use cap here: a consultant at their limit cannot start
+    // the exam until the counter resets.
+    const cap = await checkPracticeCap(Number(userId));
+    if (cap.blocked) {
+      return res.status(403).json({
+        message: blockedMessage(cap.resetDate),
+        limitReached: true,
+        resetDate: cap.resetDate,
+        practiceCap: cap,
+      });
+    }
+
     const user = await storage.getUser(Number(userId));
     if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -818,12 +871,20 @@ export async function registerRoutes(
       );
 
       // On a pass, create the final expert-level scenario session for this track.
+      // This also creates a practice session, so it must honor the same monthly
+      // fair-use cap as every other session-creation entry point.
       let scenarioSessionId: number | null = null;
+      let capBlockedMessage: string | null = null;
       if (result.passed) {
-        const scenario = await pickExpertScenario(track);
-        if (scenario) {
-          const session = await createScenarioSession(attempt.userId, scenario);
-          scenarioSessionId = session.id;
+        const cap = await checkPracticeCap(attempt.userId);
+        if (cap.blocked) {
+          capBlockedMessage = blockedMessage(cap.resetDate);
+        } else {
+          const scenario = await pickExpertScenario(track);
+          if (scenario) {
+            const session = await createScenarioSession(attempt.userId, scenario);
+            scenarioSessionId = session.id;
+          }
         }
       }
 
@@ -841,6 +902,7 @@ export async function registerRoutes(
         passMark: WRITTEN_PASS_CORRECT,
         passPercent: WRITTEN_PASS_PERCENT,
         scenarioSessionId,
+        practiceCapBlockedMessage: capBlockedMessage,
       });
     } catch (err: any) {
       console.error("Written exam grading failed:", err);
@@ -2857,6 +2919,21 @@ async function checkSeatAccess(
     return { ok: false, status: 402, message: "You don't have an active training seat yet." };
   }
   return { ok: true };
+}
+
+// Monthly fair-use practice cap for a consultant seat. Sums the user's ended
+// sessions for the current calendar month and reports whether they're in the
+// warn band or fully blocked. Demo/founder accounts (isDemoAccount) bypass the
+// cap, matching the permanently-free convention used by checkSeatAccess. Callers
+// use this at every new-session start point; the seat gate is checked separately.
+async function checkPracticeCap(userId: number): Promise<PracticeCapStatus> {
+  const user = await storage.getUser(userId);
+  const sessions = await storage.listSessionsByUser(userId);
+  return evaluatePracticeCap({
+    sessions,
+    now: new Date(),
+    isDemoAccount: user?.isDemoAccount ?? false,
+  });
 }
 
 // Generate a short, unambiguous, uppercase alphanumeric invite code that isn't already in use.

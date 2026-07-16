@@ -11,8 +11,37 @@ import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award, Handshake, ShieldAlert, Check } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
+
+// Monthly fair-use practice standing returned by GET /api/users/:id/practice-usage.
+type PracticeCap = {
+  bypassed: boolean;
+  minutesUsed: number;
+  limitMinutes: number;
+  warnMinutes: number;
+  minutesRemaining: number;
+  warning: boolean;
+  blocked: boolean;
+  resetDate: string;
+};
+
+// Render remaining minutes as a friendly "X hr Y min" (or "Y min") string.
+function formatRemaining(minutes: number): string {
+  const safe = Math.max(0, minutes);
+  const hrs = Math.floor(safe / 60);
+  const mins = safe % 60;
+  if (hrs > 0 && mins > 0) return `${hrs} hr ${mins} min`;
+  if (hrs > 0) return `${hrs} hr`;
+  return `${mins} min`;
+}
+
+// Format the ISO reset timestamp in the user's local time (first of next month).
+function formatResetDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "the first of next month";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
 
 const LEVEL_LABELS: Record<Level, string> = {
   beginner: "Beginner",
@@ -112,6 +141,19 @@ export default function Scenarios() {
   });
   const savedSessions = (mySessions ?? []).filter((s) => s.status === "saved");
 
+  // Monthly fair-use practice standing. Drives the approaching-limit banner and,
+  // at the cap, the limit-reached message that replaces the scenario picker.
+  const { data: practiceCap } = useQuery<PracticeCap>({
+    queryKey: ["/api/users", user?.id, "practice-usage"],
+    enabled: !!user,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/users/${user!.id}/practice-usage`);
+      return res.json();
+    },
+  });
+  const capBlocked = !!practiceCap?.blocked;
+  const capWarning = !!practiceCap?.warning;
+
   const startSession = useMutation({
     mutationFn: async (scenarioId: number) => {
       const res = await apiRequest("POST", "/api/sessions", { userId: user!.id, scenarioId });
@@ -119,6 +161,11 @@ export default function Scenarios() {
     },
     onSuccess: (session) => {
       navigate(`/roleplay/${session.id}`);
+    },
+    onError: () => {
+      // A start can still be refused at the server (e.g. the cap was reached in
+      // another tab). Refresh the usage query so the limit-reached message shows.
+      queryClient.invalidateQueries({ queryKey: ["/api/users", user?.id, "practice-usage"] });
     },
   });
 
@@ -177,6 +224,7 @@ export default function Scenarios() {
   const examEligible = activeLevel === "advanced" && qualifyingCount >= REQUIRED_QUALIFYING;
 
   const handleStart = (vertical: string) => {
+    if (capBlocked) return;
     const pool = verticalGroups.get(vertical) ?? [];
     if (pool.length === 0) return;
     const picked = pool[Math.floor(Math.random() * pool.length)];
@@ -189,6 +237,49 @@ export default function Scenarios() {
         {/* Gamified practice stats: streak, office rank, and certification
             progress. Self-hides unless the office holds the paid dashboard add-on. */}
         <PracticeStatsPanel />
+        {/* Monthly fair-use practice cap. At the limit the picker is replaced by
+            a friendly limit-reached card with the reset date; approaching the
+            limit shows a heads-up banner but still lets the consultant practice. */}
+        {capBlocked && practiceCap && (
+          <Card
+            className="border-2"
+            style={{ borderColor: "#E06D00", backgroundColor: "#05162D" }}
+            data-testid="card-practice-limit-reached"
+          >
+            <CardContent className="flex items-start gap-3 py-5">
+              <Lock className="w-6 h-6 shrink-0 mt-0.5" style={{ color: "#F1830D" }} aria-hidden="true" />
+              <div className="space-y-1">
+                <p className="text-base font-semibold text-white">
+                  You've reached your monthly practice time
+                </p>
+                <p className="text-sm" style={{ color: "#E5EAF1" }}>
+                  You've used all {practiceCap.limitMinutes / 60} hours of practice time for this
+                  month. Your practice time resets on{" "}
+                  <span className="font-semibold" style={{ color: "#F1830D" }}>
+                    {formatResetDate(practiceCap.resetDate)}
+                  </span>
+                  . Thanks for putting in the reps.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+        {!capBlocked && capWarning && practiceCap && (
+          <div
+            className="flex items-center gap-3 rounded-lg border-2 px-4 py-3"
+            style={{ borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.08)" }}
+            data-testid="banner-practice-warning"
+          >
+            <Clock className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
+            <p className="text-sm">
+              <span className="font-semibold" style={{ color: "#E06D00" }}>
+                You're approaching your monthly practice limit.
+              </span>{" "}
+              You have about {formatRemaining(practiceCap.minutesRemaining)} of practice time left
+              this month. It resets on {formatResetDate(practiceCap.resetDate)}.
+            </p>
+          </div>
+        )}
         {/* Track picker — two distinct, separately-selectable cards (not a
             toggle). Each is its own square with its own icon, name, and
             description so Consulting and Leadership read as separate
@@ -277,7 +368,8 @@ export default function Scenarios() {
               <Button
                 size="sm"
                 onClick={() => navigate("/certification")}
-                style={examEligible ? { backgroundColor: "#E06D00", color: "white" } : undefined}
+                disabled={capBlocked}
+                style={examEligible && !capBlocked ? { backgroundColor: "#E06D00", color: "white" } : undefined}
                 variant={examEligible ? "default" : "outline"}
                 data-testid="button-certification-exam"
               >
@@ -368,10 +460,16 @@ export default function Scenarios() {
                 <CardContent>
                   <Button
                     onClick={() => handleStart(vertical)}
-                    disabled={startSession.isPending}
+                    disabled={startSession.isPending || capBlocked}
                     data-testid={`button-start-${vertical}`}
                   >
-                    {startSession.isPending ? "Starting..." : track === "leadership" ? "Start conflict conversation" : "Start discovery session"}
+                    {capBlocked
+                      ? "Monthly limit reached"
+                      : startSession.isPending
+                        ? "Starting..."
+                        : track === "leadership"
+                          ? "Start conflict conversation"
+                          : "Start discovery session"}
                   </Button>
                 </CardContent>
               </Card>
