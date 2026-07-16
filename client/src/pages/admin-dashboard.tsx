@@ -212,6 +212,7 @@ function GenericSectionView({ section }: { section: AdminSection }) {
           {section === "sales" && data && (
             <p className="text-white/60 text-sm mt-1" data-testid="text-sales-summary">
               {data.activeOffices} active office(s) · Total MRR ${data.totalMrr}
+              {data.totalAcademyCreditDisplay ? ` · Academy Credits ${data.totalAcademyCreditDisplay}` : ""}
             </p>
           )}
           {section !== "sales" && data?.rows && (
@@ -1097,10 +1098,11 @@ function SalesTable({ rows }: { rows: any[] }) {
           <TableHead className={headCls}>Seat MRR</TableHead>
           <TableHead className={headCls}>Manager MRR</TableHead>
           <TableHead className={headCls}>MRR</TableHead>
+          <TableHead className={headCls}>Academy Credits</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.length === 0 && <EmptyRow span={6} />}
+        {rows.length === 0 && <EmptyRow span={7} />}
         {rows.map((r) => (
           <TableRow key={r.officeId} className="border-white/10" data-testid={`row-sales-${r.officeId}`}>
             <TableCell className={cellCls}>{r.officeName}</TableCell>
@@ -1109,6 +1111,9 @@ function SalesTable({ rows }: { rows: any[] }) {
             <TableCell className={cellCls}>${r.seatsMrr}</TableCell>
             <TableCell className={cellCls}>${r.managerMrr}</TableCell>
             <TableCell className="text-white font-semibold">${r.mrr}</TableCell>
+            <TableCell className={cellCls} data-testid={`cell-academy-credits-${r.officeId}`}>
+              {r.academyCreditDisplay ?? "$0"}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
