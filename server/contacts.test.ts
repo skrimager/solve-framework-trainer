@@ -31,6 +31,7 @@ function contact(overrides: Partial<Contact> = {}): Contact {
     email: "dana@example.com",
     company: null,
     message: null,
+    referredBy: null,
     status: "new",
     type: "general",
     source: "website",
@@ -273,6 +274,30 @@ describe("admin contacts HTTP routes", () => {
     assert.equal(events.filter((e) => e.contactId === 1 && e.eventType === "created").length, 1);
   });
 
+  test("POST /api/leads persists an optional referredBy and surfaces it to admins", async () => {
+    const submit = await fetch(`${baseUrl}/api/leads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() },
+      body: JSON.stringify({ name: "Dana", email: "dana@example.com", referredBy: "Acme Motors" }),
+    });
+    assert.equal(submit.status, 201);
+    assert.equal(contacts[0].referredBy, "Acme Motors");
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts`, { headers: { cookie } });
+    const body = await res.json();
+    assert.equal(body.rows[0].referredBy, "Acme Motors");
+  });
+
+  test("POST /api/leads without referredBy stores null", async () => {
+    const res = await fetch(`${baseUrl}/api/leads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() },
+      body: JSON.stringify({ name: "Dana", email: "dana@example.com" }),
+    });
+    assert.equal(res.status, 201);
+    assert.equal(contacts[0].referredBy, null);
+  });
+
   test("GET /api/admin/contacts filters by type/priority/status", async () => {
     contacts.push(
       contact({ id: 1, type: "speaking", priority: "high", status: "new" }),
@@ -359,7 +384,7 @@ describe("admin contacts HTTP routes", () => {
     assert.match(res.headers.get("content-type") ?? "", /text\/csv/);
     const text = await res.text();
     const header = text.split("\n")[0];
-    for (const col of ["Type", "Source", "Priority", "Owner", "Follow-up"]) {
+    for (const col of ["Type", "Source", "Priority", "Owner", "Follow-up", "Referred By"]) {
       assert.ok(header.includes(col), `header should include ${col}`);
     }
   });

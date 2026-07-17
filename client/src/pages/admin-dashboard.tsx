@@ -399,6 +399,7 @@ function ContactsSection() {
                 <TableHead className={headCls}>Name</TableHead>
                 <TableHead className={headCls}>Email</TableHead>
                 <TableHead className={headCls}>Tags</TableHead>
+                <TableHead className={headCls}>Referred By</TableHead>
                 <TableHead className={headCls}>Priority</TableHead>
                 <TableHead className={headCls}>Owner</TableHead>
                 <TableHead className={headCls}>Follow-up</TableHead>
@@ -406,7 +407,7 @@ function ContactsSection() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.length === 0 && <EmptyRow span={7} />}
+              {rows.length === 0 && <EmptyRow span={8} />}
               {rows.map((r) => (
                 <TableRow
                   key={r.id}
@@ -421,6 +422,9 @@ function ContactsSection() {
                       <Tag label={r.type} />
                       <Tag label={r.source} />
                     </div>
+                  </TableCell>
+                  <TableCell className={cellCls} data-testid={`cell-contact-referred-by-${r.id}`}>
+                    {r.referredBy || "-"}
                   </TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center gap-2">
@@ -570,6 +574,11 @@ function ContactDetail({
           {contact.followUpDate && <Tag label={`follow-up: ${contact.followUpDate.slice(0, 10)}`} />}
         </div>
         {contact.message && <p className="mt-3 text-white/70 text-sm whitespace-pre-wrap">{contact.message}</p>}
+        {contact.referredBy && (
+          <p className="mt-3 text-white/70 text-sm" data-testid="text-contact-referred-by">
+            <span className="text-white/50">Referred by:</span> {contact.referredBy}
+          </p>
+        )}
 
         <div className="mt-6">
           <label className="text-white/80 text-sm font-semibold">Add note</label>

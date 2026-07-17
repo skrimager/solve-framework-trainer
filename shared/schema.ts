@@ -303,6 +303,7 @@ export const contacts = pgTable("contacts", {
   email: text("email").notNull(),
   company: text("company"), // office / company name (optional)
   message: text("message"), // optional free-text from the submitter
+  referredBy: text("referred_by"), // optional free-text: the company that referred this lead, for manual referral-credit review
   status: text("status").notNull().default("new"), // pipeline stage: 'new' | 'contacted' | 'converted'
   // What kind of contact this is. Drives future routing/forms (Phase 2+):
   // 'speaking' | 'consulting' | 'book' | 'training' | 'role_play' | 'general'.

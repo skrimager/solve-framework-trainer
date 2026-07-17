@@ -127,6 +127,13 @@
       "when": 1783106661000,
       "tag": "0017_industry_certs_academy_credits",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1783106661500,
+      "tag": "0018_lead_referred_by",
+      "breakpoints": true
     }
   ]
 }
