@@ -1299,6 +1299,9 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       email: z.string().trim().email("A valid email is required").max(200),
       company: z.string().trim().max(200).optional().or(z.literal("")),
       message: z.string().trim().max(2000).optional().or(z.literal("")),
+      // Optional referral attribution from the "Request Access" form: the company
+      // that referred this lead. Surfaced in the admin CRM for manual credit review.
+      referredBy: z.string().trim().max(200).optional().or(z.literal("")),
       source: z.string().trim().max(100).optional().or(z.literal("")),
       // Optional CRM tag. The marketing forms don't send this yet (Phase 2), so
       // it defaults to "general"; a caller may specify any contact type.
@@ -1308,12 +1311,13 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
-    const { name, email, company, message, source, type } = parsed.data;
+    const { name, email, company, message, referredBy, source, type } = parsed.data;
     const lead = await storage.createLead({
       name,
       email,
       company: company || null,
       message: message || null,
+      referredBy: referredBy || null,
       // Default to the marketing-site origin/tag unless the caller specifies.
       source: source || DEFAULT_SOURCE,
       type: type || DEFAULT_TYPE,
@@ -1851,6 +1855,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       email: l.email,
       company: l.company ?? "",
       message: l.message ?? "",
+      referredBy: l.referredBy ?? "",
       status: l.status,
       source: l.source ?? "",
       createdAt: l.createdAt,
@@ -1861,6 +1866,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       { key: "email", header: "Email" },
       { key: "company", header: "Company" },
       { key: "message", header: "Message" },
+      { key: "referredBy", header: "Referred By" },
       { key: "status", header: "Status" },
       { key: "source", header: "Source" },
       { key: "createdAt", header: "Submitted" },
@@ -1889,6 +1895,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       email: c.email,
       company: c.company ?? "",
       message: c.message ?? "",
+      referredBy: c.referredBy ?? "",
       status: c.status,
       type: c.type,
       source: c.source,
@@ -1925,6 +1932,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       { key: "owner", header: "Owner" },
       { key: "followUpDate", header: "Follow-up" },
       { key: "message", header: "Message" },
+      { key: "referredBy", header: "Referred By" },
       { key: "createdAt", header: "Created" },
     ], rows);
   });

@@ -82,6 +82,7 @@ export type AdminContact = {
   email: string;
   company: string;
   message: string;
+  referredBy: string;
   status: string;
   type: string;
   source: string;
