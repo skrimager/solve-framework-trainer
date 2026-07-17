@@ -56,12 +56,23 @@ export default function RolePlay() {
       const res = await apiRequest("POST", `/api/sessions/${id}/message`, {
         content,
         withAudio,
+        // In voice mode, ask the backend to stream the reply sentence by sentence
+        // over SSE so playback can start on the first sentence (see handleReplyStream).
+        stream: withAudio,
       });
       return res.json();
     },
-    onSuccess: (updated: Session & { closeCheckpoint?: boolean }) => {
+    onSuccess: (
+      updated: Session & { closeCheckpoint?: boolean; replyStreamUrl?: string },
+    ) => {
       queryClient.setQueryData(["/api/sessions", id], updated);
-      voiceRef.current?.handleReply(JSON.parse(updated.transcript));
+      // When the backend opened a streamed turn, consume it over SSE and play the
+      // reply sentence by sentence. Otherwise fall back to the single-clip path.
+      if (updated.replyStreamUrl) {
+        voiceRef.current?.handleReplyStream(updated.replyStreamUrl);
+      } else {
+        voiceRef.current?.handleReply(JSON.parse(updated.transcript));
+      }
       setLastFailedMessage(null);
       // The consultant appears to be wrapping up. Force an explicit choice rather
       // than silently ending or silently holding the session open.

@@ -1,8 +1,30 @@
 import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores } from "@shared/schema";
+import { createSentenceStreamer } from "./sentences";
 
 const client = new OpenAI();
+
+// Temporary instrumentation for verifying OpenAI automatic prompt caching in a
+// live session. OpenAI serves an identical request PREFIX from cache once it
+// exceeds ~1024 tokens; the response surfaces how many input tokens were a cache
+// hit. On the Responses API that lives at usage.input_tokens_details.cached_tokens
+// (the Chat Completions API uses usage.prompt_tokens_details.cached_tokens); we
+// read whichever is present. A rising cached_tokens across turns 2, 3, 4 ... of a
+// session confirms the stable persona/rubric prefix is being reused. Remove once
+// caching has been verified in production.
+function logCachedTokens(label: string, usage: unknown): void {
+  if (!usage || typeof usage !== "object") return;
+  const u = usage as {
+    input_tokens?: number;
+    prompt_tokens?: number;
+    input_tokens_details?: { cached_tokens?: number };
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+  const cached = u.input_tokens_details?.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+  const inputTokens = u.input_tokens ?? u.prompt_tokens ?? 0;
+  console.log(`[prompt-cache] ${label}: cached_tokens=${cached} input_tokens=${inputTokens}`);
+}
 
 // Derives a stable `prompt_cache_key` from the unchanging prefix of a prompt.
 // OpenAI's Responses API caches prompts >=1024 tokens automatically by hashing
@@ -98,6 +120,7 @@ export async function getCustomerOpening(
     prompt_cache_key: cacheKeyForPrefix(customerPersona),
   });
 
+  logCachedTokens("customer-opening", response.usage);
   return (response.output_text || "").trim();
 }
 
@@ -225,7 +248,54 @@ export async function getCustomerReply(
     prompt_cache_key: cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier)),
   });
 
+  logCachedTokens("customer-reply", response.usage);
   return (response.output_text || "").trim();
+}
+
+// Streaming variant of getCustomerReply. Requests the model reply with
+// stream:true and, as tokens arrive, splits them into whole sentences with the
+// shared boundary detector. Each COMPLETED sentence is handed to `onSentence`
+// immediately (so the caller can start synthesizing/sending its audio) while the
+// rest of the reply keeps streaming in. Returns the full trimmed reply text once
+// the stream ends. Uses the identical prompt + prompt_cache_key as the
+// non-streaming path, so prompt caching behaves the same. `onSentence` is called
+// in order and is NOT awaited here; the caller owns any per-sentence work
+// (TTS) so it can overlap with continued text generation.
+export async function streamCustomerReply(
+  customerPersona: string,
+  transcript: TranscriptMessage[],
+  difficulty: string = "intermediate",
+  escalationTier: number = 0,
+  variantSection: string = "",
+  onSentence: (sentence: string, index: number) => void = () => {},
+): Promise<string> {
+  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
+  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
+
+  const stream = await client.responses.create({
+    model: CHAT_MODEL,
+    input,
+    prompt_cache_key: cacheKeyForPrefix(stablePrefix),
+    stream: true,
+  });
+
+  const streamer = createSentenceStreamer();
+  let fullText = "";
+  let index = 0;
+
+  for await (const event of stream) {
+    if (event.type === "response.output_text.delta") {
+      const delta = event.delta ?? "";
+      if (!delta) continue;
+      fullText += delta;
+      for (const sentence of streamer.push(delta)) onSentence(sentence, index++);
+    } else if (event.type === "response.completed") {
+      logCachedTokens("customer-reply(stream)", event.response?.usage);
+    }
+  }
+  for (const sentence of streamer.flush()) onSentence(sentence, index++);
+
+  return fullText.trim();
 }
 
 const RUBRIC_SYSTEM = `You are scoring a discovery-training role-play transcript. This is discovery architecture practice — NOT sales training — so evaluate the consultant's ability to uncover real customer needs and build trust through understanding, not persuasion tactics.

@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, streamCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -574,7 +574,7 @@ export async function registerRoutes(
       const scenario = await storage.getScenario(session.scenarioId);
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
-      const { content, withAudio } = req.body ?? {};
+      const { content, withAudio, stream } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);
 
       const consultantMsg = transcriptMessageSchema.parse({
@@ -591,29 +591,43 @@ export async function registerRoutes(
       // score now or continue the conversation.
       const closeCheckpoint = detectCloseIntent(content);
 
-      // Within-level difficulty escalation ("dangle the carrot"): once the
-      // trainee is consistently clearing the qualifying bar at this level, nudge
-      // the persona incrementally harder. Computed from already-completed
-      // sessions, so it is stable across this session's turns (keeping the
-      // customer-reply prompt prefix cacheable). Defaults to base (tier 0) if the
-      // lookup fails, so it can never break a turn.
-      let escalationTier = 0;
-      try {
-        const track = scenarioTrack(scenario.track);
-        const [allSessions, allScenarios] = await Promise.all([
-          storage.listSessionsByUser(session.userId),
-          storage.listScenarios(),
-        ]);
-        const scoresAtLevel = scoresForTrackAtLevel(track, scenario.difficulty, allSessions, allScenarios);
-        escalationTier = computeEscalationTier(countQualifyingSessions(scoresAtLevel));
-      } catch {
-        escalationTier = 0;
+      const msgId = randomUUID();
+
+      // Streaming voice path: do NOT block on the full reply here. Append the
+      // consultant turn plus an empty customer placeholder, persist, and hand the
+      // client a Server-Sent Events URL. The turn-stream endpoint then streams the
+      // reply text sentence by sentence, synthesizing and pushing each sentence's
+      // audio the instant it is ready (see /turn-stream below). This is what lets
+      // the first spoken sentence start within about a second of the user's turn
+      // ending instead of after the whole reply is generated and synthesized.
+      if (stream && withAudio) {
+        const placeholder = transcriptMessageSchema.parse({
+          role: "customer",
+          content: "",
+          audioStatus: "pending",
+          // Replay uses this same-msg endpoint later, once content is filled in.
+          audioUrl: `/api/sessions/${session.id}/audio-stream/${msgId}`,
+          msgId,
+          timestamp: new Date().toISOString(),
+        });
+        transcript.push(placeholder);
+        const updated = await storage.updateSession(session.id, {
+          transcript: JSON.stringify(transcript),
+        });
+        res.json({
+          ...updated,
+          closeCheckpoint,
+          streamMsgId: msgId,
+          replyStreamUrl: `/api/sessions/${session.id}/turn-stream/${msgId}`,
+        });
+        return;
       }
+
+      const escalationTier = await computeSessionEscalationTier(session, scenario);
 
       const variantSection = sessionVariantSection(scenario, session);
       const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
 
-      const msgId = randomUUID();
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",
         content: customerReplyText,
@@ -804,6 +818,27 @@ export async function registerRoutes(
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
       setStatus: (status) => updateSessionMsgAudioStatus(session.id, req.params.msgId, status),
+    });
+  });
+
+  // Server-Sent Events turn stream. Generates the customer's reply for the
+  // pending placeholder message created by POST /message (stream mode), streaming
+  // the text token by token, and pushes one `sentence` event per completed
+  // sentence the instant that sentence's audio is synthesized. This replaces the
+  // old client poll loop with a push channel so playback of sentence one can
+  // begin within about a second while later sentences are still being generated.
+  app.get("/api/sessions/:id/turn-stream/:msgId", async (req, res) => {
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await runTurnStream(res, {
+      msgId: req.params.msgId,
+      session,
+      scenario,
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      persist: (content, status) => updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status),
     });
   });
 
@@ -3421,5 +3456,141 @@ async function streamMessageAudio(res: Response, opts: StreamMessageAudioOptions
     } else {
       res.end();
     }
+  }
+}
+
+// On-disk cache path for one sentence's synthesized audio within a streamed
+// reply. Keyed by message id + sentence index so the SSE endpoint can write and
+// the existing /api/audio/:filename route can serve each sentence clip.
+function sentenceAudioPath(msgId: string, index: number): string {
+  return path.join(AUDIO_DIR, `${msgId}-${index}.mp3`);
+}
+
+// Recomputes the within-level difficulty escalation tier for a session. Pulled
+// out of the message route so the streaming turn endpoint derives the identical
+// tier (it is deterministic from already-completed sessions, so it stays stable
+// across a session's turns and keeps the customer-reply prompt prefix cacheable).
+// Defaults to base (tier 0) if the lookup fails, so it can never break a turn.
+async function computeSessionEscalationTier(session: Session, scenario: Scenario): Promise<number> {
+  try {
+    const track = scenarioTrack(scenario.track);
+    const [allSessions, allScenarios] = await Promise.all([
+      storage.listSessionsByUser(session.userId),
+      storage.listScenarios(),
+    ]);
+    const scoresAtLevel = scoresForTrackAtLevel(track, scenario.difficulty, allSessions, allScenarios);
+    return computeEscalationTier(countQualifyingSessions(scoresAtLevel));
+  } catch {
+    return 0;
+  }
+}
+
+// Fills in a previously-created placeholder customer message with its final text
+// and audio status once the streamed reply has finished. Keeps replay working:
+// the persisted content is what /audio-stream re-synthesizes for later playback.
+async function updateSessionMsgContentAndStatus(
+  sessionId: number,
+  msgId: string,
+  content: string,
+  status: MsgAudioStatus,
+): Promise<void> {
+  const latest = await storage.getSession(sessionId);
+  if (!latest) return;
+  const transcript: TranscriptMessage[] = JSON.parse(latest.transcript);
+  const idx = transcript.findIndex((m) => m.msgId === msgId);
+  if (idx === -1) return;
+  transcript[idx] = { ...transcript[idx], content, audioStatus: status };
+  await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
+}
+
+interface RunTurnStreamOptions {
+  msgId: string;
+  session: Session;
+  scenario: Scenario;
+  voice: string;
+  instructions?: string;
+  persist: (content: string, status: MsgAudioStatus) => Promise<void>;
+}
+
+// Drives one streamed customer turn over Server-Sent Events. Streams the reply
+// text, and for each completed sentence starts TTS immediately (overlapping
+// continued generation) while emitting `sentence` events strictly in order so
+// the client can queue them gaplessly. Emits a final `done` (or `error`) event
+// and persists the full reply text + audio status when finished.
+async function runTurnStream(res: Response, opts: RunTurnStreamOptions): Promise<void> {
+  const { msgId, session, scenario, voice, instructions, persist } = opts;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  // Disable proxy buffering (nginx) so events flush to the client immediately.
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  let clientGone = false;
+  res.on("close", () => {
+    clientGone = true;
+  });
+
+  const sse = (event: string, data: unknown) => {
+    if (clientGone || res.writableEnded) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+  // The LLM should see the history through the consultant's latest turn, not the
+  // empty placeholder we are about to fill.
+  const history = transcript.filter((m) => m.msgId !== msgId);
+
+  const escalationTier = await computeSessionEscalationTier(session, scenario);
+  const variantSection = sessionVariantSection(scenario, session);
+
+  let anyAudio = false;
+  // Serializes SSE emission in sentence order even though each sentence's TTS
+  // runs concurrently with generation and with the other sentences.
+  let emitChain: Promise<void> = Promise.resolve();
+
+  const handleSentence = (sentence: string, index: number) => {
+    const ttsPromise = synthesizeSpeech(sentence, voice, instructions)
+      .then(async (buf) => {
+        await fs.writeFile(sentenceAudioPath(msgId, index), buf);
+        return true;
+      })
+      .catch((err) => {
+        console.error("Sentence TTS failed:", err);
+        return false;
+      });
+    emitChain = emitChain.then(async () => {
+      const ok = await ttsPromise;
+      if (ok) anyAudio = true;
+      sse("sentence", {
+        index,
+        text: sentence,
+        audioUrl: ok ? `/api/audio/${msgId}-${index}.mp3` : null,
+      });
+    });
+  };
+
+  let fullText = "";
+  try {
+    fullText = await streamCustomerReply(
+      personaCoreFor(scenario),
+      history,
+      scenario.difficulty,
+      escalationTier,
+      variantSection,
+      handleSentence,
+    );
+    await emitChain;
+    await persist(fullText, anyAudio ? "ready" : "failed");
+    sse("done", { msgId, text: fullText });
+  } catch (err) {
+    console.error("Turn stream failed:", err);
+    await emitChain.catch(() => {});
+    // Persist whatever text was generated so the transcript is never left blank.
+    await persist(fullText, "failed").catch(() => {});
+    sse("error", { message: "reply_failed" });
+  } finally {
+    if (!res.writableEnded) res.end();
   }
 }
