@@ -167,6 +167,21 @@ export function useVoiceConversation({
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const audioBoostConnectedRef = useRef(false);
+  // Streamed-reply playback state. A single turn's reply arrives as a series of
+  // per-sentence MP3s pushed over Server-Sent Events. When Web Audio is wired we
+  // decode each clip and schedule it back-to-back on the context timeline for
+  // truly gapless speech; otherwise we fall back to playing the clips one after
+  // another on the plain audio element (small seams between clips, still no poll).
+  const replyStreamRef = useRef<EventSource | null>(null);
+  const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextStartTimeRef = useRef(0);
+  // Bumped whenever a stream is torn down (barge-in, a new turn, voice off) so a
+  // late-arriving decode from the previous turn knows not to schedule itself.
+  const streamGenRef = useRef(0);
+  const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Element-fallback sequential queue (used only when Web Audio is unavailable).
+  const elementQueueRef = useRef<string[]>([]);
+  const elementPlayingRef = useRef(false);
   const draftBeforeListening = useRef("");
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // handleSend and dispatch are defined below; keep refs so the recognition
@@ -237,7 +252,36 @@ export function useVoiceConversation({
     }
   }, [getAudioEl, setupAudioBoost]);
 
+  // Tear down any in-flight streamed reply: close the SSE connection, cancel the
+  // end-of-reply timer, and stop every scheduled Web Audio source. Bumping the
+  // generation makes any decode still in flight discard its buffer instead of
+  // scheduling it. Called on barge-in, a new turn, and voice-mode off.
+  const stopReplyStream = useCallback(() => {
+    streamGenRef.current++;
+    if (replyStreamRef.current) {
+      replyStreamRef.current.close();
+      replyStreamRef.current = null;
+    }
+    if (streamEndTimerRef.current) {
+      clearTimeout(streamEndTimerRef.current);
+      streamEndTimerRef.current = null;
+    }
+    for (const src of scheduledSourcesRef.current) {
+      try {
+        src.onended = null;
+        src.stop();
+      } catch {
+        // Already stopped / never started; ignore.
+      }
+    }
+    scheduledSourcesRef.current = [];
+    nextStartTimeRef.current = 0;
+    elementQueueRef.current = [];
+    elementPlayingRef.current = false;
+  }, []);
+
   const stopAudio = useCallback(() => {
+    stopReplyStream();
     const el = audioElRef.current;
     if (!el) return;
     el.onended = null;
@@ -247,7 +291,7 @@ export function useVoiceConversation({
     } catch {
       // Some browsers throw on currentTime before metadata loads; ignore.
     }
-  }, []);
+  }, [stopReplyStream]);
 
   const playAudio = useCallback(
     (url: string) => {
@@ -477,6 +521,7 @@ export function useVoiceConversation({
       clearListenWatchdog();
       disposeRecognition();
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      stopReplyStream();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -559,6 +604,150 @@ export function useVoiceConversation({
     }
   }, []);
 
+  // Consume a turn's reply as it is produced: the server pushes one Server-Sent
+  // Event per finished sentence ({ index, text, audioUrl }), then a `done` (or
+  // `error`) event. We start playing the first sentence the moment it lands and
+  // schedule each subsequent one to follow the previous without a gap, so the
+  // customer starts speaking about a sentence-worth of latency after the reply
+  // begins generating rather than after the whole reply is written and
+  // synthesized. This is the push replacement for the old audio poll.
+  const handleReplyStream = useCallback(
+    (streamUrl: string) => {
+      if (!voiceModeRef.current) return;
+      // Supersede any prior stream and start a fresh generation.
+      stopReplyStream();
+      const gen = streamGenRef.current;
+      const ctx = audioContextRef.current;
+      const gain = gainNodeRef.current;
+      const useWebAudio = !!(ctx && gain);
+      if (useWebAudio) ctx!.resume?.().catch(() => {});
+
+      let sawSentence = false;
+      let streamDone = false;
+      let pending = 0;
+      // Decodes are chained so clips schedule in the order sentences arrived even
+      // if a later, shorter clip decodes first.
+      let decodeChain: Promise<void> = Promise.resolve();
+
+      const settle = () => {
+        onReplyAudioSettledRef.current?.();
+      };
+
+      // Web Audio path: dispatch AUDIO_ENDED once the last scheduled clip has
+      // finished. We know the timeline end, so a single timer beats juggling
+      // per-source onended handlers as more clips keep arriving.
+      const scheduleFinishWebAudio = () => {
+        if (gen !== streamGenRef.current) return;
+        if (!streamDone || pending > 0) return;
+        const remainingMs = Math.max(0, (nextStartTimeRef.current - ctx!.currentTime) * 1000);
+        if (streamEndTimerRef.current) clearTimeout(streamEndTimerRef.current);
+        streamEndTimerRef.current = setTimeout(() => {
+          streamEndTimerRef.current = null;
+          if (gen !== streamGenRef.current) return;
+          dispatchRef.current({ type: "AUDIO_ENDED" });
+          settle();
+        }, remainingMs + 60);
+      };
+
+      const scheduleClip = async (url: string) => {
+        const resp = await fetch(`${API_BASE}${url}`);
+        const bytes = await resp.arrayBuffer();
+        const buffer = await ctx!.decodeAudioData(bytes);
+        if (gen !== streamGenRef.current) return; // torn down mid-decode
+        const source = ctx!.createBufferSource();
+        source.buffer = buffer;
+        source.connect(gain!);
+        const startAt = Math.max(ctx!.currentTime, nextStartTimeRef.current);
+        source.start(startAt);
+        nextStartTimeRef.current = startAt + buffer.duration;
+        scheduledSourcesRef.current.push(source);
+      };
+
+      // Element-fallback path: play queued clips one after another.
+      const playNextFromElementQueue = () => {
+        if (gen !== streamGenRef.current) return;
+        const next = elementQueueRef.current.shift();
+        if (!next) {
+          elementPlayingRef.current = false;
+          if (streamDone) {
+            dispatchRef.current({ type: "AUDIO_ENDED" });
+            settle();
+          }
+          return;
+        }
+        elementPlayingRef.current = true;
+        const el = getAudioEl();
+        el.onended = () => playNextFromElementQueue();
+        el.src = `${API_BASE}${next}`;
+        el.muted = false;
+        el.volume = 1.0;
+        el.play().catch(() => {
+          // A clip failed to play; skip it and keep the reply moving.
+          playNextFromElementQueue();
+        });
+      };
+
+      const onSentence = (audioUrl: string) => {
+        if (gen !== streamGenRef.current) return;
+        // First sentence: leave `processing` for `ai_speaking`. We start playback
+        // ourselves (below), so no PLAY_AUDIO url is handed to the machine.
+        if (!sawSentence) {
+          sawSentence = true;
+          if (phaseRef.current === "processing") {
+            dispatchRef.current({ type: "REPLY_AUDIO_READY" });
+          }
+        }
+        if (useWebAudio) {
+          pending++;
+          decodeChain = decodeChain
+            .then(() => scheduleClip(audioUrl))
+            .catch(() => {})
+            .then(() => {
+              pending--;
+              scheduleFinishWebAudio();
+            });
+        } else {
+          elementQueueRef.current.push(audioUrl);
+          if (!elementPlayingRef.current) playNextFromElementQueue();
+        }
+      };
+
+      const finish = () => {
+        streamDone = true;
+        if (replyStreamRef.current) {
+          replyStreamRef.current.close();
+          replyStreamRef.current = null;
+        }
+        if (!sawSentence) {
+          // Reply produced no playable audio; keep the loop moving.
+          dispatchRef.current({ type: "REPLY_NO_AUDIO" });
+          settle();
+          return;
+        }
+        if (useWebAudio) scheduleFinishWebAudio();
+        else if (!elementPlayingRef.current) playNextFromElementQueue();
+      };
+
+      const es = new EventSource(`${API_BASE}${streamUrl}`);
+      replyStreamRef.current = es;
+      es.addEventListener("sentence", (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data) as { audioUrl?: string };
+          if (data.audioUrl) onSentence(data.audioUrl);
+        } catch {
+          // Malformed event; ignore this sentence.
+        }
+      });
+      es.addEventListener("done", () => finish());
+      es.addEventListener("error", () => {
+        // Network/stream error. If nothing has played, fail the turn safely; if
+        // some audio already scheduled, let it finish and treat this as the end.
+        if (es.readyState === EventSource.CLOSED || !sawSentence) finish();
+      });
+    },
+    [stopReplyStream, getAudioEl]
+  );
+
   const isListening = phase === "listening";
   const micActive = isListening || isDictating;
   const voiceStatus = !voiceMode
@@ -599,6 +788,7 @@ export function useVoiceConversation({
     handleVoiceModeToggle,
     handleSend,
     handleReply,
+    handleReplyStream,
     stopAudio,
   };
 }
