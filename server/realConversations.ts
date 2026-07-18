@@ -6,6 +6,7 @@
 // existing scoreTranscript unchanged.
 
 import type { TranscriptMessage, RubricScores } from "@shared/schema";
+import { WEAK_PROCESS_THRESHOLD } from "./llm";
 
 // The two paste-based submission methods (Phase 1) plus 'audio' (Phase 2, a file
 // upload transcribed by Whisper). All three land in the SAME scoring pipeline.
@@ -98,6 +99,34 @@ const CUSTOMER_LABELS = new Set([
 // "From: Jane <j@x.com>"). Captures the label and the remainder.
 const LABEL_PREFIX = /^\s*([A-Za-z][A-Za-z .'@<>()\-]{0,40}?)\s*[:>-]\s+(.*)$/;
 
+// A leading timestamp token that phone systems, Zoom, and other call-transcript
+// exporters prefix onto each line. Matched forms (anchored at the very start):
+//   [00:14]  [00:14:32]  (00:14)  (00:14:32)  00:14  00:14:32
+// optionally followed by a single separator (":", "-", or ">") and surrounding
+// spaces. Supports both MM:SS and HH:MM:SS digit groupings. Only a LEADING token
+// is stripped, so a time inside a sentence ("I'll be there at 3:45") is untouched.
+const LEADING_TIMESTAMP =
+  /^\s*(?:\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]|\(\s*\d{1,2}:\d{2}(?::\d{2})?\s*\)|\d{1,2}:\d{2}(?::\d{2})?)\s*[-:>]?\s*/;
+
+// Removes a leading timestamp so speaker-label detection sees the label at the
+// start of the line. The timestamp is discarded, not retained: TranscriptMessage
+// carries no timestamp-display field that scoring consumes (each parsed message
+// already gets a single parse-time ISO stamp). A line with no leading timestamp
+// is returned unchanged.
+export function stripLeadingTimestamp(line: string): string {
+  return line.replace(LEADING_TIMESTAMP, "");
+}
+
+// Generic diarization labels that meeting/phone tools emit instead of names, e.g.
+// "Speaker A", "Speaker B", "Speaker 1", "Speaker 2". They carry no inherent
+// rep-vs-customer meaning, so classifyLabel cannot map them; they are resolved by
+// order of first appearance instead (see resolveGenericSpeakerRole).
+const GENERIC_SPEAKER_LABEL = /^speaker\s*[a-z0-9]+$/i;
+
+function isGenericSpeakerLabel(label: string): boolean {
+  return GENERIC_SPEAKER_LABEL.test(label.trim());
+}
+
 function classifyLabel(label: string): ParsedRole | null {
   const normalized = label.trim().toLowerCase();
   if (REP_LABELS.has(normalized)) return "consultant";
@@ -107,10 +136,33 @@ function classifyLabel(label: string): ParsedRole | null {
   return null;
 }
 
+// Resolves a generic speaker label to a role by the order it first appears in THIS
+// transcript: the first distinct label is the customer and the second is the
+// consultant/rep, matching the customer-led convention used for the no-labels
+// fallback (the customer leads, the rep responds). A third-or-later distinct
+// label collapses to customer rather than introducing a new role, keeping the
+// binary role model intact for rare three-plus-speaker transcripts. The
+// assignments map persists the label-to-role decisions across the parse.
+function resolveGenericSpeakerRole(
+  label: string,
+  assignments: Map<string, ParsedRole>
+): ParsedRole {
+  const key = label.trim().toLowerCase();
+  const existing = assignments.get(key);
+  if (existing) return existing;
+  const role: ParsedRole = assignments.size === 1 ? "consultant" : "customer";
+  assignments.set(key, role);
+  return role;
+}
+
 // Parses a pasted text/SMS/chat log or an email thread into TranscriptMessage[].
 //
 // Heuristics (deterministic, no model call):
+//   * A leading timestamp ("[00:14] ", "00:14 - ") is stripped first so it never
+//     hides the speaker label behind it.
 //   * Lines with a recognized speaker label ("Me:", "Customer:") take that role.
+//   * Generic diarization labels ("Speaker A:", "Speaker B:") are resolved by
+//     order of first appearance: first distinct label -> customer, second -> rep.
 //   * Unlabeled lines inherit the previous line's role (multi-line messages).
 //   * If a submission has NO recognizable labels at all, we alternate starting
 //     with the customer, since a real discovery conversation is customer-led and
@@ -132,14 +184,27 @@ export function parsePastedTranscript(
   const messages: TranscriptMessage[] = [];
   let sawAnyLabel = false;
   let lastRole: ParsedRole = "customer";
+  // Per-transcript memory of which role each generic "Speaker X" label maps to.
+  const genericSpeakerRoles = new Map<string, ParsedRole>();
 
-  for (const line of lines) {
+  for (const rawLine of lines) {
     // Skip common email envelope noise so it does not become a customer turn.
-    if (submissionType === "email" && isEmailEnvelopeLine(line)) continue;
+    if (submissionType === "email" && isEmailEnvelopeLine(rawLine)) continue;
+
+    // Strip a leading timestamp before anything else so label detection sees the
+    // label at the start. A line that was only a timestamp becomes empty; skip it.
+    const line = stripLeadingTimestamp(rawLine).trim();
+    if (line.length === 0) continue;
 
     const match = line.match(LABEL_PREFIX);
     if (match) {
-      const role = classifyLabel(match[1]);
+      const label = match[1];
+      let role = classifyLabel(label);
+      // Fall back to generic-speaker resolution for "Speaker A/B/1/2" style labels
+      // that carry no semantic rep-vs-customer meaning.
+      if (!role && isGenericSpeakerLabel(label)) {
+        role = resolveGenericSpeakerRole(label, genericSpeakerRoles);
+      }
       const body = match[2].trim();
       if (role) {
         sawAnyLabel = true;
@@ -227,23 +292,48 @@ function isEmailEnvelopeLine(line: string): boolean {
 }
 
 // Maps each practice rubric dimension to the SOLVE step it most reflects, so the
-// weakest dimension can be surfaced as the step where the real conversation
-// stalled. This is a presentation-only derivation over the UNCHANGED practice
-// rubric output; it never alters scoring.
+// step where a real conversation stalled can be surfaced. This is a
+// presentation-only derivation over the UNCHANGED practice rubric output; it
+// never alters scoring.
+//
+// The entries are ordered to match the canonical SOLVE sequence (Situation, Open,
+// Listen, Visualize success, Engineer the Solution) so that iteration order here
+// IS the sequence order. The dimension-to-step semantic mapping is unchanged;
+// only the ordering was fixed. The canonical sequence and its exact step names
+// are a standing product rule and must not be altered.
 const RUBRIC_KEY_TO_SOLVE_STEP: Record<keyof RubricScores, string> = {
-  needsDiscovery: "Listen",
-  objectionPrevention: "Open",
   trustBuilding: "Situation",
-  naturalClose: "Engineer the Solution",
+  objectionPrevention: "Open",
+  needsDiscovery: "Listen",
   relationshipContinuity: "Visualize success",
+  naturalClose: "Engineer the Solution",
 };
 
-// Deterministically derives the "stalled step": the SOLVE step corresponding to
-// the lowest-scoring rubric dimension. Ties break by the fixed key order above
-// (stable, testable). Returns null when there is no rubric to inspect.
+// A dimension at or below this score counts as a genuine breakdown (a "failed"
+// step), reusing the same weak-process bar the scorer uses to decide discovery
+// was too shallow to pass. Kept as the single source of truth for "low score".
+const STALLED_STEP_FAILURE_THRESHOLD = WEAK_PROCESS_THRESHOLD;
+
+// Deterministically derives the "stalled step". When one or more dimensions show
+// a real breakdown (score at or below STALLED_STEP_FAILURE_THRESHOLD), the
+// EARLIEST failing step in canonical SOLVE sequence is returned: an upstream miss
+// (failing Situation or Open early) drags the downstream steps down as a
+// consequence, so the earliest failure is the true root cause, not whichever
+// symptom happens to score lowest. When nothing failed (all dimensions above the
+// threshold), we fall back to the single lowest-scoring step so the field is
+// still populated for coaching. Iteration follows SOLVE order, so ties resolve to
+// the earlier step. Returns null when there is no rubric to inspect.
 export function deriveStalledStep(rubric: RubricScores | null | undefined): string | null {
   if (!rubric) return null;
   const keys = Object.keys(RUBRIC_KEY_TO_SOLVE_STEP) as (keyof RubricScores)[];
+
+  for (const key of keys) {
+    const score = typeof rubric[key] === "number" ? (rubric[key] as number) : 0;
+    if (score <= STALLED_STEP_FAILURE_THRESHOLD) {
+      return RUBRIC_KEY_TO_SOLVE_STEP[key];
+    }
+  }
+
   let worstKey: keyof RubricScores | null = null;
   let worstScore = Infinity;
   for (const key of keys) {
