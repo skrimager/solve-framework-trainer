@@ -28,6 +28,7 @@ import {
   Flame,
   LogOut,
   ArrowLeft,
+  ClipboardCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -190,6 +191,17 @@ export default function Dashboard() {
             <p className="text-xs text-white/50 truncate">SOLVE Platform - discovery training</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/real-conversations")}
+              className="gap-1.5 bg-transparent text-white hover:text-white"
+              style={{ borderColor: ORANGE }}
+              data-testid="link-nav-real-conversations"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Real Conversations</span>
+            </Button>
             <a
               href="https://solveframework.com"
               className="text-xs font-medium hidden sm:inline-flex items-center gap-1 hover:underline"
