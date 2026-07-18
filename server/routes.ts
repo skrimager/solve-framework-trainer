@@ -35,6 +35,13 @@ import {
 } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
+import {
+  parsePastedTranscript,
+  deriveStalledStep,
+  isValidSubmissionType,
+  REAL_CONVERSATION_CONSENT_TEXT,
+  type RealConversationScorer,
+} from "./realConversations";
 import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
 import {
   buildSequence,
@@ -1033,6 +1040,8 @@ export async function registerRoutes(
   });
 
   registerCoachingRoutes(app);
+
+  registerRealConversationRoutes(app);
 
   registerManagerRosterRoutes(app);
 
@@ -2548,6 +2557,111 @@ export function registerCoachingRoutes(
       console.error("Coaching reply failed:", err);
       res.status(500).json({ message: err.message ?? "Failed to get a coaching reply" });
     }
+  });
+}
+
+// ===========================================================================
+// Real Conversation Scoring (Phase 1). A rep pastes a real discovery
+// conversation (text/SMS/chat or an email thread); it is parsed into the SAME
+// TranscriptMessage[] the practice engine consumes and scored by the UNCHANGED
+// scoreTranscript. Results live in their own `real_conversations` table so they
+// never mix with practice sessions, analytics, or level progression.
+//
+// Two routes, both gated by the existing paid-seat check (checkSeatAccess):
+//   POST /api/real-conversations           — submit + score a real conversation
+//   GET  /api/real-conversations?userId=N  — list the caller's own submissions
+//
+// Consent is mandatory: a submission is rejected unless consentAccepted is true,
+// and a timestamped consent record (submitter id + submission id + timestamp) is
+// persisted with the row.
+// ===========================================================================
+export function registerRealConversationRoutes(
+  app: Express,
+  opts: { scorer?: RealConversationScorer } = {},
+): void {
+  // Injectable so tests can score without the OpenAI client. Defaults to the
+  // same engine practice sessions use, called with its default consulting track.
+  // The engine's return type unions consulting + leadership rubrics; Phase 1
+  // real conversations always score on the default consulting track, so the
+  // rubric is RubricScores. The cast narrows to that Phase 1 contract.
+  const scorer: RealConversationScorer = opts.scorer ?? (scoreTranscript as RealConversationScorer);
+
+  app.post("/api/real-conversations", async (req, res) => {
+    try {
+      const { userId, submissionType, rawTranscript, consentAccepted } = req.body ?? {};
+
+      const submitterId = Number(userId);
+      if (!submitterId) return res.status(400).json({ message: "userId is required" });
+
+      const submitter = await storage.getUser(submitterId);
+      if (!submitter) return res.status(401).json({ message: "Unknown user" });
+
+      // Paid-seat gate, identical to practice. 402 when the office/seat is unpaid.
+      const gate = await checkSeatAccess(submitterId);
+      if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+      if (!isValidSubmissionType(submissionType)) {
+        return res.status(400).json({ message: "submissionType must be 'text_chat' or 'email'." });
+      }
+
+      const transcriptText = typeof rawTranscript === "string" ? rawTranscript.trim() : "";
+      if (!transcriptText) {
+        return res.status(400).json({ message: "Paste the conversation you want scored." });
+      }
+
+      // Consent gate: no submission is accepted or scored without it.
+      if (consentAccepted !== true) {
+        return res.status(400).json({ message: REAL_CONVERSATION_CONSENT_TEXT });
+      }
+
+      const parsed = parsePastedTranscript(transcriptText, submissionType);
+      if (parsed.length === 0) {
+        return res.status(400).json({ message: "That submission had no readable conversation content." });
+      }
+
+      // Reuse the practice engine unchanged (default consulting track/difficulty).
+      const { rubric, feedback, overall } = await scorer(parsed);
+      const stalledStep = deriveStalledStep(rubric as any);
+
+      const nowIso = new Date().toISOString();
+      const created = await storage.createRealConversation({
+        // Phase 1: a rep only ever scores their OWN conversation, so submitter
+        // and subject are the same. subjectRepUserId is stored explicitly so
+        // later phases (a manager submitting on a rep's behalf) need no reshape.
+        submittedByUserId: submitterId,
+        subjectRepUserId: submitterId,
+        officeId: submitter.officeId,
+        submissionType,
+        rawTranscript: transcriptText,
+        originalAudioFilename: null,
+        overallScore: overall,
+        rubricScores: JSON.stringify(rubric),
+        feedback,
+        stalledStep,
+        consentAccepted: true,
+        consentAcceptedAt: nowIso,
+        createdAt: nowIso,
+        submissionCountedForCap: null,
+        fieldVerifiedEligible: null,
+      });
+
+      res.json(created);
+    } catch (err: any) {
+      console.error("Real conversation scoring failed:", err);
+      res.status(500).json({ message: err.message ?? "Failed to score the conversation" });
+    }
+  });
+
+  app.get("/api/real-conversations", async (req, res) => {
+    const requesterId = Number(req.query.userId);
+    if (!requesterId) return res.status(400).json({ message: "userId is required" });
+
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+
+    // Reps only ever see their own submissions in Phase 1.
+    const rows = await storage.listRealConversationsByUser(requesterId);
+    res.json(rows);
   });
 }
 

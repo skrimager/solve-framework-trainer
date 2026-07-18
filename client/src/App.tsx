@@ -11,6 +11,7 @@ import Register from "@/pages/register";
 import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
 import Results from "@/pages/results";
+import RealConversations from "@/pages/real-conversations";
 import Dashboard from "@/pages/dashboard";
 import Certification from "@/pages/certification";
 import AdminLogin from "@/pages/admin-login";
@@ -67,6 +68,11 @@ function AppRouter() {
       <Route path="/certification">
         <RequireAuth>
           <Certification />
+        </RequireAuth>
+      </Route>
+      <Route path="/real-conversations">
+        <RequireAuth>
+          <RealConversations />
         </RequireAuth>
       </Route>
       {/* Admin area: unlisted, its own server-side session (solve_admin_session
