@@ -7,10 +7,14 @@ import { storage } from "./storage";
 import { registerRealConversationRoutes } from "./routes";
 import {
   parsePastedTranscript,
+  parseAudioTranscript,
   deriveStalledStep,
   isValidSubmissionType,
+  isAllowedAudioFile,
   REAL_CONVERSATION_CONSENT_TEXT,
+  MAX_AUDIO_BYTES,
   type RealConversationScorer,
+  type RealConversationTranscriber,
 } from "./realConversations";
 import type { RubricScores, TranscriptMessage } from "@shared/schema";
 
@@ -49,11 +53,12 @@ const SAMPLE_RUBRIC: RubricScores = {
 // ===========================================================================
 
 describe("submission-type + consent constants", () => {
-  test("only text_chat and email are valid submission types (audio is Phase 2)", () => {
+  test("text_chat, email, and audio are the valid submission types", () => {
     assert.equal(isValidSubmissionType("text_chat"), true);
     assert.equal(isValidSubmissionType("email"), true);
-    assert.equal(isValidSubmissionType("audio"), false);
+    assert.equal(isValidSubmissionType("audio"), true);
     assert.equal(isValidSubmissionType(""), false);
+    assert.equal(isValidSubmissionType("phone"), false);
     assert.equal(isValidSubmissionType(undefined), false);
   });
 
@@ -133,6 +138,59 @@ describe("deriveStalledStep", () => {
   test("returns null when there is no rubric", () => {
     assert.equal(deriveStalledStep(null), null);
     assert.equal(deriveStalledStep(undefined), null);
+  });
+});
+
+describe("audio file validation (Phase 2)", () => {
+  test("accepts only mp3/m4a/wav by extension, case-insensitively", () => {
+    assert.equal(isAllowedAudioFile("call.mp3"), true);
+    assert.equal(isAllowedAudioFile("call.M4A"), true);
+    assert.equal(isAllowedAudioFile("Recording.WAV"), true);
+    assert.equal(isAllowedAudioFile("call.txt"), false);
+    assert.equal(isAllowedAudioFile("call.mp4"), false);
+    assert.equal(isAllowedAudioFile("call"), false);
+    assert.equal(isAllowedAudioFile(undefined), false);
+    assert.equal(isAllowedAudioFile(null), false);
+  });
+});
+
+describe("parseAudioTranscript (Phase 2)", () => {
+  test("alternates roles across Whisper segments, starting with the customer", () => {
+    const parsed = parseAudioTranscript("ignored when segments present", [
+      { text: "Hi, I'm just looking at options." },
+      { text: "Great, what brought you in today?" },
+      { text: "We're outgrowing our current place." },
+    ]);
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer"],
+    );
+    assert.equal(parsed[1].content, "Great, what brought you in today?");
+  });
+
+  test("falls back to sentence splitting when no segments are provided", () => {
+    const parsed = parseAudioTranscript(
+      "We're just browsing. Happy to help, what matters most to you?",
+    );
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+  });
+
+  test("produces the TranscriptMessage fields the engine expects", () => {
+    const parsed = parseAudioTranscript("A single sentence.");
+    assert.equal(parsed.length, 1);
+    for (const m of parsed) {
+      assert.ok(typeof m.role === "string");
+      assert.ok(typeof m.content === "string");
+      assert.ok(typeof m.timestamp === "string");
+    }
+  });
+
+  test("empty/blank transcripts yield no messages", () => {
+    assert.equal(parseAudioTranscript("").length, 0);
+    assert.equal(parseAudioTranscript("   \n  ").length, 0);
   });
 });
 
@@ -252,8 +310,14 @@ describe("real conversation routes", () => {
     assert.equal(created.length, 0);
   });
 
-  test("invalid submission types are rejected (audio is not accepted in Phase 1)", async () => {
+  test("the JSON paste route rejects 'audio' (audio has its own upload route)", async () => {
     const { status } = await post({ ...VALID_BODY, submissionType: "audio" });
+    assert.equal(status, 400);
+    assert.equal(created.length, 0);
+  });
+
+  test("the JSON paste route rejects an unknown submission type", async () => {
+    const { status } = await post({ ...VALID_BODY, submissionType: "phone" });
     assert.equal(status, 400);
     assert.equal(created.length, 0);
   });
@@ -271,5 +335,252 @@ describe("real conversation routes", () => {
     assert.equal(res.status, 200);
     assert.equal(rows.length, 2);
     assert.ok(rows.every((r: any) => r.submittedByUserId === 1));
+  });
+});
+
+// ===========================================================================
+// Audio upload route (Phase 2): multipart upload, injected transcriber (no
+// network/Whisper), same scorer injection, stubbed storage. Verifies file-type
+// and size validation, the consent gate, and output-shape parity with paste.
+// ===========================================================================
+
+// A deterministic stand-in for the Whisper call with the SAME signature/return
+// shape, so route tests never hit OpenAI. Records what it was called with.
+function makeFakeTranscriber(result: {
+  text: string;
+  duration?: number;
+  segments?: { text: string }[];
+}) {
+  const calls: { buffer: Buffer; filename: string; mimetype: string }[] = [];
+  const transcriber: RealConversationTranscriber = async (input) => {
+    calls.push(input);
+    return result;
+  };
+  return { transcriber, calls };
+}
+
+describe("real conversation audio route", () => {
+  let server: Server;
+  let baseUrl: string;
+  let created: any[];
+  let usersById: Record<number, any>;
+  let officesById: Record<number, any>;
+  let fakeScorer: ReturnType<typeof makeFakeScorer>;
+  let fakeTranscriber: ReturnType<typeof makeFakeTranscriber>;
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    fakeScorer = makeFakeScorer(SAMPLE_RUBRIC, "Solid rapport, weak needs discovery.", 68);
+    fakeTranscriber = makeFakeTranscriber({
+      text: "Hi, just looking. Great, what brought you in today? We're outgrowing our place.",
+      duration: 120,
+      segments: [
+        { text: "Hi, just looking." },
+        { text: "Great, what brought you in today?" },
+        { text: "We're outgrowing our place." },
+      ],
+    });
+    registerRealConversationRoutes(app, {
+      scorer: fakeScorer.scorer,
+      transcriber: fakeTranscriber.transcriber,
+    });
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  after(() => {
+    server?.close();
+  });
+
+  beforeEach(() => {
+    created = [];
+    fakeScorer.calls.length = 0;
+    fakeTranscriber.calls.length = 0;
+    officesById = { 1: { id: 1, subscriptionStatus: "active" } };
+    usersById = {
+      1: { id: 1, officeId: 1, role: "consultant", seatActive: true, isDemoAccount: false },
+      2: { id: 2, officeId: 1, role: "consultant", seatActive: false, isDemoAccount: false },
+    };
+    (storage as any).getUser = async (id: number) => usersById[id];
+    (storage as any).getOffice = async (id: number) => officesById[id];
+    (storage as any).createRealConversation = async (rc: any) => {
+      const row = { id: created.length + 1, ...rc };
+      created.push(row);
+      return row;
+    };
+  });
+
+  async function postAudio(opts: {
+    userId?: unknown;
+    consentAccepted?: unknown;
+    filename?: string;
+    mimetype?: string;
+    bytes?: Buffer;
+    omitFile?: boolean;
+  }) {
+    const form = new FormData();
+    if (opts.userId !== undefined) form.append("userId", String(opts.userId));
+    if (opts.consentAccepted !== undefined)
+      form.append("consentAccepted", String(opts.consentAccepted));
+    if (!opts.omitFile) {
+      const bytes = opts.bytes ?? Buffer.from("fake-audio-bytes");
+      form.append(
+        "audio",
+        new Blob([bytes], { type: opts.mimetype ?? "audio/mpeg" }),
+        opts.filename ?? "call.mp3",
+      );
+    }
+    const res = await fetch(`${baseUrl}/api/real-conversations/audio`, {
+      method: "POST",
+      body: form,
+    });
+    return { status: res.status, body: await res.json() };
+  }
+
+  test("FILE TYPE: a non mp3/m4a/wav file is rejected and nothing is transcribed or stored", async () => {
+    const { status } = await postAudio({
+      userId: 1,
+      consentAccepted: true,
+      filename: "notes.txt",
+      mimetype: "text/plain",
+    });
+    assert.equal(status, 400);
+    assert.equal(created.length, 0);
+    assert.equal(fakeTranscriber.calls.length, 0);
+    assert.equal(fakeScorer.calls.length, 0);
+  });
+
+  test("FILE SIZE: a file over 25MB is rejected before transcription", async () => {
+    const tooBig = Buffer.alloc(MAX_AUDIO_BYTES + 1024, 0);
+    const { status } = await postAudio({
+      userId: 1,
+      consentAccepted: true,
+      filename: "call.mp3",
+      bytes: tooBig,
+    });
+    assert.equal(status, 400);
+    assert.equal(created.length, 0);
+    assert.equal(fakeTranscriber.calls.length, 0);
+  });
+
+  test("CONSENT GATE: an audio submission without consent is rejected, nothing transcribed or stored", async () => {
+    const { status, body } = await postAudio({
+      userId: 1,
+      consentAccepted: false,
+      filename: "call.mp3",
+    });
+    assert.equal(status, 400);
+    assert.equal(body.message, REAL_CONVERSATION_CONSENT_TEXT);
+    assert.equal(created.length, 0);
+    assert.equal(fakeTranscriber.calls.length, 0, "the transcriber must not run without consent");
+    assert.equal(fakeScorer.calls.length, 0, "the scorer must not run without consent");
+  });
+
+  test("SEAT GATE: an unpaid seat cannot submit audio (402)", async () => {
+    const { status } = await postAudio({ userId: 2, consentAccepted: true, filename: "call.mp3" });
+    assert.equal(status, 402);
+    assert.equal(created.length, 0);
+    assert.equal(fakeTranscriber.calls.length, 0);
+  });
+
+  test("SHAPE PARITY: a consented audio submission is transcribed, scored, and stored in the SAME shape as text/email", async () => {
+    const { status, body } = await postAudio({
+      userId: 1,
+      consentAccepted: true,
+      filename: "discovery-call.m4a",
+      mimetype: "audio/x-m4a",
+    });
+    assert.equal(status, 200);
+
+    // Same scoring fields a practice/paste submission persists.
+    assert.equal(typeof body.overallScore, "number");
+    assert.equal(body.overallScore, 68);
+    assert.equal(typeof body.feedback, "string");
+
+    // rubricScores is JSON text with the EXACT practice keys.
+    const rubric = JSON.parse(body.rubricScores);
+    assert.deepEqual(Object.keys(rubric).sort(), [...PRACTICE_RUBRIC_KEYS].sort());
+    for (const key of PRACTICE_RUBRIC_KEYS) {
+      assert.equal(typeof rubric[key], "number");
+    }
+
+    // Audio-specific persistence: submission type + original filename + transcript.
+    assert.equal(body.submissionType, "audio");
+    assert.equal(body.originalAudioFilename, "discovery-call.m4a");
+    assert.ok(body.rawTranscript.length > 0);
+
+    // Consent + subject are stored exactly as the paste route stores them.
+    assert.equal(body.consentAccepted, true);
+    assert.ok(body.consentAcceptedAt);
+    assert.equal(body.submittedByUserId, 1);
+    assert.equal(body.subjectRepUserId, 1);
+    assert.equal(body.stalledStep, "Listen");
+
+    // Transcriber ran once with the uploaded bytes; scorer received parsed turns.
+    assert.equal(fakeTranscriber.calls.length, 1);
+    assert.ok(Buffer.isBuffer(fakeTranscriber.calls[0].buffer));
+    assert.equal(fakeScorer.calls.length, 1);
+    assert.ok(fakeScorer.calls[0].every((m) => "role" in m && "content" in m));
+  });
+
+  test("DURATION CAP: audio longer than ~30 min (per the transcriber's reported duration) is rejected and not stored", async () => {
+    const longTranscriber = makeFakeTranscriber({
+      text: "A long conversation.",
+      duration: 31 * 60,
+    });
+    const longApp = express();
+    longApp.use(express.json());
+    registerRealConversationRoutes(longApp, {
+      scorer: fakeScorer.scorer,
+      transcriber: longTranscriber.transcriber,
+    });
+    const longServer = longApp.listen(0);
+    await new Promise<void>((resolve) => longServer.on("listening", () => resolve()));
+    const addr = longServer.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const form = new FormData();
+    form.append("userId", "1");
+    form.append("consentAccepted", "true");
+    form.append("audio", new Blob([Buffer.from("x")], { type: "audio/wav" }), "long.wav");
+    const res = await fetch(`http://127.0.0.1:${port}/api/real-conversations/audio`, {
+      method: "POST",
+      body: form,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(created.length, 0);
+    longServer.close();
+  });
+
+  test("TRANSCRIPTION FAILURE: a Whisper error returns an error and creates no row", async () => {
+    const failingTranscriber: RealConversationTranscriber = async () => {
+      throw new Error("whisper exploded");
+    };
+    const failApp = express();
+    failApp.use(express.json());
+    registerRealConversationRoutes(failApp, {
+      scorer: fakeScorer.scorer,
+      transcriber: failingTranscriber,
+    });
+    const failServer = failApp.listen(0);
+    await new Promise<void>((resolve) => failServer.on("listening", () => resolve()));
+    const addr = failServer.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const form = new FormData();
+    form.append("userId", "1");
+    form.append("consentAccepted", "true");
+    form.append("audio", new Blob([Buffer.from("x")], { type: "audio/mpeg" }), "call.mp3");
+    const res = await fetch(`http://127.0.0.1:${port}/api/real-conversations/audio`, {
+      method: "POST",
+      body: form,
+    });
+    assert.equal(res.status, 502);
+    assert.equal(created.length, 0);
+    assert.equal(fakeScorer.calls.length, 0);
+    failServer.close();
   });
 });

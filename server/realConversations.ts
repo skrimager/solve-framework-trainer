@@ -7,9 +7,9 @@
 
 import type { TranscriptMessage, RubricScores } from "@shared/schema";
 
-// Phase 1 accepts two paste-based submission methods. 'audio' is reserved for
-// Phase 2 (schema/UI already leave room for it) and is intentionally rejected here.
-export const REAL_CONVERSATION_SUBMISSION_TYPES = ["text_chat", "email"] as const;
+// The two paste-based submission methods (Phase 1) plus 'audio' (Phase 2, a file
+// upload transcribed by Whisper). All three land in the SAME scoring pipeline.
+export const REAL_CONVERSATION_SUBMISSION_TYPES = ["text_chat", "email", "audio"] as const;
 export type RealConversationSubmissionType =
   (typeof REAL_CONVERSATION_SUBMISSION_TYPES)[number];
 
@@ -21,6 +21,37 @@ export function isValidSubmissionType(
     (REAL_CONVERSATION_SUBMISSION_TYPES as readonly string[]).includes(value)
   );
 }
+
+// Submission types that carry a pasted transcript in the request body. Audio is
+// excluded: it arrives as a file upload on a dedicated multipart route.
+export type PastedSubmissionType = Exclude<RealConversationSubmissionType, "audio">;
+
+// --- Phase 2 audio upload limits/validation (all enforced server-side) ---
+// Strict byte cap, enforced at the multer layer AND re-checked in the route.
+export const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // 25MB
+// Approximate duration ceiling, checked against Whisper's reported duration.
+export const MAX_AUDIO_DURATION_SECONDS = 30 * 60; // ~30 minutes
+// Only these three container formats are accepted.
+export const ALLOWED_AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav"] as const;
+
+// Validates an uploaded audio file by its extension (the user-visible, reliable
+// signal) rather than the browser-supplied mimetype, which varies by OS/browser
+// for m4a/wav and is sometimes empty or application/octet-stream.
+export function isAllowedAudioFile(filename: string | undefined | null): boolean {
+  if (typeof filename !== "string") return false;
+  const lower = filename.toLowerCase();
+  return ALLOWED_AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// The Whisper transcription call, injected so routes/tests can swap in a fake
+// without the OpenAI client or network access (mirrors RealConversationScorer).
+// Returns the flat transcript text, and, when the API reports them, the audio
+// duration (for the ~30 min cap) and per-segment text (natural turn boundaries).
+export type RealConversationTranscriber = (input: {
+  buffer: Buffer;
+  filename: string;
+  mimetype: string;
+}) => Promise<{ text: string; duration?: number; segments?: { text: string }[] }>;
 
 // The exact consent language the rep must agree to before a submission is
 // accepted. Kept as a single exported constant so the server gate and the client
@@ -89,7 +120,7 @@ function classifyLabel(label: string): ParsedRole | null {
 // back to the rep as if it were an authoritative reconstruction.
 export function parsePastedTranscript(
   raw: string,
-  submissionType: RealConversationSubmissionType
+  submissionType: PastedSubmissionType
 ): TranscriptMessage[] {
   const nowIso = new Date().toISOString();
   const lines = raw
@@ -153,6 +184,39 @@ function pushOrAppend(
     return;
   }
   messages.push({ role, content: text, timestamp });
+}
+
+// Parses a Whisper transcript into TranscriptMessage[]. Whisper's basic API
+// returns a flat transcript with no speaker labels, so we cannot know who spoke.
+// This reuses the exact same fallback parsePastedTranscript applies to an
+// unlabeled paste: split the transcript into turns and alternate starting with
+// the customer, since a real discovery conversation is customer-led and the rep
+// is responding. Whisper segments (when present) give natural turn boundaries;
+// otherwise we split the flat text on sentence boundaries as a best effort. The
+// output is only ever fed to the unchanged scoreTranscript, never shown back as
+// an authoritative reconstruction.
+export function parseAudioTranscript(
+  text: string,
+  segments?: { text: string }[]
+): TranscriptMessage[] {
+  const nowIso = new Date().toISOString();
+
+  let turns: string[];
+  if (segments && segments.length > 0) {
+    turns = segments.map((s) => s.text.trim()).filter((t) => t.length > 0);
+  } else {
+    turns = text
+      .replace(/\r\n/g, "\n")
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+  }
+
+  return turns.map((content, i) => ({
+    role: (i % 2 === 0 ? "customer" : "consultant") as ParsedRole,
+    content,
+    timestamp: nowIso,
+  }));
 }
 
 // Lines that are email transport/header noise rather than conversational content.

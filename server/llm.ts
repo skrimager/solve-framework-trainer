@@ -1,9 +1,34 @@
 import { createHash } from "node:crypto";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 
 const client = new OpenAI();
+
+// Whisper transcription for Real Conversation Scoring Phase 2 (audio upload).
+// Reuses the SAME shared OpenAI client/credentials as every other call in this
+// file, so there is no second client setup or API key mechanism. verbose_json
+// gives us the reported audio duration (for the ~30 min cap) and per-segment
+// text (natural turn boundaries the audio parser alternates roles across).
+const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
+
+export async function transcribeAudio(input: {
+  buffer: Buffer;
+  filename: string;
+  mimetype: string;
+}): Promise<{ text: string; duration?: number; segments?: { text: string }[] }> {
+  const file = await toFile(input.buffer, input.filename, { type: input.mimetype });
+  const result = await client.audio.transcriptions.create({
+    file,
+    model: TRANSCRIBE_MODEL,
+    response_format: "verbose_json",
+  });
+  return {
+    text: result.text ?? "",
+    duration: result.duration,
+    segments: result.segments?.map((s) => ({ text: s.text })),
+  };
+}
 
 // Temporary instrumentation for verifying OpenAI automatic prompt caching in a
 // live session. OpenAI serves an identical request PREFIX from cache once it
