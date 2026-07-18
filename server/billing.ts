@@ -416,27 +416,34 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       const session = event.data.object as Stripe.Checkout.Session;
       const subId =
         typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
-      // Self-serve office signup (item 5): no office exists yet, so provision one
-      // from the subscription. Detected by the selfServe metadata flag we set on
-      // the Checkout Session. Existing-office manager checkouts fall through to the
-      // sync path below and are untouched.
+      // Every checkout we create is subscription-mode, so no subscription means
+      // there is nothing to provision or sync.
+      if (!subId) break;
+      // Re-fetch the subscription as the source of truth (see the note on this
+      // function) rather than trusting the event payload. Its metadata is the
+      // authoritative signal for whether this is a self-serve signup: we stamp
+      // selfServe onto both the session AND the subscription at Checkout creation
+      // (createSelfServeCheckoutSession), and the subscription copy survives even
+      // if the session's metadata is ever dropped. We deliberately do NOT infer
+      // self-serve from the absence of client_reference_id: that was a fragile
+      // proxy that would misclassify any future subscription checkout added
+      // without a client_reference_id, and it is unnecessary now that provisioning
+      // keys off explicit metadata.
+      const subscription = await stripe.subscriptions.retrieve(subId);
       const isSelfServe =
-        session.metadata?.selfServe === "true" ||
-        (typeof session.client_reference_id !== "string" && !!subId);
-      if (isSelfServe && subId) {
-        const subscription = await stripe.subscriptions.retrieve(subId);
-        if (subscription.metadata?.selfServe === "true" || session.metadata?.selfServe === "true") {
-          await provisionSelfServeOffice(session, subscription);
-          break;
-        }
+        subscription.metadata?.selfServe === "true" || session.metadata?.selfServe === "true";
+      if (isSelfServe) {
+        await provisionSelfServeOffice(session, subscription);
+        break;
       }
+      // Existing-office manager checkout: locate the office and sync it. The
+      // client_reference_id is the office id we set in createManagerCheckoutSession.
       const office = await resolveOffice({
         officeId: session.client_reference_id,
         customerId: typeof session.customer === "string" ? session.customer : session.customer?.id,
         subscriptionId: subId,
       });
-      if (office && subId) {
-        const subscription = await stripe.subscriptions.retrieve(subId);
+      if (office) {
         await syncOfficeFromSubscription(office, subscription);
       }
       break;

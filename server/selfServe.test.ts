@@ -6,6 +6,7 @@ import { __setStripeForTests } from "./stripe";
 import {
   createSelfServeCheckoutSession,
   provisionSelfServeOffice,
+  handleStripeEvent,
   EnterpriseQuoteRequiredError,
 } from "./billing";
 import {
@@ -256,6 +257,84 @@ describe("provisionSelfServeOffice", () => {
     const office = await provisionSelfServeOffice(fakeSession(), fakeSubscription());
     assert.notEqual(office!.name, "Acme");
     assert.match(office!.name, /^Acme \(\d+\)$/);
+  });
+});
+
+// The checkout.session.completed handler must route to self-serve provisioning
+// based on the authoritative selfServe metadata (source-of-truth subscription
+// object), NOT on the absence of client_reference_id. These tests lock in that
+// behavior after removing the old client_reference_id-absence heuristic (Gap 2).
+describe("handleStripeEvent routing for self-serve", () => {
+  let events: any[];
+
+  beforeEach(() => {
+    offices = new Map();
+    nextOfficeId = 1;
+    signups = [];
+    tokens = new Map();
+    events = [];
+
+    (storage as any).getOffice = async (id: number) => offices.get(id);
+    (storage as any).getOfficeByStripeCustomerId = async (c: string) =>
+      [...offices.values()].find((o) => o.stripeCustomerId === c);
+    (storage as any).getOfficeByStripeSubscriptionId = async (s: string) =>
+      [...offices.values()].find((o) => o.stripeSubscriptionId === s);
+    (storage as any).getOfficeByInviteCode = async (code: string) =>
+      [...offices.values()].find((o) => o.inviteCode === code);
+    (storage as any).listOffices = async () => [...offices.values()];
+    (storage as any).createOffice = async (data: any) => {
+      const office = { id: nextOfficeId++, managerItemId: null, seatItemId: null, activeSeatCount: 0, ...data };
+      offices.set(office.id, office);
+      return office;
+    };
+    (storage as any).updateOffice = async (id: number, patch: Partial<Office>) => {
+      const o = offices.get(id);
+      if (!o) return undefined;
+      const next = { ...o, ...patch };
+      offices.set(id, next);
+      return next;
+    };
+    (storage as any).createPaidOfficeSignup = async (data: any) => {
+      const row = { id: signups.length + 1, ...data };
+      signups.push(row);
+      return row;
+    };
+    (storage as any).getOfficeSetupToken = async (t: string) => tokens.get(t);
+    (storage as any).updateOfficeSetupToken = async () => undefined;
+    (storage as any).getBillingEventByStripeId = async (eid: string) =>
+      events.find((e) => e.stripeEventId === eid);
+    (storage as any).recordBillingEvent = async (e: any) => {
+      events.push(e);
+      return { id: events.length, ...e };
+    };
+
+    __setStripeForTests({
+      subscriptions: { retrieve: async () => fakeSubscription() },
+    } as any);
+  });
+
+  test("provisions when only the subscription metadata carries selfServe (no client_reference_id, session metadata dropped)", async () => {
+    await handleStripeEvent({
+      id: "evt_ss_1",
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_1", subscription: "sub_ss_1" } },
+    } as any);
+    assert.equal(offices.size, 1, "a self-serve office was provisioned from subscription metadata");
+    assert.equal(signups.length, 1);
+    assert.equal([...offices.values()][0].stripeSubscriptionId, "sub_ss_1");
+  });
+
+  test("does NOT provision a self-serve office for a manager checkout (client_reference_id set, no selfServe metadata)", async () => {
+    __setStripeForTests({
+      subscriptions: { retrieve: async () => fakeSubscription({ metadata: { officeId: "1" } }) },
+    } as any);
+    await handleStripeEvent({
+      id: "evt_mgr_1",
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_2", client_reference_id: "1", customer: "cus_1", subscription: "sub_ss_1" } },
+    } as any);
+    assert.equal(offices.size, 0, "no new office should be provisioned for a manager checkout");
+    assert.equal(signups.length, 0);
   });
 });
 
