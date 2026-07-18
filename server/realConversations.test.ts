@@ -4,10 +4,11 @@ import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerRealConversationRoutes } from "./routes";
+import { registerRealConversationRoutes, withStalledStep } from "./routes";
 import {
   parsePastedTranscript,
   parseAudioTranscript,
+  stripLeadingTimestamp,
   deriveStalledStep,
   isValidSubmissionType,
   isAllowedAudioFile,
@@ -127,17 +128,272 @@ describe("parsePastedTranscript", () => {
       assert.ok(typeof m.timestamp === "string");
     }
   });
+
+  test("leading timestamps do not break semantic-label detection", () => {
+    // Regression guard: the timestamp-stripping fix must not disturb the already
+    // working "Rep:"/"Customer:" path. Every line here is timestamped.
+    const raw = [
+      "[00:14] Rep: Thanks for calling, how can I help?",
+      "[00:19] Customer: I'm looking at upgrading my system.",
+      "[00:25] Rep: Tell me what's prompting that.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["consultant", "customer", "consultant"],
+    );
+    // The timestamp is stripped from the stored content, not retained.
+    assert.equal(parsed[0].content, "Thanks for calling, how can I help?");
+  });
+
+  test("generic 'Speaker A'/'Speaker B' labels map by first-appearance order", () => {
+    // First distinct generic label -> customer, second -> consultant, regardless
+    // of which literal letter appears first.
+    const raw = [
+      "Speaker A: Hi, thanks for coming in today.",
+      "Speaker B: Of course, I've been meaning to talk about upgrading.",
+      "Speaker A: Tell me what's driving that.",
+      "Speaker B: Our current setup keeps failing.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer", "consultant"],
+    );
+    assert.equal(parsed[0].content, "Hi, thanks for coming in today.");
+  });
+
+  test("generic-speaker ordering is by appearance, not by label letter", () => {
+    // Speaker B appears first here, so B is the customer and A is the consultant.
+    const raw = [
+      "Speaker B: We're just starting to look around.",
+      "Speaker A: Happy to help, what matters most to you?",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+  });
+
+  test("'Speaker 1'/'Speaker 2' numeric diarization labels are also handled", () => {
+    const raw = [
+      "Speaker 1: What brought you in today?",
+      "Speaker 2: I need help choosing an option.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+  });
+
+  test("a third distinct generic speaker collapses to customer (binary role model)", () => {
+    const raw = [
+      "Speaker A: Hello.",
+      "Speaker B: Hi there.",
+      "Speaker C: I'm joining too.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer"],
+    );
+  });
+
+  test("timestamps AND generic speaker labels together parse into alternating roles", () => {
+    const raw = [
+      "[00:00] Speaker A: Hi, thanks for coming in today.",
+      "[00:04] Speaker B: Of course, I've been wanting to talk about upgrading for a while.",
+      "[00:09] Speaker A: Tell me what's driving that.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer"],
+    );
+    assert.equal(parsed[0].content, "Hi, thanks for coming in today.");
+    assert.equal(
+      parsed[1].content,
+      "Of course, I've been wanting to talk about upgrading for a while.",
+    );
+  });
+
+  test("an HH:MM:SS timestamp is stripped just like MM:SS", () => {
+    const raw = [
+      "[01:00:14] Rep: Welcome back.",
+      "[01:00:20] Customer: Thanks.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["consultant", "customer"],
+    );
+    assert.equal(parsed[0].content, "Welcome back.");
+  });
+});
+
+describe("stripLeadingTimestamp", () => {
+  test("strips bracketed MM:SS and HH:MM:SS tokens", () => {
+    assert.equal(stripLeadingTimestamp("[00:14] Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("[00:14:32] Rep: hi"), "Rep: hi");
+  });
+
+  test("strips parenthesized timestamps", () => {
+    assert.equal(stripLeadingTimestamp("(00:14) Customer: hi"), "Customer: hi");
+    assert.equal(stripLeadingTimestamp("(1:02:03) Customer: hi"), "Customer: hi");
+  });
+
+  test("strips bare timestamps with or without a separator", () => {
+    assert.equal(stripLeadingTimestamp("00:14 Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("00:14 - Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("00:14: Rep: hi"), "Rep: hi");
+  });
+
+  test("leaves lines without a leading timestamp untouched", () => {
+    assert.equal(stripLeadingTimestamp("Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("Just browsing, thanks."), "Just browsing, thanks.");
+  });
+
+  test("does not strip a time that appears mid-sentence", () => {
+    assert.equal(
+      stripLeadingTimestamp("Rep: I'll be there at 3:45"),
+      "Rep: I'll be there at 3:45",
+    );
+  });
 });
 
 describe("deriveStalledStep", () => {
-  test("returns the SOLVE step for the lowest-scoring rubric dimension", () => {
-    // needsDiscovery (40) is the lowest -> maps to "Listen".
+  test("a single clearly-worst dimension picks that step", () => {
+    // Only needsDiscovery (40) is below the failure bar -> maps to "Listen".
+    const rubric: RubricScores = {
+      trustBuilding: 82,
+      objectionPrevention: 78,
+      needsDiscovery: 40,
+      relationshipContinuity: 90,
+      naturalClose: 75,
+    };
+    assert.equal(deriveStalledStep(rubric), "Listen");
+  });
+
+  test("multiple failing dimensions return the EARLIEST in SOLVE sequence, not the lowest-scoring", () => {
+    // Situation (trustBuilding=2) and Engineer the Solution (naturalClose=1) are
+    // both below the failure bar. Engineer scores lower, but the earliest failure
+    // in the canonical SOLVE sequence is the root cause, so we return "Situation".
+    const rubric: RubricScores = {
+      trustBuilding: 2,
+      objectionPrevention: 90,
+      needsDiscovery: 88,
+      relationshipContinuity: 85,
+      naturalClose: 1,
+    };
+    assert.equal(deriveStalledStep(rubric), "Situation");
+  });
+
+  test("a mid-sequence breakdown is chosen over a lower-scoring downstream step", () => {
+    // Open (objectionPrevention=55) and Engineer the Solution (naturalClose=20)
+    // both fail; Open comes first in SOLVE sequence, so it is the stalled step.
+    const rubric: RubricScores = {
+      trustBuilding: 80,
+      objectionPrevention: 55,
+      needsDiscovery: 78,
+      relationshipContinuity: 82,
+      naturalClose: 20,
+    };
+    assert.equal(deriveStalledStep(rubric), "Open");
+  });
+
+  test("with no breakdown (all scores above threshold) it falls back to the single lowest step", () => {
+    // Every dimension is comfortably above the failure bar, so nothing "failed".
+    // The field is still populated with the lowest-scoring step for coaching:
+    // objectionPrevention (70) is lowest -> "Open".
+    const rubric: RubricScores = {
+      trustBuilding: 88,
+      objectionPrevention: 70,
+      needsDiscovery: 82,
+      relationshipContinuity: 95,
+      naturalClose: 78,
+    };
+    assert.equal(deriveStalledStep(rubric), "Open");
+  });
+
+  test("SAMPLE_RUBRIC (needsDiscovery weakest) still stalls at Listen", () => {
+    // Regression: needsDiscovery (40) and naturalClose (60) are both at/below the
+    // bar; Listen precedes Engineer the Solution in SOLVE sequence.
     assert.equal(deriveStalledStep(SAMPLE_RUBRIC), "Listen");
   });
 
   test("returns null when there is no rubric", () => {
     assert.equal(deriveStalledStep(null), null);
     assert.equal(deriveStalledStep(undefined), null);
+  });
+});
+
+// The GET /api/sessions/:id response attaches a derived, presentation-only
+// "Where it stalled" step for the PRACTICE results page. It reuses the same
+// SOLVE-sequence-earliest-failure logic as deriveStalledStep, so a practice
+// session's returned value must reflect that logic, and it must be null for a
+// leadership/conflict-management session (SOLVE steps do not apply there).
+describe("withStalledStep (practice session response)", () => {
+  function sessionWithRubric(rubric: unknown): any {
+    return {
+      id: 1,
+      userId: 1,
+      scenarioId: 5,
+      status: "completed",
+      transcript: "[]",
+      score: 40,
+      rubricScores: rubric === null ? null : JSON.stringify(rubric),
+      feedback: "f",
+      createdAt: "t",
+      completedAt: "t",
+      savedAt: null,
+    };
+  }
+
+  test("returns the EARLIEST failing SOLVE step, not the lowest-scoring one", () => {
+    // Situation (trustBuilding=2) and Engineer the Solution (naturalClose=1) both
+    // fail; the earliest in SOLVE sequence is the root cause -> "Situation".
+    const result = withStalledStep(
+      sessionWithRubric({
+        trustBuilding: 2,
+        objectionPrevention: 90,
+        needsDiscovery: 88,
+        relationshipContinuity: 85,
+        naturalClose: 1,
+      }),
+    );
+    assert.equal(result.stalledStep, "Situation");
+  });
+
+  test("falls back to the single lowest step when nothing failed", () => {
+    const result = withStalledStep(
+      sessionWithRubric({
+        trustBuilding: 88,
+        objectionPrevention: 70,
+        needsDiscovery: 82,
+        relationshipContinuity: 95,
+        naturalClose: 78,
+      }),
+    );
+    assert.equal(result.stalledStep, "Open");
+  });
+
+  test("is null for a leadership/conflict-management rubric (no SOLVE steps)", () => {
+    const result = withStalledStep(
+      sessionWithRubric({
+        activeListening: 10,
+        empathyAcknowledgment: 20,
+        rootCauseDiscovery: 30,
+        solutionVisualization: 40,
+        blamelessResolution: 50,
+      }),
+    );
+    assert.equal(result.stalledStep, null);
+  });
+
+  test("is null when the session has not been scored yet", () => {
+    assert.equal(withStalledStep(sessionWithRubric(null)).stalledStep, null);
   });
 });
 
