@@ -150,6 +150,11 @@ export interface IStorage {
   createRealConversation(rc: InsertRealConversation): Promise<RealConversation>;
   getRealConversation(id: number): Promise<RealConversation | undefined>;
   listRealConversationsByUser(userId: number): Promise<RealConversation[]>;
+  // Phase 3: keyed on the SUBJECT rep, so a rep sees submissions about them
+  // (including manager-submitted ones) and the monthly cap counts per rep seat.
+  listRealConversationsBySubjectRep(subjectRepUserId: number): Promise<RealConversation[]>;
+  // Phase 3: office-wide, to compute each consultant's monthly usage meter.
+  listRealConversationsByOffice(officeId: number): Promise<RealConversation[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -632,6 +637,22 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(realConversations)
       .where(eq(realConversations.submittedByUserId, userId))
+      .orderBy(desc(realConversations.id));
+  }
+
+  async listRealConversationsBySubjectRep(subjectRepUserId: number): Promise<RealConversation[]> {
+    return db
+      .select()
+      .from(realConversations)
+      .where(eq(realConversations.subjectRepUserId, subjectRepUserId))
+      .orderBy(desc(realConversations.id));
+  }
+
+  async listRealConversationsByOffice(officeId: number): Promise<RealConversation[]> {
+    return db
+      .select()
+      .from(realConversations)
+      .where(eq(realConversations.officeId, officeId))
       .orderBy(desc(realConversations.id));
   }
 }

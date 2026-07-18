@@ -29,7 +29,26 @@ const RUBRIC_LABELS: Record<keyof RubricScores, string> = {
 const CONSENT_TEXT =
   "I have the legal right to submit this conversation, including any required consent to its recording.";
 
+// The server decorates each returned row with attribution: who submitted it and
+// whether that was a manager acting on the rep's behalf. Plain rows (the POST
+// response) omit these, which reads as a self-submission.
+type DecoratedRealConversation = RealConversation & {
+  submittedByName?: string | null;
+  managerSubmitted?: boolean;
+};
+
 type SubmissionType = "text_chat" | "email" | "audio";
+
+// A manager/QA can open this page pre-targeted at one of their reps via query
+// params set by the roster's "Submit real conversation for ..." button.
+function initialTargetRep(): { id: number; name: string } | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const id = Number(params.get("repId"));
+  const name = params.get("repName");
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { id, name: name ?? `rep #${id}` };
+}
 
 const SUBMISSION_LABELS: Record<SubmissionType, string> = {
   text_chat: "Text / SMS / chat",
@@ -76,7 +95,7 @@ function parseServerMessage(raw?: string): string | undefined {
 }
 
 // Read-only rubric breakdown, mirroring the practice results layout.
-function ScoreBreakdown({ conversation }: { conversation: RealConversation }) {
+function ScoreBreakdown({ conversation }: { conversation: DecoratedRealConversation }) {
   const rubric: Record<string, number> | null = conversation.rubricScores
     ? JSON.parse(conversation.rubricScores)
     : null;
@@ -100,6 +119,12 @@ function ScoreBreakdown({ conversation }: { conversation: RealConversation }) {
             <p className="text-sm">
               <span className="font-medium">Where it stalled: </span>
               <span data-testid="text-real-stalled-step">{conversation.stalledStep}</span>
+            </p>
+          )}
+          {conversation.managerSubmitted && (
+            <p className="text-sm" data-testid="text-real-attribution">
+              <span className="font-medium">Submitted by your manager</span>
+              {conversation.submittedByName ? ` (${conversation.submittedByName})` : ""}
             </p>
           )}
           <p className="text-xs font-medium" style={{ color: "#E06D00" }}>
@@ -141,10 +166,16 @@ export default function RealConversations() {
   const [rawTranscript, setRawTranscript] = useState("");
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [consentAccepted, setConsentAccepted] = useState(false);
-  const [result, setResult] = useState<RealConversation | null>(null);
+  const [result, setResult] = useState<DecoratedRealConversation | null>(null);
+
+  // Manager/QA acting on behalf of a rep. Null means the rep is submitting their
+  // own conversation (the default). Managers reach the pre-targeted flow from the
+  // roster's Field view.
+  const isManager = user?.role === "manager" || user?.role === "qa";
+  const [targetRep] = useState(() => (isManager ? initialTargetRep() : null));
 
   const historyKey = ["/api/real-conversations", user?.id];
-  const { data: history, isLoading: historyLoading } = useQuery<RealConversation[]>({
+  const { data: history, isLoading: historyLoading } = useQuery<DecoratedRealConversation[]>({
     queryKey: historyKey,
     enabled: !!user?.id,
     queryFn: async () => {
@@ -161,6 +192,7 @@ export default function RealConversations() {
         // same scoring pipeline runs server-side.
         const form = new FormData();
         form.append("userId", String(user!.id));
+        if (targetRep) form.append("subjectRepUserId", String(targetRep.id));
         form.append("consentAccepted", String(consentAccepted));
         form.append("audio", audioFile!, audioFile!.name);
         const res = await fetch("/api/real-conversations/audio", {
@@ -175,6 +207,7 @@ export default function RealConversations() {
       }
       const res = await apiRequest("POST", "/api/real-conversations", {
         userId: user!.id,
+        ...(targetRep ? { subjectRepUserId: targetRep.id } : {}),
         submissionType,
         rawTranscript,
         consentAccepted,
@@ -247,8 +280,20 @@ export default function RealConversations() {
       <div className="space-y-6 max-w-2xl">
         <p className="text-sm text-muted-foreground" data-testid="text-real-intro">
           Paste or upload a real discovery conversation and get it scored against the same
-          SOLVE rubric used in discovery practice. Reps submit their own conversations only.
+          SOLVE rubric used in discovery practice.
         </p>
+
+        {targetRep && (
+          <div
+            className="rounded-lg border p-3 text-sm"
+            style={{ borderColor: "#E06D00" }}
+            data-testid="banner-on-behalf"
+          >
+            You are submitting this conversation on behalf of{" "}
+            <span className="font-semibold">{targetRep.name}</span>. The score will appear in
+            their Real Conversations history, attributed to you.
+          </div>
+        )}
 
         <Card>
           <CardHeader>
@@ -362,13 +407,28 @@ export default function RealConversations() {
                     onClick={() => setResult(rc)}
                     data-testid={`row-real-conversation-${rc.id}`}
                   >
-                    <div className="min-w-0">
+                    <div className="min-w-0 space-y-1">
                       <p className="text-sm font-medium">
                         {SUBMISSION_LABELS[rc.submissionType as SubmissionType] ?? rc.submissionType}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {new Date(rc.createdAt).toLocaleString()}
                       </p>
+                      {rc.stalledStep && (
+                        <p className="text-xs" data-testid={`text-row-stalled-${rc.id}`}>
+                          <span className="text-muted-foreground">Stalled at: </span>
+                          <span className="font-medium">{rc.stalledStep}</span>
+                        </p>
+                      )}
+                      {rc.managerSubmitted && (
+                        <p
+                          className="text-xs font-medium"
+                          style={{ color: "#E06D00" }}
+                          data-testid={`text-row-attribution-${rc.id}`}
+                        >
+                          Submitted by your manager{rc.submittedByName ? ` (${rc.submittedByName})` : ""}
+                        </p>
+                      )}
                     </div>
                     <span className="text-lg font-semibold shrink-0">{rc.overallScore ?? "-"}</span>
                   </li>
