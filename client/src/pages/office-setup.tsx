@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiRequest } from "@/lib/queryClient";
+import { hashToSearch } from "@/lib/hashLocation";
 import { useToast } from "@/hooks/use-toast";
 import { Check, Copy } from "lucide-react";
 import {
@@ -247,12 +248,10 @@ export default function OfficeSetup() {
 // office, then shows the invite code + first-week plan (mirrors the access email).
 export function OfficeSetupComplete() {
   const [, navigate] = useLocation();
-  const sessionId = useMemo(() => {
-    const hash = window.location.hash;
-    const q = hash.indexOf("?");
-    if (q === -1) return "";
-    return new URLSearchParams(hash.slice(q + 1)).get("session_id") ?? "";
-  }, []);
+  const sessionId = useMemo(
+    () => new URLSearchParams(hashToSearch(window.location.hash)).get("session_id") ?? "",
+    [],
+  );
 
   const [data, setData] = useState<{
     officeName: string;
