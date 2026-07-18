@@ -6,6 +6,7 @@
 // existing scoreTranscript unchanged.
 
 import type { TranscriptMessage, RubricScores } from "@shared/schema";
+import { WEAK_PROCESS_THRESHOLD } from "./llm";
 
 // The two paste-based submission methods (Phase 1) plus 'audio' (Phase 2, a file
 // upload transcribed by Whisper). All three land in the SAME scoring pipeline.
@@ -227,23 +228,48 @@ function isEmailEnvelopeLine(line: string): boolean {
 }
 
 // Maps each practice rubric dimension to the SOLVE step it most reflects, so the
-// weakest dimension can be surfaced as the step where the real conversation
-// stalled. This is a presentation-only derivation over the UNCHANGED practice
-// rubric output; it never alters scoring.
+// step where a real conversation stalled can be surfaced. This is a
+// presentation-only derivation over the UNCHANGED practice rubric output; it
+// never alters scoring.
+//
+// The entries are ordered to match the canonical SOLVE sequence (Situation, Open,
+// Listen, Visualize success, Engineer the Solution) so that iteration order here
+// IS the sequence order. The dimension-to-step semantic mapping is unchanged;
+// only the ordering was fixed. The canonical sequence and its exact step names
+// are a standing product rule and must not be altered.
 const RUBRIC_KEY_TO_SOLVE_STEP: Record<keyof RubricScores, string> = {
-  needsDiscovery: "Listen",
-  objectionPrevention: "Open",
   trustBuilding: "Situation",
-  naturalClose: "Engineer the Solution",
+  objectionPrevention: "Open",
+  needsDiscovery: "Listen",
   relationshipContinuity: "Visualize success",
+  naturalClose: "Engineer the Solution",
 };
 
-// Deterministically derives the "stalled step": the SOLVE step corresponding to
-// the lowest-scoring rubric dimension. Ties break by the fixed key order above
-// (stable, testable). Returns null when there is no rubric to inspect.
+// A dimension at or below this score counts as a genuine breakdown (a "failed"
+// step), reusing the same weak-process bar the scorer uses to decide discovery
+// was too shallow to pass. Kept as the single source of truth for "low score".
+const STALLED_STEP_FAILURE_THRESHOLD = WEAK_PROCESS_THRESHOLD;
+
+// Deterministically derives the "stalled step". When one or more dimensions show
+// a real breakdown (score at or below STALLED_STEP_FAILURE_THRESHOLD), the
+// EARLIEST failing step in canonical SOLVE sequence is returned: an upstream miss
+// (failing Situation or Open early) drags the downstream steps down as a
+// consequence, so the earliest failure is the true root cause, not whichever
+// symptom happens to score lowest. When nothing failed (all dimensions above the
+// threshold), we fall back to the single lowest-scoring step so the field is
+// still populated for coaching. Iteration follows SOLVE order, so ties resolve to
+// the earlier step. Returns null when there is no rubric to inspect.
 export function deriveStalledStep(rubric: RubricScores | null | undefined): string | null {
   if (!rubric) return null;
   const keys = Object.keys(RUBRIC_KEY_TO_SOLVE_STEP) as (keyof RubricScores)[];
+
+  for (const key of keys) {
+    const score = typeof rubric[key] === "number" ? (rubric[key] as number) : 0;
+    if (score <= STALLED_STEP_FAILURE_THRESHOLD) {
+      return RUBRIC_KEY_TO_SOLVE_STEP[key];
+    }
+  }
+
   let worstKey: keyof RubricScores | null = null;
   let worstScore = Infinity;
   for (const key of keys) {

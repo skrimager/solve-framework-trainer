@@ -130,8 +130,62 @@ describe("parsePastedTranscript", () => {
 });
 
 describe("deriveStalledStep", () => {
-  test("returns the SOLVE step for the lowest-scoring rubric dimension", () => {
-    // needsDiscovery (40) is the lowest -> maps to "Listen".
+  test("a single clearly-worst dimension picks that step", () => {
+    // Only needsDiscovery (40) is below the failure bar -> maps to "Listen".
+    const rubric: RubricScores = {
+      trustBuilding: 82,
+      objectionPrevention: 78,
+      needsDiscovery: 40,
+      relationshipContinuity: 90,
+      naturalClose: 75,
+    };
+    assert.equal(deriveStalledStep(rubric), "Listen");
+  });
+
+  test("multiple failing dimensions return the EARLIEST in SOLVE sequence, not the lowest-scoring", () => {
+    // Situation (trustBuilding=2) and Engineer the Solution (naturalClose=1) are
+    // both below the failure bar. Engineer scores lower, but the earliest failure
+    // in the canonical SOLVE sequence is the root cause, so we return "Situation".
+    const rubric: RubricScores = {
+      trustBuilding: 2,
+      objectionPrevention: 90,
+      needsDiscovery: 88,
+      relationshipContinuity: 85,
+      naturalClose: 1,
+    };
+    assert.equal(deriveStalledStep(rubric), "Situation");
+  });
+
+  test("a mid-sequence breakdown is chosen over a lower-scoring downstream step", () => {
+    // Open (objectionPrevention=55) and Engineer the Solution (naturalClose=20)
+    // both fail; Open comes first in SOLVE sequence, so it is the stalled step.
+    const rubric: RubricScores = {
+      trustBuilding: 80,
+      objectionPrevention: 55,
+      needsDiscovery: 78,
+      relationshipContinuity: 82,
+      naturalClose: 20,
+    };
+    assert.equal(deriveStalledStep(rubric), "Open");
+  });
+
+  test("with no breakdown (all scores above threshold) it falls back to the single lowest step", () => {
+    // Every dimension is comfortably above the failure bar, so nothing "failed".
+    // The field is still populated with the lowest-scoring step for coaching:
+    // objectionPrevention (70) is lowest -> "Open".
+    const rubric: RubricScores = {
+      trustBuilding: 88,
+      objectionPrevention: 70,
+      needsDiscovery: 82,
+      relationshipContinuity: 95,
+      naturalClose: 78,
+    };
+    assert.equal(deriveStalledStep(rubric), "Open");
+  });
+
+  test("SAMPLE_RUBRIC (needsDiscovery weakest) still stalls at Listen", () => {
+    // Regression: needsDiscovery (40) and naturalClose (60) are both at/below the
+    // bar; Listen precedes Engineer the Solution in SOLVE sequence.
     assert.equal(deriveStalledStep(SAMPLE_RUBRIC), "Listen");
   });
 
