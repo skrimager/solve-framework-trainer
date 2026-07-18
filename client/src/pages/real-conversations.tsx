@@ -12,7 +12,8 @@ import { AppShell } from "@/components/app-shell";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import type { RealConversation, RubricScores } from "@shared/schema";
+import { averageScore } from "@shared/scoreStats";
+import type { RealConversation, RubricScores, Session } from "@shared/schema";
 
 // Same practice rubric labels used on the practice results screen, so a scored
 // real conversation reads identically to a scored practice session.
@@ -189,6 +190,25 @@ export default function RealConversations() {
       return res.json();
     },
   });
+
+  // The rep's practice-session history, shown as its own section alongside (but
+  // visually separate from) Real Conversations. Read-only; nothing here touches
+  // practice scoring or pricing.
+  const { data: sessions, isLoading: sessionsLoading } = useQuery<Session[]>({
+    queryKey: ["/api/users", user?.id, "sessions"],
+    enabled: !!user?.id,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/users/${user!.id}/sessions`);
+      return res.json();
+    },
+  });
+  const completedSessions = (sessions ?? []).filter((s) => s.status === "completed");
+
+  // All-time running averages for each section, computed client-side from the
+  // list responses (null when there is nothing scored yet, so we can show a clear
+  // empty state rather than a misleading 0).
+  const realConversationAverage = averageScore((history ?? []).map((rc) => rc.overallScore));
+  const practiceAverage = averageScore(completedSessions.map((s) => s.score));
 
   const submit = useMutation({
     mutationFn: async () => {
@@ -393,16 +413,80 @@ export default function RealConversations() {
 
         {result && <ScoreBreakdown conversation={result} />}
 
-        <Card>
+        {/* The rep's history, split into two clearly separate sections: their
+            practice sessions and their Real Conversations. The Real Conversations
+            section is deliberately given a distinct orange-accented card so it
+            never reads as just more rows in the practice list. */}
+        <Card data-testid="section-practice-sessions">
           <CardHeader>
-            <CardTitle className="text-lg">Your Real Conversations</CardTitle>
+            <CardTitle className="text-lg flex items-center justify-between gap-3">
+              Practice Sessions
+              {practiceAverage !== null && (
+                <span className="text-sm font-normal text-muted-foreground" data-testid="text-practice-average">
+                  Average: {practiceAverage}
+                </span>
+              )}
+            </CardTitle>
           </CardHeader>
           <CardContent>
+            {sessionsLoading ? (
+              <Skeleton className="h-16 rounded-lg" />
+            ) : completedSessions.length === 0 ? (
+              <p className="text-sm text-muted-foreground" data-testid="text-practice-empty">
+                No completed practice sessions yet.
+              </p>
+            ) : (
+              <ul className="divide-y" data-testid="list-practice-sessions">
+                {completedSessions.map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex items-center justify-between gap-3 py-3"
+                    data-testid={`row-practice-session-${s.id}`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-sm font-medium">Practice session</p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(s.completedAt ?? s.createdAt).toLocaleString()}
+                      </p>
+                    </div>
+                    <span className="text-lg font-semibold shrink-0">{s.score ?? "-"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card
+          className="border-2 overflow-hidden"
+          style={{ borderColor: "#E06D00" }}
+          data-testid="section-real-conversations"
+        >
+          <div className="px-6 py-4" style={{ backgroundColor: "#0A1A30" }}>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-white">Real Conversations</h2>
+              {realConversationAverage !== null && (
+                <div className="flex items-baseline gap-2 shrink-0">
+                  <span className="text-xs uppercase tracking-wide text-white/60">
+                    Real Conversation Average
+                  </span>
+                  <span
+                    className="text-3xl font-bold leading-none"
+                    style={{ color: "#F1830D" }}
+                    data-testid="text-real-average"
+                  >
+                    {realConversationAverage}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+          <CardContent className="pt-6">
             {historyLoading ? (
               <Skeleton className="h-16 rounded-lg" />
             ) : !history || history.length === 0 ? (
               <p className="text-sm text-muted-foreground" data-testid="text-real-empty">
-                You haven't scored any real conversations yet.
+                No real conversations scored yet.
               </p>
             ) : (
               <ul className="divide-y" data-testid="list-real-conversations">
