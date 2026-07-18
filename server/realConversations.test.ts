@@ -4,7 +4,7 @@ import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerRealConversationRoutes } from "./routes";
+import { registerRealConversationRoutes, withStalledStep } from "./routes";
 import {
   parsePastedTranscript,
   parseAudioTranscript,
@@ -192,6 +192,74 @@ describe("deriveStalledStep", () => {
   test("returns null when there is no rubric", () => {
     assert.equal(deriveStalledStep(null), null);
     assert.equal(deriveStalledStep(undefined), null);
+  });
+});
+
+// The GET /api/sessions/:id response attaches a derived, presentation-only
+// "Where it stalled" step for the PRACTICE results page. It reuses the same
+// SOLVE-sequence-earliest-failure logic as deriveStalledStep, so a practice
+// session's returned value must reflect that logic, and it must be null for a
+// leadership/conflict-management session (SOLVE steps do not apply there).
+describe("withStalledStep (practice session response)", () => {
+  function sessionWithRubric(rubric: unknown): any {
+    return {
+      id: 1,
+      userId: 1,
+      scenarioId: 5,
+      status: "completed",
+      transcript: "[]",
+      score: 40,
+      rubricScores: rubric === null ? null : JSON.stringify(rubric),
+      feedback: "f",
+      createdAt: "t",
+      completedAt: "t",
+      savedAt: null,
+    };
+  }
+
+  test("returns the EARLIEST failing SOLVE step, not the lowest-scoring one", () => {
+    // Situation (trustBuilding=2) and Engineer the Solution (naturalClose=1) both
+    // fail; the earliest in SOLVE sequence is the root cause -> "Situation".
+    const result = withStalledStep(
+      sessionWithRubric({
+        trustBuilding: 2,
+        objectionPrevention: 90,
+        needsDiscovery: 88,
+        relationshipContinuity: 85,
+        naturalClose: 1,
+      }),
+    );
+    assert.equal(result.stalledStep, "Situation");
+  });
+
+  test("falls back to the single lowest step when nothing failed", () => {
+    const result = withStalledStep(
+      sessionWithRubric({
+        trustBuilding: 88,
+        objectionPrevention: 70,
+        needsDiscovery: 82,
+        relationshipContinuity: 95,
+        naturalClose: 78,
+      }),
+    );
+    assert.equal(result.stalledStep, "Open");
+  });
+
+  test("is null for a leadership/conflict-management rubric (no SOLVE steps)", () => {
+    const result = withStalledStep(
+      sessionWithRubric({
+        activeListening: 10,
+        empathyAcknowledgment: 20,
+        rootCauseDiscovery: 30,
+        solutionVisualization: 40,
+        blamelessResolution: 50,
+      }),
+    );
+    assert.equal(result.stalledStep, null);
+  });
+
+  test("is null when the session has not been scored yet", () => {
+    assert.equal(withStalledStep(sessionWithRubric(null)).stalledStep, null);
   });
 });
 

@@ -35,6 +35,12 @@ function isLeadershipRubric(
   return "activeListening" in rubric;
 }
 
+// The GET /api/sessions/:id response augments the stored Session with a derived,
+// presentation-only "Where it stalled" SOLVE step (see server/routes.ts). It is
+// null for leadership/conflict-management sessions and for sessions not yet
+// scored, so the badge simply does not render in those cases.
+type SessionResult = Session & { stalledStep?: string | null };
+
 type CoachingThreadResponse = { messages: CoachingMessage[]; canPost: boolean };
 
 // The SOLVE Coach follow-up Q&A panel shown under the rubric feedback. The
@@ -156,7 +162,7 @@ export default function Results() {
   const { id } = useParams<{ id: string }>();
   const [, navigate] = useLocation();
 
-  const { data: session, isLoading } = useQuery<Session>({
+  const { data: session, isLoading } = useQuery<SessionResult>({
     queryKey: ["/api/sessions", id],
   });
 
@@ -172,6 +178,12 @@ export default function Results() {
   const rubricLabels: Record<string, string> =
     rubric && isLeadershipRubric(rubric) ? LEADERSHIP_RUBRIC_LABELS : RUBRIC_LABELS;
 
+  // SOLVE steps only apply to the discovery rubric, so never show the stalled-step
+  // badge for a leadership/conflict-management session even if a value slipped
+  // through. The server already nulls it for that track; this is a client guard.
+  const showStalledStep =
+    !!session.stalledStep && !!rubric && !isLeadershipRubric(rubric);
+
   return (
     <AppShell title="Session results">
       <div className="space-y-6 max-w-2xl">
@@ -184,6 +196,18 @@ export default function Results() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground" data-testid="text-feedback">{session.feedback}</p>
+            {showStalledStep && (
+              <p className="text-sm flex items-center gap-2">
+                <span className="font-medium">Where it stalled: </span>
+                <span
+                  className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold text-white"
+                  style={{ backgroundColor: "#E06D00" }}
+                  data-testid="text-stalled-step"
+                >
+                  {session.stalledStep}
+                </span>
+              </p>
+            )}
             <p className="text-xs font-medium" style={{ color: "#E06D00" }} data-testid="text-coach-byline">
               Scored by SOLVE Coach™
             </p>

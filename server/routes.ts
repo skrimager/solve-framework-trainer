@@ -93,7 +93,7 @@ import {
   DEFAULT_PRIORITY,
   type ContactFilters,
 } from "./contacts";
-import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation } from "@shared/schema";
+import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
@@ -169,6 +169,32 @@ function clientIp(req: Request): string {
   const fwd = req.headers["x-forwarded-for"];
   if (typeof fwd === "string" && fwd.length > 0) return fwd.split(",")[0].trim();
   return req.socket?.remoteAddress ?? "unknown";
+}
+
+// Derives the "Where it stalled" SOLVE step for a completed practice session and
+// attaches it to the response object. This is a presentation-only derivation over
+// the UNCHANGED stored rubric (it never alters scoring or persistence), mirroring
+// how a real conversation surfaces its stalled step. SOLVE steps only apply to
+// the discovery rubric, so leadership/conflict-management sessions (which store a
+// different rubric shape in the same field, identified by the activeListening
+// key) get a null stalledStep and no badge. A session with no rubric yet (still
+// in progress) also yields null.
+export function withStalledStep(session: Session): Session & { stalledStep: string | null } {
+  return { ...session, stalledStep: deriveSessionStalledStep(session.rubricScores) };
+}
+
+function deriveSessionStalledStep(rubricScoresJson: string | null): string | null {
+  if (!rubricScoresJson) return null;
+  let rubric: unknown;
+  try {
+    rubric = JSON.parse(rubricScoresJson);
+  } catch {
+    return null;
+  }
+  if (!rubric || typeof rubric !== "object" || "activeListening" in rubric) {
+    return null;
+  }
+  return deriveStalledStep(rubric as RubricScores);
 }
 
 const leadsLimiter = new RateLimiter(5, 60 * 1000); // 5 lead submissions / IP / minute
@@ -557,7 +583,7 @@ export async function registerRoutes(
   app.get("/api/sessions/:id", async (req, res) => {
     const session = await storage.getSession(Number(req.params.id));
     if (!session) return res.status(404).json({ message: "Not found" });
-    res.json(session);
+    res.json(withStalledStep(session));
   });
 
   app.get("/api/users/:userId/sessions", async (req, res) => {
