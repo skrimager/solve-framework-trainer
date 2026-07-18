@@ -2568,8 +2568,8 @@ export function registerCoachingRoutes(
 // never mix with practice sessions, analytics, or level progression.
 //
 // Two routes, both gated by the existing paid-seat check (checkSeatAccess):
-//   POST /api/real-conversations           — submit + score a real conversation
-//   GET  /api/real-conversations?userId=N  — list the caller's own submissions
+//   POST /api/real-conversations           (submit + score a real conversation)
+//   GET  /api/real-conversations?userId=N  (list the caller's own submissions)
 //
 // Consent is mandatory: a submission is rejected unless consentAccepted is true,
 // and a timestamped consent record (submitter id + submission id + timestamp) is

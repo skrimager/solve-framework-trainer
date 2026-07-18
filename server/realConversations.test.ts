@@ -69,7 +69,7 @@ describe("parsePastedTranscript", () => {
   test("labeled text/SMS chat maps 'Me' to consultant and the counterparty to customer", () => {
     const raw = [
       "Customer: Hi, just looking at options.",
-      "Me: Great — what brought you in today?",
+      "Me: Great, what brought you in today?",
       "Customer: We're outgrowing our current place.",
     ].join("\n");
     const parsed = parsePastedTranscript(raw, "text_chat");
@@ -77,7 +77,7 @@ describe("parsePastedTranscript", () => {
       parsed.map((m) => m.role),
       ["customer", "consultant", "customer"],
     );
-    assert.equal(parsed[1].content, "Great — what brought you in today?");
+    assert.equal(parsed[1].content, "Great, what brought you in today?");
   });
 
   test("unlabeled lines are appended to the current speaker's message", () => {
@@ -90,7 +90,7 @@ describe("parsePastedTranscript", () => {
   });
 
   test("a bare unlabeled paste alternates starting with the customer", () => {
-    const raw = ["We're just browsing.", "Happy to help — what matters most to you?"].join("\n");
+    const raw = ["We're just browsing.", "Happy to help, what matters most to you?"].join("\n");
     const parsed = parsePastedTranscript(raw, "text_chat");
     assert.deepEqual(
       parsed.map((m) => m.role),
@@ -137,7 +137,7 @@ describe("deriveStalledStep", () => {
 });
 
 // ===========================================================================
-// Routes — bare express app, injected scorer, stubbed storage
+// Routes: bare express app, injected scorer, stubbed storage
 // ===========================================================================
 
 describe("real conversation routes", () => {

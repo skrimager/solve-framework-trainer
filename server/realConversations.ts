@@ -1,7 +1,7 @@
 // Pure, dependency-free helpers for Real Conversation Scoring (Phase 1). Kept
 // separate from routes/storage so they can be unit-tested without a DB, an HTTP
 // server, or the OpenAI client. Nothing here touches practice `sessions`, the
-// scoring prompts, or the model — a real conversation is parsed into the SAME
+// scoring prompts, or the model. A real conversation is parsed into the SAME
 // TranscriptMessage[] the practice engine already consumes, then handed to the
 // existing scoreTranscript unchanged.
 
@@ -71,7 +71,7 @@ function classifyLabel(label: string): ParsedRole | null {
   const normalized = label.trim().toLowerCase();
   if (REP_LABELS.has(normalized)) return "consultant";
   if (CUSTOMER_LABELS.has(normalized)) return "customer";
-  // Email headers: treat the "From:" author generically — direction is decided by
+  // Email headers: treat the "From:" author generically. Direction is decided by
   // alternation fallback below, so return null to signal "unknown label".
   return null;
 }
