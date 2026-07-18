@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { format } from "date-fns";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -44,6 +46,8 @@ type ConsultantSummary = {
   qualifyingSessionsAtCurrentTier: number;
   requiredQualifyingSessions: number;
   lastSessionDate: string | null;
+  realConversationsThisMonth?: number;
+  realConversationCap?: number;
   industries?: {
     consulting: IndustryTrackBreakdown;
     leadership: IndustryTrackBreakdown;
@@ -80,6 +84,25 @@ type DetailSession = {
 type ConsultantDetail = {
   consultant: ConsultantSummary;
   sessions: DetailSession[];
+};
+
+// A scored real (field) conversation as returned by the manager Field endpoint,
+// decorated server-side with attribution.
+type FieldConversation = {
+  id: number;
+  submissionType: string;
+  overallScore: number | null;
+  stalledStep: string | null;
+  feedback: string | null;
+  createdAt: string;
+  managerSubmitted: boolean;
+  submittedByName: string | null;
+};
+
+const SUBMISSION_LABELS: Record<string, string> = {
+  text_chat: "Text / SMS / chat",
+  email: "Email thread",
+  audio: "Uploaded audio",
 };
 
 type SortKey = "name" | "tier" | "score" | "lastActive";
@@ -251,6 +274,7 @@ export function ConsultantRoster({
                 <TableHead>Certification</TableHead>
                 <TableHead>Progress</TableHead>
                 <TableHead className="text-right">Conversations</TableHead>
+                <TableHead className="text-right whitespace-nowrap">Field this month</TableHead>
                 <SortHeader label="Avg score" column="score" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="text-right" />
                 <SortHeader label="Last active" column="lastActive" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               </TableRow>
@@ -274,6 +298,11 @@ export function ConsultantRoster({
                     {c.qualifyingSessionsAtCurrentTier} of {c.requiredQualifyingSessions} at 85%+
                   </TableCell>
                   <TableCell className="text-right">{c.totalSessionsCompleted}</TableCell>
+                  <TableCell className="text-right whitespace-nowrap" data-testid={`text-field-usage-${c.id}`}>
+                    {c.realConversationCap != null
+                      ? `${c.realConversationsThisMonth ?? 0} / ${c.realConversationCap}`
+                      : "-"}
+                  </TableCell>
                   <TableCell className="text-right font-medium">{c.averageScore ?? "—"}</TableCell>
                   <TableCell className="text-muted-foreground whitespace-nowrap">{fmtDate(c.lastSessionDate)}</TableCell>
                 </TableRow>
@@ -341,12 +370,33 @@ function ConsultantDetailPanel({
   readOnlyDetail?: ConsultantDetail;
   onClose: () => void;
 }) {
+  const [, navigate] = useLocation();
+  // Practice = existing discovery-practice sessions; Field = scored real
+  // conversations. Practice is the default so the panel opens unchanged.
+  const [view, setView] = useState<"practice" | "field">("practice");
+
   const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantDetail>({
     queryKey: [`/api/offices/${officeId}/consultants/${userId}?requesterId=${requesterId}`],
     enabled: !readOnlyDetail,
   });
   const data = readOnlyDetail ?? fetched;
   const isLoading = readOnlyDetail ? false : fetchedLoading;
+
+  // Field submissions load lazily the first time the manager opens that tab, and
+  // never in the read-only public demo.
+  const { data: fieldRows, isLoading: fieldLoading } = useQuery<FieldConversation[]>({
+    queryKey: [`/api/offices/${officeId}/consultants/${userId}/real-conversations?requesterId=${requesterId}`],
+    enabled: !readOnlyDetail && view === "field",
+  });
+
+  function submitForRep() {
+    if (!data) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("repId", String(userId));
+    url.searchParams.set("repName", data.consultant.displayName);
+    window.history.replaceState({}, "", url);
+    navigate("/real-conversations");
+  }
 
   return (
     <div className="mt-6 rounded-lg border p-4" style={{ borderColor: ORANGE }} data-testid="panel-consultant-detail">
@@ -384,40 +434,126 @@ function ConsultantDetailPanel({
         </div>
       )}
 
-      <div className="mt-4">
-        {isLoading && <Skeleton className="h-32 rounded-lg" />}
-        {!isLoading && data && data.sessions.length === 0 && (
-          <p className="text-sm text-muted-foreground">No conversations recorded yet.</p>
-        )}
-        {!isLoading && data && data.sessions.length > 0 && (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Conversation</TableHead>
-                <TableHead>Track</TableHead>
-                <TableHead className="text-right">Score</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Date</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.sessions.map((s) => (
-                <TableRow key={s.id} data-testid={`row-detail-session-${s.id}`}>
-                  <TableCell className="font-medium">{s.scenarioTitle}</TableCell>
-                  <TableCell className="capitalize text-muted-foreground">{s.track}</TableCell>
-                  <TableCell className="text-right">{s.score ?? "—"}</TableCell>
-                  <TableCell>
-                    <Badge variant={s.status === "completed" ? "secondary" : "outline"}>{s.status}</Badge>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground whitespace-nowrap">
-                    {fmtDate(s.completedAt ?? s.createdAt)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex rounded-md border p-0.5" role="tablist" data-testid="toggle-practice-field">
+          {(["practice", "field"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={view === v}
+              onClick={() => setView(v)}
+              className="rounded px-3 py-1 text-sm font-medium"
+              style={view === v ? { backgroundColor: ORANGE, color: "white" } : undefined}
+              data-testid={`tab-${v}`}
+            >
+              {v === "practice" ? "Practice" : "Field"}
+            </button>
+          ))}
+        </div>
+        {!readOnlyDetail && (
+          <Button
+            size="sm"
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            onClick={submitForRep}
+            data-testid="button-submit-for-rep"
+          >
+            Submit real conversation for {data?.consultant.displayName ?? "this rep"}
+          </Button>
         )}
       </div>
+
+      {view === "practice" && (
+        <div className="mt-4">
+          {isLoading && <Skeleton className="h-32 rounded-lg" />}
+          {!isLoading && data && data.sessions.length === 0 && (
+            <p className="text-sm text-muted-foreground">No conversations recorded yet.</p>
+          )}
+          {!isLoading && data && data.sessions.length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Conversation</TableHead>
+                  <TableHead>Track</TableHead>
+                  <TableHead className="text-right">Score</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.sessions.map((s) => (
+                  <TableRow key={s.id} data-testid={`row-detail-session-${s.id}`}>
+                    <TableCell className="font-medium">{s.scenarioTitle}</TableCell>
+                    <TableCell className="capitalize text-muted-foreground">{s.track}</TableCell>
+                    <TableCell className="text-right">{s.score ?? "-"}</TableCell>
+                    <TableCell>
+                      <Badge variant={s.status === "completed" ? "secondary" : "outline"}>{s.status}</Badge>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap">
+                      {fmtDate(s.completedAt ?? s.createdAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      )}
+
+      {view === "field" && (
+        <div className="mt-4" data-testid="field-conversations">
+          {fieldLoading && <Skeleton className="h-32 rounded-lg" />}
+          {!fieldLoading && (!fieldRows || fieldRows.length === 0) && (
+            <p className="text-sm text-muted-foreground" data-testid="text-no-field">
+              No real conversations submitted yet.
+            </p>
+          )}
+          {!fieldLoading && fieldRows && fieldRows.length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Source</TableHead>
+                  <TableHead className="text-right">Score</TableHead>
+                  <TableHead>Stalled at</TableHead>
+                  <TableHead>Submitted by</TableHead>
+                  <TableHead>Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {fieldRows.map((r) => (
+                  <TableRow key={r.id} data-testid={`row-field-conversation-${r.id}`}>
+                    <TableCell className="font-medium">
+                      {SUBMISSION_LABELS[r.submissionType] ?? r.submissionType}
+                    </TableCell>
+                    <TableCell className="text-right">{r.overallScore ?? "-"}</TableCell>
+                    <TableCell>
+                      {r.stalledStep ? (
+                        <span
+                          className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold text-white"
+                          style={{ backgroundColor: ORANGE }}
+                          data-testid={`pill-field-stalled-${r.id}`}
+                        >
+                          {r.stalledStep}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {r.managerSubmitted
+                        ? `Manager${r.submittedByName ? ` (${r.submittedByName})` : ""}`
+                        : "Rep"}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap">
+                      {fmtDate(r.createdAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      )}
     </div>
   );
 }

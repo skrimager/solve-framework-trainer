@@ -47,6 +47,11 @@ import {
   type RealConversationScorer,
   type RealConversationTranscriber,
 } from "./realConversations";
+import {
+  evaluateRealConversationCap,
+  realConversationCapBlockedMessage,
+  REAL_CONVERSATION_MONTHLY_CAP,
+} from "./realConversationCap";
 import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
 import {
   buildSequence,
@@ -88,7 +93,7 @@ import {
   DEFAULT_PRIORITY,
   type ContactFilters,
 } from "./contacts";
-import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario } from "@shared/schema";
+import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
 import {
@@ -2572,14 +2577,98 @@ export function registerCoachingRoutes(
 // scoreTranscript. Results live in their own `real_conversations` table so they
 // never mix with practice sessions, analytics, or level progression.
 //
-// Two routes, both gated by the existing paid-seat check (checkSeatAccess):
+// Routes, gated by the existing paid-seat check (checkSeatAccess):
 //   POST /api/real-conversations           (submit + score a real conversation)
-//   GET  /api/real-conversations?userId=N  (list the caller's own submissions)
+//   POST /api/real-conversations/audio     (audio upload variant)
+//   GET  /api/real-conversations?userId=N  (submissions ABOUT the caller)
 //
 // Consent is mandatory: a submission is rejected unless consentAccepted is true,
 // and a timestamped consent record (submitter id + submission id + timestamp) is
 // persisted with the row.
+//
+// Phase 3 additions:
+//   * A manager/QA can submit ON BEHALF of a rep by passing subjectRepUserId; the
+//     submitter must be authorized for that rep's office (authorizeRosterRequest).
+//   * A per-rep monthly submission cap (evaluateRealConversationCap) hard-blocks
+//     at REAL_CONVERSATION_MONTHLY_CAP, keyed on the subject rep.
+//   * The GET endpoint returns submissions where the caller is the SUBJECT rep, so
+//     reps see manager-submitted scores about them (with attribution).
 // ===========================================================================
+
+// A real-conversation row decorated with the submitter's display name and a flag
+// for whether it was submitted by someone other than the subject rep (a manager
+// on the rep's behalf). Used by both the rep's own view and the manager Field
+// view so attribution renders identically in each.
+type DecoratedRealConversation = RealConversation & {
+  submittedByName: string | null;
+  managerSubmitted: boolean;
+};
+
+// Attach the submitter's display name to each row (one lookup per distinct
+// submitter) and mark manager-submitted rows. Never changes authorization or the
+// set of rows, only enriches them for display.
+async function decorateRealConversations(
+  rows: RealConversation[],
+): Promise<DecoratedRealConversation[]> {
+  const submitterIds = Array.from(new Set(rows.map((r) => r.submittedByUserId)));
+  const submitters = await Promise.all(submitterIds.map((id) => storage.getUser(id)));
+  const nameById = new Map<number, string>();
+  for (const u of submitters) if (u) nameById.set(u.id, u.displayName);
+  return rows.map((r) => ({
+    ...r,
+    submittedByName: nameById.get(r.submittedByUserId) ?? null,
+    managerSubmitted: r.submittedByUserId !== r.subjectRepUserId,
+  }));
+}
+
+// Resolve who a submission is ABOUT. With no explicit target (or a target equal
+// to the submitter) this is the Phase 1 self-submit path, preserved exactly. With
+// an explicit different target it is the manager-on-behalf path: the submitter
+// must be a manager/QA authorized for the target rep's office, and the target must
+// be a consultant. Returns the subject rep id + the office the row belongs to.
+async function resolveRealConversationSubject(
+  submitterId: number,
+  submitter: User,
+  rawSubjectRepId: unknown,
+): Promise<
+  | { ok: true; subjectRepUserId: number; officeId: number }
+  | { ok: false; status: number; message: string }
+> {
+  const provided =
+    rawSubjectRepId !== undefined && rawSubjectRepId !== null && `${rawSubjectRepId}`.trim() !== "";
+  if (!provided) {
+    return { ok: true, subjectRepUserId: submitterId, officeId: submitter.officeId };
+  }
+  const subjectRepUserId = Number(rawSubjectRepId);
+  if (!subjectRepUserId) {
+    return { ok: false, status: 400, message: "subjectRepUserId must be a valid user id" };
+  }
+  if (subjectRepUserId === submitterId) {
+    return { ok: true, subjectRepUserId: submitterId, officeId: submitter.officeId };
+  }
+  const target = await storage.getUser(subjectRepUserId);
+  if (!target || target.role !== "consultant") {
+    return { ok: false, status: 404, message: "Target rep not found" };
+  }
+  // Same office-scoped manager/QA authorization the roster routes use.
+  const auth = await authorizeRosterRequest(submitterId, target.officeId);
+  if (!auth.ok) return auth;
+  return { ok: true, subjectRepUserId, officeId: target.officeId };
+}
+
+// Cap gate: block when the subject rep has already hit the monthly submission cap.
+// Returns the {ok,status,message} shape used by the other gates in this file.
+async function checkRealConversationCap(
+  subjectRepUserId: number,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const rows = await storage.listRealConversationsBySubjectRep(subjectRepUserId);
+  const cap = evaluateRealConversationCap({ rows, now: new Date() });
+  if (cap.blocked) {
+    return { ok: false, status: 429, message: realConversationCapBlockedMessage(cap.resetDate) };
+  }
+  return { ok: true };
+}
+
 export function registerRealConversationRoutes(
   app: Express,
   opts: { scorer?: RealConversationScorer; transcriber?: RealConversationTranscriber } = {},
@@ -2609,7 +2698,8 @@ export function registerRealConversationRoutes(
 
   app.post("/api/real-conversations", async (req, res) => {
     try {
-      const { userId, submissionType, rawTranscript, consentAccepted } = req.body ?? {};
+      const { userId, submissionType, rawTranscript, consentAccepted, subjectRepUserId } =
+        req.body ?? {};
 
       const submitterId = Number(userId);
       if (!submitterId) return res.status(400).json({ message: "userId is required" });
@@ -2617,8 +2707,14 @@ export function registerRealConversationRoutes(
       const submitter = await storage.getUser(submitterId);
       if (!submitter) return res.status(401).json({ message: "Unknown user" });
 
-      // Paid-seat gate, identical to practice. 402 when the office/seat is unpaid.
-      const gate = await checkSeatAccess(submitterId);
+      // Resolve who the submission is about (self, or a rep the manager is
+      // authorized to submit for). Rejects unauthorized manager-on-behalf attempts.
+      const subject = await resolveRealConversationSubject(submitterId, submitter, subjectRepUserId);
+      if (!subject.ok) return res.status(subject.status).json({ message: subject.message });
+
+      // Paid-seat gate checks the TARGET rep's seat, since the seat being used is
+      // the rep's. 402 when the office/seat is unpaid.
+      const gate = await checkSeatAccess(subject.subjectRepUserId);
       if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
       // This JSON route only handles pasted transcripts. Audio submissions have
@@ -2633,10 +2729,15 @@ export function registerRealConversationRoutes(
         return res.status(400).json({ message: "Paste the conversation you want scored." });
       }
 
-      // Consent gate: no submission is accepted or scored without it.
+      // Consent gate: no submission is accepted or scored without it. Applies
+      // unchanged whether a rep or a manager on the rep's behalf is submitting.
       if (consentAccepted !== true) {
         return res.status(400).json({ message: REAL_CONVERSATION_CONSENT_TEXT });
       }
+
+      // Monthly per-rep cap. Hard block at the ceiling; no row is created.
+      const cap = await checkRealConversationCap(subject.subjectRepUserId);
+      if (!cap.ok) return res.status(cap.status).json({ message: cap.message });
 
       const parsed = parsePastedTranscript(transcriptText, submissionType);
       if (parsed.length === 0) {
@@ -2649,12 +2750,9 @@ export function registerRealConversationRoutes(
 
       const nowIso = new Date().toISOString();
       const created = await storage.createRealConversation({
-        // Phase 1: a rep only ever scores their OWN conversation, so submitter
-        // and subject are the same. subjectRepUserId is stored explicitly so
-        // later phases (a manager submitting on a rep's behalf) need no reshape.
         submittedByUserId: submitterId,
-        subjectRepUserId: submitterId,
-        officeId: submitter.officeId,
+        subjectRepUserId: subject.subjectRepUserId,
+        officeId: subject.officeId,
         submissionType,
         rawTranscript: transcriptText,
         originalAudioFilename: null,
@@ -2665,7 +2763,8 @@ export function registerRealConversationRoutes(
         consentAccepted: true,
         consentAcceptedAt: nowIso,
         createdAt: nowIso,
-        submissionCountedForCap: null,
+        // Counted toward the cap at creation time and never recalculated.
+        submissionCountedForCap: true,
         fieldVerifiedEligible: null,
       });
 
@@ -2697,7 +2796,7 @@ export function registerRealConversationRoutes(
     },
     async (req: Request, res: Response) => {
       try {
-        const { userId, consentAccepted } = req.body ?? {};
+        const { userId, consentAccepted, subjectRepUserId } = req.body ?? {};
 
         const submitterId = Number(userId);
         if (!submitterId) return res.status(400).json({ message: "userId is required" });
@@ -2705,8 +2804,12 @@ export function registerRealConversationRoutes(
         const submitter = await storage.getUser(submitterId);
         if (!submitter) return res.status(401).json({ message: "Unknown user" });
 
-        // Paid-seat gate, identical to the paste route.
-        const gate = await checkSeatAccess(submitterId);
+        // Resolve subject (self or manager-on-behalf), same as the paste route.
+        const subject = await resolveRealConversationSubject(submitterId, submitter, subjectRepUserId);
+        if (!subject.ok) return res.status(subject.status).json({ message: subject.message });
+
+        // Paid-seat gate checks the TARGET rep's seat.
+        const gate = await checkSeatAccess(subject.subjectRepUserId);
         if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
         const file = req.file;
@@ -2722,6 +2825,11 @@ export function registerRealConversationRoutes(
         if (consentAccepted !== "true" && consentAccepted !== true) {
           return res.status(400).json({ message: REAL_CONVERSATION_CONSENT_TEXT });
         }
+
+        // Monthly per-rep cap, checked before transcription so a blocked rep never
+        // consumes a Whisper call and no row is created.
+        const cap = await checkRealConversationCap(subject.subjectRepUserId);
+        if (!cap.ok) return res.status(cap.status).json({ message: cap.message });
 
         // Transcribe with Whisper. A transcription failure never creates a row.
         let transcription: { text: string; duration?: number; segments?: { text: string }[] };
@@ -2763,8 +2871,8 @@ export function registerRealConversationRoutes(
         const nowIso = new Date().toISOString();
         const created = await storage.createRealConversation({
           submittedByUserId: submitterId,
-          subjectRepUserId: submitterId,
-          officeId: submitter.officeId,
+          subjectRepUserId: subject.subjectRepUserId,
+          officeId: subject.officeId,
           submissionType: "audio",
           rawTranscript: transcriptText,
           originalAudioFilename: file.originalname,
@@ -2775,7 +2883,8 @@ export function registerRealConversationRoutes(
           consentAccepted: true,
           consentAcceptedAt: nowIso,
           createdAt: nowIso,
-          submissionCountedForCap: null,
+          // Counted toward the cap at creation time and never recalculated.
+          submissionCountedForCap: true,
           fieldVerifiedEligible: null,
         });
 
@@ -2794,9 +2903,12 @@ export function registerRealConversationRoutes(
     const requester = await storage.getUser(requesterId);
     if (!requester) return res.status(401).json({ message: "Unknown user" });
 
-    // Reps only ever see their own submissions in Phase 1.
-    const rows = await storage.listRealConversationsByUser(requesterId);
-    res.json(rows);
+    // A rep sees every submission ABOUT them (subject rep == requester), including
+    // ones a manager submitted on their behalf, and never anyone else's. Rows are
+    // decorated with submitter attribution so the UI can label manager-submitted
+    // entries.
+    const rows = await storage.listRealConversationsBySubjectRep(requesterId);
+    res.json(await decorateRealConversations(rows));
   });
 }
 
@@ -2820,6 +2932,10 @@ function buildConsultantSummary(
   allScenarios: Scenario[],
   industryCerts: import("@shared/schema").IndustryCertification[] = [],
   academyCredits: import("@shared/schema").AcademyCredit[] = [],
+  // The rep's OWN real-conversation rows (subject rep == user), used only to
+  // derive this month's usage meter. Defaults to [] so callers that don't care
+  // about the meter (e.g. the public demo) get a zeroed meter without a query.
+  realConversationRows: RealConversation[] = [],
 ) {
   const completed = userSessions.filter((s) => s.status === "completed");
   const scored = completed.filter((s) => s.score !== null);
@@ -2846,6 +2962,13 @@ function buildConsultantSummary(
       .sort()
       .at(-1) ?? null;
 
+  // Real-conversation usage this calendar month, out of the per-rep cap. Surfaced
+  // in the roster so a manager sees "14 / 20" without opening the Field view.
+  const realConversationCap = evaluateRealConversationCap({
+    rows: realConversationRows,
+    now: new Date(),
+  });
+
   return {
     id: user.id,
     username: user.username,
@@ -2865,6 +2988,8 @@ function buildConsultantSummary(
     academyLevel: highestAcademyLevel(academyCredits),
     academyRankLabel: academyRankLabel(academyCredits),
     academyCreditCents: sumCreditCents(academyCredits),
+    realConversationsThisMonth: realConversationCap.count,
+    realConversationCap: realConversationCap.limit,
   };
 }
 
@@ -2945,9 +3070,10 @@ export function registerManagerRosterRoutes(app: Express): void {
     ]);
 
     const consultantIds = officeUsers.filter((u) => u.role === "consultant").map((u) => u.id);
-    const [officeIndustryCerts, officeCredits] = await Promise.all([
+    const [officeIndustryCerts, officeCredits, officeRealConversations] = await Promise.all([
       storage.listIndustryCertificationsByUserIds(consultantIds),
       storage.listAcademyCreditsByOffice(officeId),
+      storage.listRealConversationsByOffice(officeId),
     ]);
 
     const sessionsByUser = new Map<number, Session[]>();
@@ -2958,6 +3084,8 @@ export function registerManagerRosterRoutes(app: Express): void {
     }
     const industryCertsByUser = groupBy(officeIndustryCerts, (c) => c.userId);
     const creditsByUser = groupBy(officeCredits, (c) => c.userId);
+    // Grouped by the SUBJECT rep so the meter counts submissions ABOUT each rep.
+    const realConversationsByRep = groupBy(officeRealConversations, (r) => r.subjectRepUserId);
 
     const consultants = officeUsers
       .filter((u) => u.role === "consultant")
@@ -2968,6 +3096,7 @@ export function registerManagerRosterRoutes(app: Express): void {
           allScenarios,
           industryCertsByUser.get(u.id) ?? [],
           creditsByUser.get(u.id) ?? [],
+          realConversationsByRep.get(u.id) ?? [],
         ),
       );
 
@@ -2988,12 +3117,14 @@ export function registerManagerRosterRoutes(app: Express): void {
       return res.status(404).json({ message: "Consultant not found in this office" });
     }
 
-    const [userSessions, allScenarios, targetIndustryCerts, targetCredits] = await Promise.all([
-      storage.listSessionsByUser(userId),
-      storage.listScenarios(),
-      storage.listIndustryCertificationsByUser(userId),
-      storage.listAcademyCreditsByUser(userId),
-    ]);
+    const [userSessions, allScenarios, targetIndustryCerts, targetCredits, targetRealConversations] =
+      await Promise.all([
+        storage.listSessionsByUser(userId),
+        storage.listScenarios(),
+        storage.listIndustryCertificationsByUser(userId),
+        storage.listAcademyCreditsByUser(userId),
+        storage.listRealConversationsBySubjectRep(userId),
+      ]);
     const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
 
     const sessions = userSessions
@@ -3022,9 +3153,38 @@ export function registerManagerRosterRoutes(app: Express): void {
       .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt));
 
     res.json({
-      consultant: buildConsultantSummary(target, userSessions, allScenarios, targetIndustryCerts, targetCredits),
+      consultant: buildConsultantSummary(
+        target,
+        userSessions,
+        allScenarios,
+        targetIndustryCerts,
+        targetCredits,
+        targetRealConversations,
+      ),
       sessions,
     });
+  });
+
+  // Field view: a consultant's REAL conversation submissions (as opposed to the
+  // practice sessions returned above), for the manager's Practice vs Field toggle.
+  // Same office-scoped manager/QA authorization as the rest of the roster, and it
+  // 404s for a user outside the office, so a manager can never read another
+  // office's field data. Rows are decorated with submitter attribution so the UI
+  // can flag manager-submitted entries.
+  app.get("/api/offices/:officeId/consultants/:userId/real-conversations", async (req, res) => {
+    const officeId = Number(req.params.officeId);
+    const userId = Number(req.params.userId);
+    const requesterId = Number(req.query.requesterId);
+    const auth = await authorizeRosterRequest(requesterId, officeId);
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+
+    const target = await storage.getUser(userId);
+    if (!target || target.officeId !== officeId || target.role !== "consultant") {
+      return res.status(404).json({ message: "Consultant not found in this office" });
+    }
+
+    const rows = await storage.listRealConversationsBySubjectRep(userId);
+    res.json(await decorateRealConversations(rows));
   });
 }
 

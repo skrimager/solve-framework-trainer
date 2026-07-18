@@ -127,6 +127,8 @@ describe("manager roster HTTP endpoints", () => {
     (storage as any).listIndustryCertificationsByUser = async () => [];
     (storage as any).listAcademyCreditsByOffice = async () => [];
     (storage as any).listAcademyCreditsByUser = async () => [];
+    (storage as any).listRealConversationsByOffice = async () => [];
+    (storage as any).listRealConversationsBySubjectRep = async () => [];
   });
 
   // --- Authorization ---

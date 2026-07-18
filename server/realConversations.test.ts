@@ -240,6 +240,8 @@ describe("real conversation routes", () => {
     };
     (storage as any).listRealConversationsByUser = async (userId: number) =>
       created.filter((r) => r.submittedByUserId === userId).reverse();
+    (storage as any).listRealConversationsBySubjectRep = async (repId: number) =>
+      created.filter((r) => r.subjectRepUserId === repId).reverse();
   });
 
   async function post(body: unknown) {
@@ -413,6 +415,8 @@ describe("real conversation audio route", () => {
       created.push(row);
       return row;
     };
+    (storage as any).listRealConversationsBySubjectRep = async (repId: number) =>
+      created.filter((r) => r.subjectRepUserId === repId).reverse();
   });
 
   async function postAudio(opts: {
