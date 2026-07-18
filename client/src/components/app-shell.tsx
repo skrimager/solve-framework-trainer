@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
-import { LogOut, ArrowLeft } from "lucide-react";
+import { LogOut, ArrowLeft, ClipboardCheck } from "lucide-react";
 
 export function AppShell({
   title,
@@ -34,6 +34,17 @@ export function AppShell({
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/real-conversations")}
+              className="gap-1.5"
+              style={{ borderColor: "#0A1A30", color: "#0A1A30" }}
+              data-testid="link-nav-real-conversations"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Real Conversations</span>
+            </Button>
             <a
               href="https://solveframework.com"
               className="text-xs font-medium hidden sm:inline-flex items-center gap-1 hover:underline"

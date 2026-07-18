@@ -383,28 +383,6 @@ export default function Scenarios() {
             ? "Pick a conversation and start it cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
             : "Pick a conversation and start it cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
-        <div
-          className="flex items-center justify-between gap-3 rounded-lg border-2 px-4 py-3"
-          style={{ borderColor: "#0A1A30", backgroundColor: "rgba(10,26,48,0.04)" }}
-          data-testid="banner-real-conversations"
-        >
-          <div className="flex-1">
-            <p className="text-sm font-semibold" style={{ color: "#0A1A30" }}>
-              Score a Real Conversation
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Paste a real discovery conversation (text/SMS/chat or an email thread) and get it scored against the same SOLVE rubric as practice.
-            </p>
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => navigate("/real-conversations")}
-            data-testid="button-score-real-conversation"
-          >
-            Open
-          </Button>
-        </div>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
             <h2 className="text-sm font-semibold text-foreground">Saved for later</h2>
@@ -435,6 +413,35 @@ export default function Scenarios() {
           </div>
         )}
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* Beginner-only entry point to Real Conversation Scoring, sized and
+              weighted like a scenario card so it sits naturally in the grid.
+              Reachable from any level via the persistent top-nav button. */}
+          {activeLevel === "beginner" && (
+            <Card
+              className="border-2"
+              style={{ borderColor: "#0A1A30" }}
+              data-testid="card-upload-real-conversation"
+            >
+              <CardHeader>
+                <CardTitle className="text-lg" style={{ color: "#0A1A30" }}>
+                  Upload Real Conversation
+                </CardTitle>
+                <CardDescription className="pt-1">
+                  Already had this conversation for real? Paste it in or upload the audio and
+                  score it against the same SOLVE rubric.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button
+                  onClick={() => navigate("/real-conversations")}
+                  style={{ backgroundColor: "#E06D00", color: "white" }}
+                  data-testid="button-open-real-conversation"
+                >
+                  Score a Real Conversation
+                </Button>
+              </CardContent>
+            </Card>
+          )}
           {orderedVerticals.map((vertical) => {
             const pool = verticalGroups.get(vertical) ?? [];
             const presentDifficulties = new Set(pool.map((s) => s.difficulty));

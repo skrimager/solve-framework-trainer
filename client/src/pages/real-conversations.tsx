@@ -29,12 +29,44 @@ const RUBRIC_LABELS: Record<keyof RubricScores, string> = {
 const CONSENT_TEXT =
   "I have the legal right to submit this conversation, including any required consent to its recording.";
 
-type SubmissionType = "text_chat" | "email";
+type SubmissionType = "text_chat" | "email" | "audio";
 
 const SUBMISSION_LABELS: Record<SubmissionType, string> = {
   text_chat: "Text / SMS / chat",
   email: "Email thread",
+  audio: "Upload audio",
 };
+
+// Audio upload limits, kept in sync with the server (MAX_AUDIO_BYTES,
+// MAX_AUDIO_DURATION_SECONDS, ALLOWED_AUDIO_EXTENSIONS in server/realConversations.ts).
+// Client-side checks are a courtesy fast-fail; the server re-enforces all of them.
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MAX_AUDIO_DURATION_SECONDS = 30 * 60;
+const ALLOWED_AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav"];
+
+function hasAllowedAudioExtension(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return ALLOWED_AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// Best-effort duration read via the browser Audio API. Resolves to null when the
+// browser can't determine it, in which case we defer to the server's check.
+function readAudioDurationSeconds(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const audio = new Audio();
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(audio.duration) ? audio.duration : null);
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    audio.src = url;
+  });
+}
 
 function parseServerMessage(raw?: string): string | undefined {
   if (!raw) return undefined;
@@ -107,6 +139,7 @@ export default function RealConversations() {
 
   const [submissionType, setSubmissionType] = useState<SubmissionType>("text_chat");
   const [rawTranscript, setRawTranscript] = useState("");
+  const [audioFile, setAudioFile] = useState<File | null>(null);
   const [consentAccepted, setConsentAccepted] = useState(false);
   const [result, setResult] = useState<RealConversation | null>(null);
 
@@ -122,6 +155,24 @@ export default function RealConversations() {
 
   const submit = useMutation({
     mutationFn: async () => {
+      if (submissionType === "audio") {
+        // Audio is a multipart upload to a dedicated route, so it can't go
+        // through apiRequest (which sends JSON). Whisper transcription then the
+        // same scoring pipeline runs server-side.
+        const form = new FormData();
+        form.append("userId", String(user!.id));
+        form.append("consentAccepted", String(consentAccepted));
+        form.append("audio", audioFile!, audioFile!.name);
+        const res = await fetch("/api/real-conversations/audio", {
+          method: "POST",
+          body: form,
+        });
+        if (!res.ok) {
+          const text = (await res.text()) || res.statusText;
+          throw new Error(`${res.status}: ${text}`);
+        }
+        return res.json() as Promise<RealConversation>;
+      }
       const res = await apiRequest("POST", "/api/real-conversations", {
         userId: user!.id,
         submissionType,
@@ -133,6 +184,7 @@ export default function RealConversations() {
     onSuccess: (data) => {
       setResult(data);
       setRawTranscript("");
+      setAudioFile(null);
       setConsentAccepted(false);
       queryClient.invalidateQueries({ queryKey: historyKey });
     },
@@ -147,14 +199,55 @@ export default function RealConversations() {
     },
   });
 
-  const canSubmit = consentAccepted && rawTranscript.trim().length > 0 && !submit.isPending;
+  // Validate a chosen audio file client-side (type, size, best-effort duration)
+  // before storing it, surfacing a clear toast on rejection. The server enforces
+  // all of these again regardless.
+  const handleAudioSelected = async (file: File | null) => {
+    if (!file) {
+      setAudioFile(null);
+      return;
+    }
+    if (!hasAllowedAudioExtension(file.name)) {
+      toast({
+        title: "Unsupported file type",
+        description: "Upload an mp3, m4a, or wav file.",
+        variant: "destructive",
+      });
+      setAudioFile(null);
+      return;
+    }
+    if (file.size > MAX_AUDIO_BYTES) {
+      toast({
+        title: "File is too large",
+        description: "The maximum audio size is 25MB.",
+        variant: "destructive",
+      });
+      setAudioFile(null);
+      return;
+    }
+    const duration = await readAudioDurationSeconds(file);
+    if (duration !== null && duration > MAX_AUDIO_DURATION_SECONDS) {
+      toast({
+        title: "Recording is too long",
+        description: "Audio must be 30 minutes or shorter.",
+        variant: "destructive",
+      });
+      setAudioFile(null);
+      return;
+    }
+    setAudioFile(file);
+  };
+
+  const hasContent =
+    submissionType === "audio" ? audioFile !== null : rawTranscript.trim().length > 0;
+  const canSubmit = consentAccepted && hasContent && !submit.isPending;
 
   return (
     <AppShell title="Score a Real Conversation">
       <div className="space-y-6 max-w-2xl">
         <p className="text-sm text-muted-foreground" data-testid="text-real-intro">
-          Paste a real discovery conversation and get it scored against the same SOLVE
-          rubric used in discovery practice. Reps submit their own conversations only.
+          Paste or upload a real discovery conversation and get it scored against the same
+          SOLVE rubric used in discovery practice. Reps submit their own conversations only.
         </p>
 
         <Card>
@@ -180,21 +273,46 @@ export default function RealConversations() {
               </RadioGroup>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="raw-transcript">Paste the conversation</Label>
-              <Textarea
-                id="raw-transcript"
-                value={rawTranscript}
-                onChange={(e) => setRawTranscript(e.target.value)}
-                rows={12}
-                placeholder={
-                  submissionType === "email"
-                    ? "Paste the full email thread here."
-                    : "Paste the text/SMS/chat conversation here. Prefix lines with a speaker label (e.g. 'Me:' / 'Customer:') for the most accurate scoring."
-                }
-                data-testid="input-raw-transcript"
-              />
-            </div>
+            {submissionType === "audio" ? (
+              <div className="space-y-2">
+                <Label htmlFor="audio-file">Upload the recording</Label>
+                <input
+                  id="audio-file"
+                  type="file"
+                  accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/wav,audio/x-wav"
+                  onChange={(e) => handleAudioSelected(e.target.files?.[0] ?? null)}
+                  disabled={submit.isPending}
+                  className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white file:cursor-pointer"
+                  data-testid="input-audio-file"
+                />
+                <style>{`#audio-file::file-selector-button{background-color:#E06D00}`}</style>
+                <p className="text-xs text-muted-foreground">
+                  mp3, m4a, or wav. Up to 25MB, about 30 minutes. Transcription can take a
+                  minute for longer recordings.
+                </p>
+                {audioFile && (
+                  <p className="text-sm font-medium" data-testid="text-audio-filename">
+                    Selected: {audioFile.name}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Label htmlFor="raw-transcript">Paste the conversation</Label>
+                <Textarea
+                  id="raw-transcript"
+                  value={rawTranscript}
+                  onChange={(e) => setRawTranscript(e.target.value)}
+                  rows={12}
+                  placeholder={
+                    submissionType === "email"
+                      ? "Paste the full email thread here."
+                      : "Paste the text/SMS/chat conversation here. Prefix lines with a speaker label (e.g. 'Me:' / 'Customer:') for the most accurate scoring."
+                  }
+                  data-testid="input-raw-transcript"
+                />
+              </div>
+            )}
 
             <div className="flex items-start gap-3">
               <Checkbox
@@ -213,7 +331,11 @@ export default function RealConversations() {
               disabled={!canSubmit}
               data-testid="button-submit-real-conversation"
             >
-              {submit.isPending ? "Scoring…" : "Score conversation"}
+              {submit.isPending
+                ? submissionType === "audio"
+                  ? "Transcribing and scoring…"
+                  : "Scoring…"
+                : "Score conversation"}
             </Button>
           </CardContent>
         </Card>

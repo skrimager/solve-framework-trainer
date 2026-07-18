@@ -1,8 +1,9 @@
 import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import multer from "multer";
 import { storage } from "./storage";
-import { getCustomerReply, streamCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError } from "./llm";
+import { getCustomerReply, streamCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -37,10 +38,14 @@ import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
 import {
   parsePastedTranscript,
+  parseAudioTranscript,
   deriveStalledStep,
-  isValidSubmissionType,
+  isAllowedAudioFile,
   REAL_CONVERSATION_CONSENT_TEXT,
+  MAX_AUDIO_BYTES,
+  MAX_AUDIO_DURATION_SECONDS,
   type RealConversationScorer,
+  type RealConversationTranscriber,
 } from "./realConversations";
 import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
 import {
@@ -2577,7 +2582,7 @@ export function registerCoachingRoutes(
 // ===========================================================================
 export function registerRealConversationRoutes(
   app: Express,
-  opts: { scorer?: RealConversationScorer } = {},
+  opts: { scorer?: RealConversationScorer; transcriber?: RealConversationTranscriber } = {},
 ): void {
   // Injectable so tests can score without the OpenAI client. Defaults to the
   // same engine practice sessions use, called with its default consulting track.
@@ -2585,6 +2590,22 @@ export function registerRealConversationRoutes(
   // real conversations always score on the default consulting track, so the
   // rubric is RubricScores. The cast narrows to that Phase 1 contract.
   const scorer: RealConversationScorer = opts.scorer ?? (scoreTranscript as RealConversationScorer);
+  // Injectable Whisper transcription (Phase 2), stubbed the same way in tests so
+  // they need no network. Defaults to the shared OpenAI client's Whisper call.
+  const transcriber: RealConversationTranscriber = opts.transcriber ?? transcribeAudio;
+
+  // Multipart handler for audio uploads. Memory storage (the buffer is streamed
+  // straight to Whisper, never persisted to disk), restricted to a single file,
+  // with the 25MB cap enforced HERE as a first line of defense and the mp3/m4a/wav
+  // allow-list rejected before the buffer is even read.
+  const audioUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_AUDIO_BYTES, files: 1 },
+    fileFilter: (_req, file, cb) => {
+      if (isAllowedAudioFile(file.originalname)) cb(null, true);
+      else cb(new Error("Unsupported file type. Upload an mp3, m4a, or wav file."));
+    },
+  });
 
   app.post("/api/real-conversations", async (req, res) => {
     try {
@@ -2600,7 +2621,10 @@ export function registerRealConversationRoutes(
       const gate = await checkSeatAccess(submitterId);
       if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
 
-      if (!isValidSubmissionType(submissionType)) {
+      // This JSON route only handles pasted transcripts. Audio submissions have
+      // their own multipart route below, so 'audio' is rejected here even though
+      // it is a valid stored submission type.
+      if (submissionType !== "text_chat" && submissionType !== "email") {
         return res.status(400).json({ message: "submissionType must be 'text_chat' or 'email'." });
       }
 
@@ -2651,6 +2675,117 @@ export function registerRealConversationRoutes(
       res.status(500).json({ message: err.message ?? "Failed to score the conversation" });
     }
   });
+
+  // Phase 2: audio upload. A rep uploads an mp3/m4a/wav recording of a real
+  // discovery conversation; it is transcribed by Whisper and fed into the EXACT
+  // same scoreTranscript pipeline as pasted text/email. The multer middleware is
+  // wrapped so its file-type/size rejections return a clean 400 JSON error
+  // instead of surfacing as an unhandled error.
+  app.post(
+    "/api/real-conversations/audio",
+    (req: Request, res: Response, next: NextFunction) => {
+      audioUpload.single("audio")(req, res, (err: any) => {
+        if (err) {
+          const message =
+            err?.code === "LIMIT_FILE_SIZE"
+              ? "Audio file is too large. The maximum size is 25MB."
+              : err?.message ?? "Audio upload failed.";
+          return res.status(400).json({ message });
+        }
+        next();
+      });
+    },
+    async (req: Request, res: Response) => {
+      try {
+        const { userId, consentAccepted } = req.body ?? {};
+
+        const submitterId = Number(userId);
+        if (!submitterId) return res.status(400).json({ message: "userId is required" });
+
+        const submitter = await storage.getUser(submitterId);
+        if (!submitter) return res.status(401).json({ message: "Unknown user" });
+
+        // Paid-seat gate, identical to the paste route.
+        const gate = await checkSeatAccess(submitterId);
+        if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+        const file = req.file;
+        if (!file) {
+          return res.status(400).json({ message: "Attach an audio file (mp3, m4a, or wav)." });
+        }
+        // Belt-and-suspenders: the type is already enforced in fileFilter.
+        if (!isAllowedAudioFile(file.originalname)) {
+          return res.status(400).json({ message: "Unsupported file type. Upload an mp3, m4a, or wav file." });
+        }
+
+        // Consent gate, identical to paste. Multipart fields arrive as strings.
+        if (consentAccepted !== "true" && consentAccepted !== true) {
+          return res.status(400).json({ message: REAL_CONVERSATION_CONSENT_TEXT });
+        }
+
+        // Transcribe with Whisper. A transcription failure never creates a row.
+        let transcription: { text: string; duration?: number; segments?: { text: string }[] };
+        try {
+          transcription = await transcriber({
+            buffer: file.buffer,
+            filename: file.originalname,
+            mimetype: file.mimetype,
+          });
+        } catch (err: any) {
+          console.error("Whisper transcription failed:", err);
+          return res.status(502).json({
+            message:
+              "We couldn't transcribe that audio. Please try again with a clear mp3, m4a, or wav recording.",
+          });
+        }
+
+        // Best-effort ~30 min cap using Whisper's reported duration. The 25MB
+        // size cap above is the strict, always-enforced limit.
+        if (
+          typeof transcription.duration === "number" &&
+          transcription.duration > MAX_AUDIO_DURATION_SECONDS
+        ) {
+          return res.status(400).json({
+            message: "Audio is longer than the 30 minute limit. Please upload a shorter recording.",
+          });
+        }
+
+        const transcriptText = (transcription.text ?? "").trim();
+        const parsed = parseAudioTranscript(transcriptText, transcription.segments);
+        if (parsed.length === 0) {
+          return res.status(400).json({ message: "That audio had no recognizable speech to score." });
+        }
+
+        // Same unchanged engine, same downstream handling as text/email.
+        const { rubric, feedback, overall } = await scorer(parsed);
+        const stalledStep = deriveStalledStep(rubric as any);
+
+        const nowIso = new Date().toISOString();
+        const created = await storage.createRealConversation({
+          submittedByUserId: submitterId,
+          subjectRepUserId: submitterId,
+          officeId: submitter.officeId,
+          submissionType: "audio",
+          rawTranscript: transcriptText,
+          originalAudioFilename: file.originalname,
+          overallScore: overall,
+          rubricScores: JSON.stringify(rubric),
+          feedback,
+          stalledStep,
+          consentAccepted: true,
+          consentAcceptedAt: nowIso,
+          createdAt: nowIso,
+          submissionCountedForCap: null,
+          fieldVerifiedEligible: null,
+        });
+
+        res.json(created);
+      } catch (err: any) {
+        console.error("Real conversation audio scoring failed:", err);
+        res.status(500).json({ message: err.message ?? "Failed to score the conversation" });
+      }
+    },
+  );
 
   app.get("/api/real-conversations", async (req, res) => {
     const requesterId = Number(req.query.userId);
