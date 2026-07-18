@@ -8,6 +8,7 @@ import { registerRealConversationRoutes, withStalledStep } from "./routes";
 import {
   parsePastedTranscript,
   parseAudioTranscript,
+  stripLeadingTimestamp,
   deriveStalledStep,
   isValidSubmissionType,
   isAllowedAudioFile,
@@ -126,6 +127,139 @@ describe("parsePastedTranscript", () => {
       assert.ok(typeof m.content === "string");
       assert.ok(typeof m.timestamp === "string");
     }
+  });
+
+  test("leading timestamps do not break semantic-label detection", () => {
+    // Regression guard: the timestamp-stripping fix must not disturb the already
+    // working "Rep:"/"Customer:" path. Every line here is timestamped.
+    const raw = [
+      "[00:14] Rep: Thanks for calling, how can I help?",
+      "[00:19] Customer: I'm looking at upgrading my system.",
+      "[00:25] Rep: Tell me what's prompting that.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["consultant", "customer", "consultant"],
+    );
+    // The timestamp is stripped from the stored content, not retained.
+    assert.equal(parsed[0].content, "Thanks for calling, how can I help?");
+  });
+
+  test("generic 'Speaker A'/'Speaker B' labels map by first-appearance order", () => {
+    // First distinct generic label -> customer, second -> consultant, regardless
+    // of which literal letter appears first.
+    const raw = [
+      "Speaker A: Hi, thanks for coming in today.",
+      "Speaker B: Of course, I've been meaning to talk about upgrading.",
+      "Speaker A: Tell me what's driving that.",
+      "Speaker B: Our current setup keeps failing.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer", "consultant"],
+    );
+    assert.equal(parsed[0].content, "Hi, thanks for coming in today.");
+  });
+
+  test("generic-speaker ordering is by appearance, not by label letter", () => {
+    // Speaker B appears first here, so B is the customer and A is the consultant.
+    const raw = [
+      "Speaker B: We're just starting to look around.",
+      "Speaker A: Happy to help, what matters most to you?",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+  });
+
+  test("'Speaker 1'/'Speaker 2' numeric diarization labels are also handled", () => {
+    const raw = [
+      "Speaker 1: What brought you in today?",
+      "Speaker 2: I need help choosing an option.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+  });
+
+  test("a third distinct generic speaker collapses to customer (binary role model)", () => {
+    const raw = [
+      "Speaker A: Hello.",
+      "Speaker B: Hi there.",
+      "Speaker C: I'm joining too.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer"],
+    );
+  });
+
+  test("timestamps AND generic speaker labels together parse into alternating roles", () => {
+    const raw = [
+      "[00:00] Speaker A: Hi, thanks for coming in today.",
+      "[00:04] Speaker B: Of course, I've been wanting to talk about upgrading for a while.",
+      "[00:09] Speaker A: Tell me what's driving that.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant", "customer"],
+    );
+    assert.equal(parsed[0].content, "Hi, thanks for coming in today.");
+    assert.equal(
+      parsed[1].content,
+      "Of course, I've been wanting to talk about upgrading for a while.",
+    );
+  });
+
+  test("an HH:MM:SS timestamp is stripped just like MM:SS", () => {
+    const raw = [
+      "[01:00:14] Rep: Welcome back.",
+      "[01:00:20] Customer: Thanks.",
+    ].join("\n");
+    const parsed = parsePastedTranscript(raw, "text_chat");
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["consultant", "customer"],
+    );
+    assert.equal(parsed[0].content, "Welcome back.");
+  });
+});
+
+describe("stripLeadingTimestamp", () => {
+  test("strips bracketed MM:SS and HH:MM:SS tokens", () => {
+    assert.equal(stripLeadingTimestamp("[00:14] Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("[00:14:32] Rep: hi"), "Rep: hi");
+  });
+
+  test("strips parenthesized timestamps", () => {
+    assert.equal(stripLeadingTimestamp("(00:14) Customer: hi"), "Customer: hi");
+    assert.equal(stripLeadingTimestamp("(1:02:03) Customer: hi"), "Customer: hi");
+  });
+
+  test("strips bare timestamps with or without a separator", () => {
+    assert.equal(stripLeadingTimestamp("00:14 Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("00:14 - Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("00:14: Rep: hi"), "Rep: hi");
+  });
+
+  test("leaves lines without a leading timestamp untouched", () => {
+    assert.equal(stripLeadingTimestamp("Rep: hi"), "Rep: hi");
+    assert.equal(stripLeadingTimestamp("Just browsing, thanks."), "Just browsing, thanks.");
+  });
+
+  test("does not strip a time that appears mid-sentence", () => {
+    assert.equal(
+      stripLeadingTimestamp("Rep: I'll be there at 3:45"),
+      "Rep: I'll be there at 3:45",
+    );
   });
 });
 
