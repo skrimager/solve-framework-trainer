@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -145,6 +145,11 @@ export interface IStorage {
   listCoachingMessagesBySession(sessionId: number): Promise<CoachingMessage[]>;
   // Soft-clear every still-active thread a trainee owns (called when they start a new attempt).
   clearCoachingMessagesForUser(userId: number): Promise<void>;
+
+  // --- Real Conversation Scoring (Phase 1): rep-submitted real discovery conversations. ---
+  createRealConversation(rc: InsertRealConversation): Promise<RealConversation>;
+  getRealConversation(id: number): Promise<RealConversation | undefined>;
+  listRealConversationsByUser(userId: number): Promise<RealConversation[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -609,6 +614,25 @@ export class DatabaseStorage implements IStorage {
       .update(coachingMessages)
       .set({ cleared: true })
       .where(and(eq(coachingMessages.userId, userId), eq(coachingMessages.cleared, false)));
+  }
+
+  // --- Real Conversation Scoring (Phase 1) ---
+  async createRealConversation(rc: InsertRealConversation): Promise<RealConversation> {
+    const rows = await db.insert(realConversations).values(rc).returning();
+    return rows[0];
+  }
+
+  async getRealConversation(id: number): Promise<RealConversation | undefined> {
+    const rows = await db.select().from(realConversations).where(eq(realConversations.id, id));
+    return rows[0];
+  }
+
+  async listRealConversationsByUser(userId: number): Promise<RealConversation[]> {
+    return db
+      .select()
+      .from(realConversations)
+      .where(eq(realConversations.submittedByUserId, userId))
+      .orderBy(desc(realConversations.id));
   }
 }
 

@@ -383,6 +383,28 @@ export default function Scenarios() {
             ? "Pick a conversation and start it cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
             : "Pick a conversation and start it cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
+        <div
+          className="flex items-center justify-between gap-3 rounded-lg border-2 px-4 py-3"
+          style={{ borderColor: "#0A1A30", backgroundColor: "rgba(10,26,48,0.04)" }}
+          data-testid="banner-real-conversations"
+        >
+          <div className="flex-1">
+            <p className="text-sm font-semibold" style={{ color: "#0A1A30" }}>
+              Score a Real Conversation
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Paste a real discovery conversation (text/SMS/chat or an email thread) and get it scored against the same SOLVE rubric as practice.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => navigate("/real-conversations")}
+            data-testid="button-score-real-conversation"
+          >
+            Open
+          </Button>
+        </div>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
             <h2 className="text-sm font-semibold text-foreground">Saved for later</h2>

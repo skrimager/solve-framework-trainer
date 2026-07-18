@@ -244,6 +244,54 @@ export const insertAcademyCreditSchema = createInsertSchema(academyCredits).omit
 export type InsertAcademyCredit = z.infer<typeof insertAcademyCreditSchema>;
 export type AcademyCredit = typeof academyCredits.$inferSelect;
 
+// A "Real Conversation Scoring" submission: a real (non-practice) discovery
+// conversation a rep pastes in to be scored against the same SOLVE rubric engine
+// used for practice sessions (see scoreTranscript in server/llm.ts). Kept in its
+// own table, entirely separate from practice `sessions`, so real-world submissions
+// never mix with practice progression, office analytics, or level advancement.
+//
+// This table is intentionally laid down to support later phases without a further
+// migration reshaping it: Phase 2 adds audio upload (submissionType 'audio' +
+// originalAudioFilename), Phase 3 adds fair-use capping (submissionCountedForCap),
+// and Phase 4 adds a "Field Verified" badge (fieldVerifiedEligible). Those columns
+// exist now (nullable) but no logic reads/writes them yet in Phase 1.
+export const realConversations = pgTable("real_conversations", {
+  id: serial("id").primaryKey(),
+  // Who physically submitted the conversation. In Phase 1 a rep only submits their
+  // own conversations, so this equals subjectRepUserId. Kept distinct so a later
+  // phase can let a manager submit on behalf of a rep without a schema change.
+  submittedByUserId: integer("submitted_by_user_id").notNull().references(() => users.id),
+  // Whose conversation this is (the rep being scored). Equal to submittedByUserId
+  // in Phase 1.
+  subjectRepUserId: integer("subject_rep_user_id").notNull().references(() => users.id),
+  // Multi-tenant scope, matching the existing office/tenant pattern on every other
+  // trainee-facing table. Denormalized from the subject rep's office at insert time.
+  officeId: integer("office_id").notNull().references(() => offices.id),
+  submissionType: text("submission_type").notNull(), // 'text_chat' | 'email' (Phase 2 adds 'audio')
+  rawTranscript: text("raw_transcript").notNull(), // the pasted conversation text
+  // Reserved for Phase 2 audio upload: the original uploaded audio file name whose
+  // transcription produced rawTranscript. Null for text/email submissions.
+  originalAudioFilename: text("original_audio_filename"),
+  // --- Scoring result (set once scored; mirrors sessions.score/rubricScores/feedback) ---
+  overallScore: integer("overall_score"), // 0-100 overall, matching practice session scoring
+  rubricScores: text("rubric_scores"), // JSON: same per-dimension shape as sessions.rubricScores
+  feedback: text("feedback"), // narrative coaching feedback, same style as practice
+  // The SOLVE step the conversation stalled/broke down at, if any (null when it did
+  // not stall). Derived from the rubric sub-scores, see deriveStalledStep.
+  stalledStep: text("stalled_step"),
+  // --- Consent (mandatory before a submission is accepted) ---
+  consentAccepted: boolean("consent_accepted").notNull().default(false),
+  consentAcceptedAt: text("consent_accepted_at"), // ISO timestamp the consent checkbox was accepted
+  createdAt: text("created_at").notNull(),
+  // --- Reserved for later phases (nullable, no Phase 1 logic reads these) ---
+  submissionCountedForCap: boolean("submission_counted_for_cap"), // Phase 3 fair-use capping
+  fieldVerifiedEligible: boolean("field_verified_eligible"), // Phase 4 "Field Verified" badge
+});
+
+export const insertRealConversationSchema = createInsertSchema(realConversations).omit({ id: true });
+export type InsertRealConversation = z.infer<typeof insertRealConversationSchema>;
+export type RealConversation = typeof realConversations.$inferSelect;
+
 // Transcript message shape (stored as JSON text in sessions.transcript)
 export const transcriptMessageSchema = z.object({
   role: z.enum(["customer", "consultant"]),
