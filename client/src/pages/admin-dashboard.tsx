@@ -30,6 +30,7 @@ const SECTIONS: { key: AdminSection; label: string; icon: any; title?: string }[
   { key: "leads", label: "Contacts", icon: FileText },
   { key: "users", label: "All Users", icon: Users },
   { key: "sales", label: "Sales", icon: DollarSign },
+  { key: "paid-signups", label: "Paid Signups", icon: DollarSign },
   { key: "demo", label: "Voice Demo", icon: Mic },
   { key: "opportunities", label: "Opportunity Intel", icon: Target, title: "SOLVE Opportunity Intelligence™" },
 ];
@@ -236,7 +237,8 @@ function GenericSectionView({ section }: { section: AdminSection }) {
           <>
             {section === "visitors" && <VisitorsTable rows={data.rows} />}
             {section === "users" && <UsersTable rows={data.rows} />}
-            {section === "sales" && <SalesTable rows={data.rows} />}
+            {section === "sales" && <SalesTable rows={data.rows} onChanged={load} />}
+            {section === "paid-signups" && <PaidSignupsTable rows={data.rows} />}
             {section === "demo" && <DemoTable rows={data.rows} analytics={data.analytics} />}
           </>
         )}
@@ -1096,13 +1098,29 @@ function BatchDetail({
   );
 }
 
-function SalesTable({ rows }: { rows: any[] }) {
+function SalesTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }) {
+  const [activatingId, setActivatingId] = useState<number | null>(null);
+
+  const activate = async (id: number) => {
+    setActivatingId(id);
+    try {
+      await adminApi.activateOffice(id);
+      onChanged?.();
+    } catch {
+      // Leave the row as-is; a failed activation surfaces via the unchanged
+      // pending state so the admin can retry.
+    } finally {
+      setActivatingId(null);
+    }
+  };
+
   return (
     <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent border-white/10">
           <TableHead className={headCls}>Office</TableHead>
           <TableHead className={headCls}>Status</TableHead>
+          <TableHead className={headCls}>Provisioning</TableHead>
           <TableHead className={headCls}>Seats</TableHead>
           <TableHead className={headCls}>Seat MRR</TableHead>
           <TableHead className={headCls}>Manager MRR</TableHead>
@@ -1111,11 +1129,26 @@ function SalesTable({ rows }: { rows: any[] }) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.length === 0 && <EmptyRow span={7} />}
+        {rows.length === 0 && <EmptyRow span={8} />}
         {rows.map((r) => (
           <TableRow key={r.officeId} className="border-white/10" data-testid={`row-sales-${r.officeId}`}>
             <TableCell className={cellCls}>{r.officeName}</TableCell>
             <TableCell className={cellCls}>{r.subscriptionStatus}</TableCell>
+            <TableCell className={cellCls}>
+              {r.status === "pending" ? (
+                <Button
+                  size="sm"
+                  onClick={() => activate(r.officeId)}
+                  disabled={activatingId === r.officeId}
+                  style={{ backgroundColor: ORANGE, color: "white" }}
+                  data-testid={`button-activate-${r.officeId}`}
+                >
+                  {activatingId === r.officeId ? "Activating…" : "Activate office"}
+                </Button>
+              ) : (
+                <Tag label="active" />
+              )}
+            </TableCell>
             <TableCell className={cellCls}>{r.seatCount}</TableCell>
             <TableCell className={cellCls}>${r.seatsMrr}</TableCell>
             <TableCell className={cellCls}>${r.managerMrr}</TableCell>
@@ -1123,6 +1156,36 @@ function SalesTable({ rows }: { rows: any[] }) {
             <TableCell className={cellCls} data-testid={`cell-academy-credits-${r.officeId}`}>
               {r.academyCreditDisplay ?? "$0"}
             </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function PaidSignupsTable({ rows }: { rows: any[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow className="hover:bg-transparent border-white/10">
+          <TableHead className={headCls}>Office</TableHead>
+          <TableHead className={headCls}>Seats</TableHead>
+          <TableHead className={headCls}>Dashboard</TableHead>
+          <TableHead className={headCls}>Stripe Subscription</TableHead>
+          <TableHead className={headCls}>Buyer Email</TableHead>
+          <TableHead className={headCls}>Signed Up</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.length === 0 && <EmptyRow span={6} />}
+        {rows.map((r) => (
+          <TableRow key={r.id} className="border-white/10" data-testid={`row-paid-signup-${r.id}`}>
+            <TableCell className={cellCls}>{r.officeName}</TableCell>
+            <TableCell className={cellCls}>{r.seatCount}</TableCell>
+            <TableCell className={cellCls}>{r.dashboard}</TableCell>
+            <TableCell className="text-white/60 font-mono text-xs">{r.stripeSubscriptionId || "-"}</TableCell>
+            <TableCell className={cellCls}>{r.contactEmail || "-"}</TableCell>
+            <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
           </TableRow>
         ))}
       </TableBody>

@@ -9,44 +9,27 @@ import {
   isSeatPriceId,
   isDashboardPriceId,
 } from "./stripe";
+import { generateUniqueInviteCode } from "./invite";
+import { sendPaidWelcomeEmail, sendPaidCheckoutAdminNotification } from "./notifications";
 
 // --- Pricing model: flat-per-tier (Pricing v2) ------------------------------
-// A consultant seat and the optional Manager Dashboard each have ONE flat monthly
-// rate per plan tier. An office's tier is derived from its total seat count, and
-// crossing a tier boundary re-prices EVERY seat (and the dashboard, if active) to
-// the new tier's flat rate — NOT graduated/tax-bracket billing. Enterprise (36+)
-// is a custom quote with no self-serve Stripe price.
-export type SelfServeTier = "team" | "office" | "company";
+// The tier constants and helpers live in shared/pricing.ts so the client and
+// server share one source of truth. Re-exported here so existing server imports
+// (`from "./billing"`) keep working unchanged.
+export {
+  PLAN_TIERS,
+  ENTERPRISE_MIN_SEATS,
+  isEnterpriseSeatCount,
+  planForSeatCount,
+} from "@shared/pricing";
+export type { SelfServeTier, PlanTier } from "@shared/pricing";
 
-export interface PlanTier {
-  tier: SelfServeTier;
-  minSeats: number;
-  maxSeats: number;
-  seatRate: number; // USD per seat / month
-  dashboardRate: number; // USD / month for the optional dashboard at this tier
-}
-
-export const PLAN_TIERS: readonly PlanTier[] = [
-  { tier: "team", minSeats: 1, maxSeats: 5, seatRate: 49, dashboardRate: 249 },
-  { tier: "office", minSeats: 6, maxSeats: 20, seatRate: 45, dashboardRate: 389 },
-  { tier: "company", minSeats: 21, maxSeats: 35, seatRate: 41, dashboardRate: 529 },
-];
-
-// 36+ seats is Enterprise: a custom quote handled off-platform, never self-serve.
-export const ENTERPRISE_MIN_SEATS = 36;
-
-export function isEnterpriseSeatCount(seatCount: number): boolean {
-  return seatCount >= ENTERPRISE_MIN_SEATS;
-}
-
-// The self-serve plan tier a seat count falls into, or null for Enterprise (36+).
-// A count of 0 (brand-new office, no consultants yet) is treated as the entry
-// (Team) tier so the optional dashboard always has a well-defined price.
-export function planForSeatCount(seatCount: number): PlanTier | null {
-  if (isEnterpriseSeatCount(seatCount)) return null;
-  const n = Math.max(seatCount, 1);
-  return PLAN_TIERS.find((p) => n >= p.minSeats && n <= p.maxSeats) ?? null;
-}
+import {
+  PLAN_TIERS,
+  isEnterpriseSeatCount,
+  planForSeatCount,
+} from "@shared/pricing";
+import type { SelfServeTier } from "@shared/pricing";
 
 // Thrown when a self-serve billing action would push an office to 36+ seats.
 // Callers should route the office to the custom-quote/contact flow instead.
@@ -119,6 +102,67 @@ export async function createManagerCheckoutSession(
     subscription_data: { metadata: { officeId: String(office.id) } },
     success_url: `${APP_URL}/dashboard?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${APP_URL}/dashboard?checkout=cancelled`,
+  });
+  if (!session.url) throw new Error("Stripe did not return a Checkout URL");
+  return session.url;
+}
+
+// Self-serve office signup (item 4). Unlike createManagerCheckoutSession this runs
+// BEFORE any office row exists: a prospect coming from the welcome-email setup page
+// picks an office name, a consultant count, and whether they want the Manager
+// Dashboard, then pays. The office is provisioned by the webhook on
+// checkout.session.completed (item 5), never here. All provisioning inputs ride on
+// subscription metadata so the webhook can create the office from the authoritative
+// Stripe object even if the browser never returns.
+export interface SelfServeCheckoutInput {
+  officeName: string;
+  seatCount: number; // number of consultant seats to bill from day one
+  includeDashboard: boolean;
+  email?: string; // prospect email, prefills the Stripe customer + receipt
+  setupToken?: string; // originating office_setup_token, marked used on provision
+  contactId?: number; // originating lead, if any
+}
+
+export async function createSelfServeCheckoutSession(
+  input: SelfServeCheckoutInput,
+): Promise<string> {
+  const { officeName, seatCount, includeDashboard, email, setupToken, contactId } = input;
+  if (isEnterpriseSeatCount(seatCount)) {
+    throw new EnterpriseQuoteRequiredError(seatCount);
+  }
+  const plan = planForSeatCount(seatCount);
+  if (!plan || seatCount < 1) {
+    throw new Error(`Invalid seat count for self-serve checkout: ${seatCount}`);
+  }
+  const stripe = getStripe();
+
+  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+    { price: seatPriceIdForTier(plan.tier), quantity: seatCount },
+  ];
+  if (includeDashboard) {
+    lineItems.push({ price: dashboardPriceIdForTier(plan.tier), quantity: 1 });
+  }
+
+  // Metadata the webhook reads to provision the office. selfServe flags THIS flow
+  // so the webhook does not confuse it with an existing-office manager checkout.
+  const provisioning: Record<string, string> = {
+    selfServe: "true",
+    officeName,
+    seatCount: String(seatCount),
+    dashboard: includeDashboard ? "true" : "false",
+  };
+  if (email) provisioning.email = email;
+  if (setupToken) provisioning.setupToken = setupToken;
+  if (contactId != null) provisioning.contactId = String(contactId);
+
+  const session = await stripe.checkout.sessions.create({
+    mode: "subscription",
+    ...(email ? { customer_email: email } : {}),
+    line_items: lineItems,
+    metadata: provisioning,
+    subscription_data: { metadata: provisioning },
+    success_url: `${APP_URL}/#/office-setup/complete?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_URL}/#/office-setup/${setupToken ?? ""}?checkout=cancelled`,
   });
   if (!session.url) throw new Error("Stripe did not return a Checkout URL");
   return session.url;
@@ -269,6 +313,95 @@ export async function resolveOffice(opts: {
   return undefined;
 }
 
+// Provision a brand-new office from a completed self-serve checkout (item 5).
+// Idempotent by subscription id: if an office already exists for this subscription
+// (webhook redelivery, or the customer.subscription.* event racing the checkout
+// event) it is a no-op. Creates the office ACTIVE, mints an invite code, records
+// the paid signup for the admin Vault, and best-effort emails the buyer + admin.
+export async function provisionSelfServeOffice(
+  session: Stripe.Checkout.Session,
+  subscription: Stripe.Subscription,
+): Promise<Office | undefined> {
+  const meta = { ...(subscription.metadata ?? {}), ...(session.metadata ?? {}) };
+  if (meta.selfServe !== "true") return undefined;
+
+  const existing = await storage.getOfficeByStripeSubscriptionId(subscription.id);
+  if (existing) return existing;
+
+  const officeName = (meta.officeName ?? "").trim() || "New Office";
+  const seatCount = Number.parseInt(meta.seatCount ?? "0", 10) || 0;
+  const dashboard = meta.dashboard === "true";
+  const email =
+    meta.email ||
+    (typeof session.customer_details?.email === "string" ? session.customer_details.email : "") ||
+    (typeof session.customer_email === "string" ? session.customer_email : "");
+  const customerId =
+    typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id ?? null;
+
+  const inviteCode = await generateUniqueInviteCode();
+  const office = await storage.createOffice({
+    name: await uniqueOfficeName(officeName),
+    inviteCode,
+    createdAt: new Date().toISOString(),
+    status: "active",
+    stripeCustomerId: customerId,
+    stripeSubscriptionId: subscription.id,
+    subscriptionStatus: subscription.status,
+  });
+
+  // Map seat/dashboard line items back onto the office (item ids + seat count).
+  await syncOfficeFromSubscription(office, subscription);
+
+  // Mark the originating setup token used so its link cannot be reused.
+  if (meta.setupToken) {
+    const token = await storage.getOfficeSetupToken(meta.setupToken);
+    if (token && !token.usedAt) {
+      await storage.updateOfficeSetupToken(token.id, { usedAt: new Date().toISOString() });
+    }
+  }
+
+  // Persistent admin Vault record of the signup (item 7).
+  await storage.createPaidOfficeSignup({
+    officeId: office.id,
+    officeName: office.name,
+    seatCount,
+    dashboard,
+    stripeSubscriptionId: subscription.id,
+    contactEmail: email || null,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Best-effort notifications (never block provisioning).
+  const details = {
+    officeName: office.name,
+    inviteCode,
+    seatCount,
+    dashboard,
+    stripeSubscriptionId: subscription.id,
+    contactEmail: email || null,
+  };
+  if (email) {
+    void sendPaidWelcomeEmail(email, details);
+  }
+  void sendPaidCheckoutAdminNotification(details);
+
+  return office;
+}
+
+// Keep office names distinguishable in the admin view when two buyers pick the
+// same name. The invite code is the real unique key; this only appends a numeric
+// suffix so the Vault list is readable.
+async function uniqueOfficeName(name: string): Promise<string> {
+  const all = await storage.listOffices();
+  const taken = new Set(all.map((o) => o.name.toLowerCase()));
+  if (!taken.has(name.toLowerCase())) return name;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${name} (${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${name} (${Date.now()})`;
+}
+
 // Handle a verified Stripe event. Idempotent: a redelivered event whose id we've
 // already recorded is skipped. Always re-fetches the subscription for the source
 // of truth rather than trusting the event payload's embedded object.
@@ -281,13 +414,28 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
+      const subId =
+        typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+      // Self-serve office signup (item 5): no office exists yet, so provision one
+      // from the subscription. Detected by the selfServe metadata flag we set on
+      // the Checkout Session. Existing-office manager checkouts fall through to the
+      // sync path below and are untouched.
+      const isSelfServe =
+        session.metadata?.selfServe === "true" ||
+        (typeof session.client_reference_id !== "string" && !!subId);
+      if (isSelfServe && subId) {
+        const subscription = await stripe.subscriptions.retrieve(subId);
+        if (subscription.metadata?.selfServe === "true" || session.metadata?.selfServe === "true") {
+          await provisionSelfServeOffice(session, subscription);
+          break;
+        }
+      }
       const office = await resolveOffice({
         officeId: session.client_reference_id,
         customerId: typeof session.customer === "string" ? session.customer : session.customer?.id,
-        subscriptionId: typeof session.subscription === "string" ? session.subscription : session.subscription?.id,
+        subscriptionId: subId,
       });
-      if (office && session.subscription) {
-        const subId = typeof session.subscription === "string" ? session.subscription : session.subscription.id;
+      if (office && subId) {
         const subscription = await stripe.subscriptions.retrieve(subId);
         await syncOfficeFromSubscription(office, subscription);
       }

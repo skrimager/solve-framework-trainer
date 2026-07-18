@@ -95,21 +95,23 @@ import {
 } from "./contacts";
 import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation } from "@shared/schema";
 import { seed } from "./seed";
-import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET } from "./stripe";
+import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET, APP_URL } from "./stripe";
 import {
   officeIsActive,
   createManagerCheckoutSession,
   createBillingPortalSession,
+  createSelfServeCheckoutSession,
   setSeatQuantity,
   handleStripeEvent,
 } from "./billing";
+import { generateUniqueInviteCode } from "./invite";
 import {
   evaluatePracticeCap,
   computeDurationSeconds,
   blockedMessage,
   type PracticeCapStatus,
 } from "./fairUse";
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -303,6 +305,96 @@ export async function registerRoutes(
     }
   });
 
+  // --- Self-serve office setup (welcome-email link -> checkout -> provisioning) ---
+  // Validate a setup token and return prefill data for the office setup page.
+  app.get("/api/office-setup/:token", async (req, res) => {
+    const token = await storage.getOfficeSetupToken(req.params.token);
+    if (!token) return res.status(404).json({ message: "This setup link is not valid." });
+    if (token.usedAt) {
+      return res.status(410).json({ message: "This setup link has already been used." });
+    }
+    if (new Date(token.expiresAt).getTime() < Date.now()) {
+      return res.status(410).json({ message: "This setup link has expired. Contact us for a new one." });
+    }
+    res.json({ email: token.email, name: token.name ?? null });
+  });
+
+  // Create a self-serve Checkout Session (item 4). No office exists yet; the office
+  // is provisioned by the Stripe webhook on completion (item 5).
+  app.post("/api/office-setup/checkout", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const schema = z.object({
+      token: z.string().trim().min(1).optional(),
+      officeName: z.string().trim().min(1, "Office name is required"),
+      seatCount: z.coerce.number().int().min(1, "At least one consultant is required"),
+      includeDashboard: z.boolean().default(false),
+      email: z.string().trim().email().optional(),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { token, officeName, seatCount, includeDashboard, email } = parsed.data;
+
+    if (seatCount >= 36) {
+      return res.status(400).json({ message: "36+ consultants is Enterprise. Contact us for a custom quote." });
+    }
+
+    // Resolve token (if any) for the originating lead + verified email.
+    let contactId: number | undefined;
+    let resolvedEmail = email;
+    if (token) {
+      const setupToken = await storage.getOfficeSetupToken(token);
+      if (!setupToken || setupToken.usedAt || new Date(setupToken.expiresAt).getTime() < Date.now()) {
+        return res.status(410).json({ message: "This setup link is no longer valid." });
+      }
+      contactId = setupToken.contactId ?? undefined;
+      resolvedEmail = resolvedEmail || setupToken.email;
+    }
+
+    try {
+      const url = await createSelfServeCheckoutSession({
+        officeName,
+        seatCount,
+        includeDashboard,
+        email: resolvedEmail,
+        setupToken: token,
+        contactId,
+      });
+      res.json({ url });
+    } catch (err: any) {
+      console.error("Self-serve checkout creation failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not start checkout" });
+    }
+  });
+
+  // Confirmation page data: look up the office provisioned for a completed Checkout
+  // Session so the buyer sees their invite code + next steps without logging in.
+  app.get("/api/office-setup/complete/:sessionId", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    try {
+      const session = await getStripe().checkout.sessions.retrieve(req.params.sessionId);
+      const subId =
+        typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+      if (!subId) return res.status(404).json({ message: "No subscription for this session yet." });
+      const office = await storage.getOfficeByStripeSubscriptionId(subId);
+      if (!office) {
+        // Provisioning webhook may not have arrived yet; client polls/retries.
+        return res.status(202).json({ pending: true });
+      }
+      res.json({
+        officeName: office.name,
+        inviteCode: office.inviteCode,
+        seatCount: office.activeSeatCount,
+        dashboard: !!office.managerItemId,
+        commandCenterUrl: `${APP_URL}/#/manager-login`,
+      });
+    } catch (err: any) {
+      console.error("Office setup completion lookup failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not load your confirmation" });
+    }
+  });
+
   // --- Auth (simple demo-credential login, no sessions/passwords hashing needed for pilot) ---
   app.post("/api/login", async (req, res) => {
     const { username, password } = req.body ?? {};
@@ -333,10 +425,16 @@ export async function registerRoutes(
     }
 
     const inviteCode = await generateUniqueInviteCode();
+    // Free-path offices start PENDING: the manager can register and log in, but the
+    // office cannot practice until an admin activates it (see checkSeatAccess and the
+    // admin Vault activate action). Paid self-serve offices are provisioned active by
+    // the Stripe webhook, and all pre-existing offices are grandfathered active by the
+    // status column default.
     const office = await storage.createOffice({
       name: officeName,
       inviteCode,
       createdAt: new Date().toISOString(),
+      status: "pending",
     });
     const user = await storage.createUser({
       officeId: office.id,
@@ -368,9 +466,11 @@ export async function registerRoutes(
       return res.status(404).json({ message: "That invite code doesn't match any office. Double-check it with your manager." });
     }
 
-    // A consultant can only join an office whose subscription is active — otherwise
-    // there is nothing to attach a paid seat to.
-    if (!officeIsActive(office)) {
+    // A consultant may join an office that is active OR a free-path office still
+    // pending admin activation (so the team can be assembled before go-live; they
+    // are gated from practice by office.status in checkSeatAccess). Any other
+    // inactive office (e.g. a lapsed paid subscription) still blocks joining.
+    if (!officeIsActive(office) && office.status !== "pending") {
       return res.status(402).json({ message: "This office's subscription isn't active yet. Ask your manager to complete billing setup." });
     }
 
@@ -1382,11 +1482,31 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // Best-effort notification email. sendLeadNotification never throws, so a
     // failure here must never block or fail the lead-capture response.
     void sendLeadNotification(lead);
+    // Mint a per-lead office-setup token (item 2) so the welcome email can carry a
+    // "Set Up Your Office" link into the self-serve checkout flow. Expires in 14 days.
+    // Best-effort: if token creation fails, still enroll the lead (without the CTA).
+    let setupUrl: string | undefined;
+    try {
+      const token = randomUUID().replace(/-/g, "");
+      const nowMs = Date.now();
+      await storage.createOfficeSetupToken({
+        token,
+        contactId: lead.id,
+        email: lead.email,
+        name: lead.name ?? null,
+        createdAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(nowMs + 14 * 24 * 60 * 60 * 1000).toISOString(),
+        usedAt: null,
+      });
+      setupUrl = `${APP_URL}/#/office-setup/${token}`;
+    } catch (err) {
+      console.warn("[leads] Failed to create office setup token:", err);
+    }
     // Auto-enroll this NEW inbound lead into the welcome drip: the day-0 welcome
     // is sent inline (best-effort) and the day-3/day-7 follow-ups are scheduled
     // for the shared background sender. Fire-and-forget and never throws, so it
     // is fully independent of the founder notification and never blocks capture.
-    void enrollInboundLead({ storage, send: sendInboundEmail }, lead);
+    void enrollInboundLead({ storage, send: sendInboundEmail }, lead, setupUrl);
     res.status(201).json({ ok: true, id: lead.id });
   });
 
@@ -2141,6 +2261,47 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       await storage.updateUser(u.id, { isDemoAccount: false, seatActive: false });
     }
     res.json({ office: updatedOffice, usersUpdated: officeUsers.length });
+  });
+
+  // Activate a free-path office (item 6). Free offices created via
+  // /api/register/manager start status 'pending' and cannot practice; this admin
+  // action is the only way to bring them live. It flips status to 'active' and,
+  // for offices with no Stripe subscription, marks subscriptionStatus 'active' so
+  // they clear the practice gate (officeIsActive) without any billing (mirrors the
+  // demo-grant pattern, minus the demo flags). Offices that already have a real
+  // Stripe subscription keep their true Stripe status. Idempotent.
+  app.post("/api/admin/offices/:id/activate", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const office = await storage.getOffice(id);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+    const patch: { status: string; subscriptionStatus?: string } = { status: "active" };
+    if (!office.stripeSubscriptionId) patch.subscriptionStatus = "active";
+    const updatedOffice = await storage.updateOffice(id, patch);
+    res.json({ office: updatedOffice });
+  });
+
+  // Persistent list of completed paid self-serve signups for the Vault (item 7).
+  app.get("/api/admin/paid-signups", requireAdmin, async (req, res) => {
+    const signups = await storage.listPaidOfficeSignups();
+    const rows = signups.map((s) => ({
+      id: s.id,
+      officeName: s.officeName,
+      seatCount: s.seatCount,
+      dashboard: s.dashboard ? "yes" : "no",
+      stripeSubscriptionId: s.stripeSubscriptionId ?? "",
+      contactEmail: s.contactEmail ?? "",
+      createdAt: s.createdAt,
+    }));
+    sendData(req, res, "paid-signups.csv", [
+      { key: "id", header: "ID" },
+      { key: "officeName", header: "Office" },
+      { key: "seatCount", header: "Seats" },
+      { key: "dashboard", header: "Dashboard" },
+      { key: "stripeSubscriptionId", header: "Stripe Subscription" },
+      { key: "contactEmail", header: "Buyer Email" },
+      { key: "createdAt", header: "Signed Up" },
+    ], rows);
   });
 
   // Free Voice Demo usage: one row per email with verification state, all-time
@@ -3755,6 +3916,11 @@ async function checkSeatAccess(
 
   const office = await storage.getOffice(user.officeId);
   if (!office) return { ok: false, status: 404, message: "Office not found" };
+  // Free-path offices awaiting admin activation can register/log in but not practice.
+  // Checked before the Stripe gate so pending offices show the activation message.
+  if (office.status === "pending") {
+    return { ok: false, status: 403, message: "Your office is being activated. You'll be practicing within 1 business day." };
+  }
   if (!officeIsActive(office)) {
     return { ok: false, status: 402, message: "Your office subscription is inactive. Billing must be brought current to continue training." };
   }
@@ -3779,18 +3945,6 @@ async function checkPracticeCap(userId: number): Promise<PracticeCapStatus> {
   });
 }
 
-// Generate a short, unambiguous, uppercase alphanumeric invite code that isn't already in use.
-async function generateUniqueInviteCode(): Promise<string> {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing chars (0/O, 1/I)
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const bytes = randomBytes(8);
-    let code = "";
-    for (let i = 0; i < 8; i++) code += alphabet[bytes[i] % alphabet.length];
-    const existing = await storage.getOfficeByInviteCode(code);
-    if (!existing) return code;
-  }
-  throw new Error("Could not generate a unique invite code");
-}
 
 // On-disk cache path for a message's synthesized audio. Keyed by message id so
 // the stream endpoint can reuse a previously rendered file (replay) instead of

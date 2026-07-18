@@ -9,6 +9,11 @@ export const offices = pgTable("offices", {
   name: text("name").notNull(), // office / business name
   inviteCode: text("invite_code").notNull().unique(), // short random code consultants use to join
   createdAt: text("created_at").notNull(),
+  // Provisioning gate, separate from Stripe subscriptionStatus. 'active' offices can
+  // practice; 'pending' offices (free /api/register/manager path) can register/login
+  // but cannot practice until an admin activates them. Defaults to 'active' so every
+  // pre-existing office is grandfathered in and paid self-serve offices come up active.
+  status: text("status").notNull().default("active"), // 'active' | 'pending'
   // --- Stripe billing (one Stripe subscription per office) ---
   stripeCustomerId: text("stripe_customer_id"), // set when the manager first checks out
   stripeSubscriptionId: text("stripe_subscription_id"), // the office's single subscription
@@ -590,6 +595,41 @@ export const leadDripEmails = pgTable("lead_drip_emails", {
 export const insertLeadDripEmailSchema = createInsertSchema(leadDripEmails).omit({ id: true });
 export type InsertLeadDripEmail = z.infer<typeof insertLeadDripEmailSchema>;
 export type LeadDripEmail = typeof leadDripEmails.$inferSelect;
+
+// A unique, expiring token emailed to an inbound lead so they can open the
+// self-serve office setup page (/#/office-setup/:token) without logging in.
+export const officeSetupTokens = pgTable("office_setup_tokens", {
+  id: serial("id").primaryKey(),
+  token: text("token").notNull().unique(), // random URL-safe token
+  contactId: integer("contact_id").references(() => contacts.id), // originating lead, if any
+  email: text("email").notNull(), // lead email, prefills checkout customer
+  name: text("name"), // lead name, for personalization
+  createdAt: text("created_at").notNull(), // ISO timestamp
+  expiresAt: text("expires_at").notNull(), // ISO timestamp; token invalid after this
+  usedAt: text("used_at"), // ISO timestamp set once a checkout completes
+});
+
+export const insertOfficeSetupTokenSchema = createInsertSchema(officeSetupTokens).omit({ id: true });
+export type InsertOfficeSetupToken = z.infer<typeof insertOfficeSetupTokenSchema>;
+export type OfficeSetupToken = typeof officeSetupTokens.$inferSelect;
+
+// A persistent record of every completed paid self-serve checkout, shown as a list
+// in the admin Vault (item 7). Separate from billing_events (which is the raw Stripe
+// idempotency log) so the Vault has a stable, human-readable signup feed.
+export const paidOfficeSignups = pgTable("paid_office_signups", {
+  id: serial("id").primaryKey(),
+  officeId: integer("office_id").references(() => offices.id),
+  officeName: text("office_name").notNull(),
+  seatCount: integer("seat_count").notNull(),
+  dashboard: boolean("dashboard").notNull().default(false),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  contactEmail: text("contact_email"),
+  createdAt: text("created_at").notNull(), // ISO timestamp
+});
+
+export const insertPaidOfficeSignupSchema = createInsertSchema(paidOfficeSignups).omit({ id: true });
+export type InsertPaidOfficeSignup = z.infer<typeof insertPaidOfficeSignupSchema>;
+export type PaidOfficeSignup = typeof paidOfficeSignups.$inferSelect;
 
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({

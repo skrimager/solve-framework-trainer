@@ -231,8 +231,13 @@ export default function Dashboard() {
         </header>
 
         <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 space-y-6">
-          {/* Billing gate stays at the top whenever a manager's office is inactive. */}
-          {user?.role === "manager" && office && !officeActive(office) && <BillingCard office={office} />}
+          {/* Pending free-path offices show an activation notice instead of the
+              billing card; they are activated by an admin, not via self-serve Stripe. */}
+          {office?.status === "pending" && <PendingBanner />}
+          {/* Billing gate stays at the top whenever a PAID manager's office is inactive. */}
+          {user?.role === "manager" && office && office.status !== "pending" && !officeActive(office) && (
+            <BillingCard office={office} />
+          )}
 
           {section === "dashboard" && (
             <DashboardSection
@@ -765,6 +770,21 @@ function InviteCodeCard({ office }: { office: Office }) {
       <p className="text-xs text-white/50 max-w-xs">
         Share this code with your consultants so they can join{" "}
         <span className="font-medium text-white/70">{office.name}</span> at sign-up.
+      </p>
+    </div>
+  );
+}
+
+function PendingBanner() {
+  return (
+    <div
+      className="rounded-xl border-2 px-5 py-4 space-y-2"
+      style={{ borderColor: ORANGE, backgroundColor: NAVY }}
+      data-testid="banner-office-pending"
+    >
+      <h2 className="text-lg font-semibold text-white">Your office is being activated</h2>
+      <p className="text-sm text-white/60">
+        You'll be practicing within 1 business day. We'll email you the moment your office is ready.
       </p>
     </div>
   );
