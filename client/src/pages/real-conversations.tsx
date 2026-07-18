@@ -116,9 +116,15 @@ function ScoreBreakdown({ conversation }: { conversation: DecoratedRealConversat
             {conversation.feedback}
           </p>
           {conversation.stalledStep && (
-            <p className="text-sm">
+            <p className="text-sm flex items-center gap-2">
               <span className="font-medium">Where it stalled: </span>
-              <span data-testid="text-real-stalled-step">{conversation.stalledStep}</span>
+              <span
+                className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold text-white"
+                style={{ backgroundColor: "#E06D00" }}
+                data-testid="text-real-stalled-step"
+              >
+                {conversation.stalledStep}
+              </span>
             </p>
           )}
           {conversation.managerSubmitted && (
@@ -415,9 +421,14 @@ export default function RealConversations() {
                         {new Date(rc.createdAt).toLocaleString()}
                       </p>
                       {rc.stalledStep && (
-                        <p className="text-xs" data-testid={`text-row-stalled-${rc.id}`}>
+                        <p className="text-xs flex items-center gap-2" data-testid={`text-row-stalled-${rc.id}`}>
                           <span className="text-muted-foreground">Stalled at: </span>
-                          <span className="font-medium">{rc.stalledStep}</span>
+                          <span
+                            className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold text-white"
+                            style={{ backgroundColor: "#E06D00" }}
+                          >
+                            {rc.stalledStep}
+                          </span>
                         </p>
                       )}
                       {rc.managerSubmitted && (

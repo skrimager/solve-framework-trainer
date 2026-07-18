@@ -485,7 +485,7 @@ function ConsultantDetailPanel({
                   <TableRow key={s.id} data-testid={`row-detail-session-${s.id}`}>
                     <TableCell className="font-medium">{s.scenarioTitle}</TableCell>
                     <TableCell className="capitalize text-muted-foreground">{s.track}</TableCell>
-                    <TableCell className="text-right">{s.score ?? "—"}</TableCell>
+                    <TableCell className="text-right">{s.score ?? "-"}</TableCell>
                     <TableCell>
                       <Badge variant={s.status === "completed" ? "secondary" : "outline"}>{s.status}</Badge>
                     </TableCell>
@@ -526,7 +526,19 @@ function ConsultantDetailPanel({
                       {SUBMISSION_LABELS[r.submissionType] ?? r.submissionType}
                     </TableCell>
                     <TableCell className="text-right">{r.overallScore ?? "-"}</TableCell>
-                    <TableCell className="text-muted-foreground">{r.stalledStep ?? "-"}</TableCell>
+                    <TableCell>
+                      {r.stalledStep ? (
+                        <span
+                          className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold text-white"
+                          style={{ backgroundColor: ORANGE }}
+                          data-testid={`pill-field-stalled-${r.id}`}
+                        >
+                          {r.stalledStep}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {r.managerSubmitted
                         ? `Manager${r.submittedByName ? ` (${r.submittedByName})` : ""}`
