@@ -120,7 +120,7 @@ describe("validateOfficeSetupInput", () => {
 });
 
 describe("buildSignupVerificationEmail", () => {
-  test("includes the code, TTL, and brand navy — no lime green", () => {
+  test("includes the code, TTL, and brand navy (no lime green)", () => {
     const { subject, html } = buildSignupVerificationEmail("012345");
     assert.match(subject, /012345/);
     assert.match(html, /012345/);

@@ -339,7 +339,7 @@ describe("handleStripeEvent routing for self-serve", () => {
 });
 
 // Item 5: a paid checkout that carries a signupId must create the manager login
-// from the office_signups row — but ONLY inside the payment-driven provisioning,
+// from the office_signups row, but ONLY inside the payment-driven provisioning,
 // and never more than once even if the webhook is redelivered. The plaintext
 // password lives in our DB (office_signups), never on Stripe metadata.
 describe("provisionSelfServeOffice manager-user creation (signupId)", () => {

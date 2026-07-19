@@ -473,7 +473,7 @@ export async function registerRoutes(
   // Step 3/4: the verified buyer submits their office details and starts payment.
   // Their chosen login credentials are stored on the signup row (NEVER sent to
   // Stripe); only the signup row id rides on Checkout metadata so the payment
-  // webhook — the sole activation trigger — can create the office + manager login.
+  // webhook (the sole activation trigger) can create the office + manager login.
   app.post("/api/signup/checkout", async (req, res) => {
     if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
     const schema = z.object({

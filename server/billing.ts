@@ -155,7 +155,7 @@ export async function createSelfServeCheckoutSession(
   if (email) provisioning.email = email;
   if (setupToken) provisioning.setupToken = setupToken;
   if (contactId != null) provisioning.contactId = String(contactId);
-  // Only the signup row ID rides on Stripe metadata — never the manager's chosen
+  // Only the signup row ID rides on Stripe metadata, never the manager's chosen
   // password. Provisioning reads the row from our DB to create the manager login.
   if (signupId != null) provisioning.signupId = String(signupId);
 
@@ -358,7 +358,7 @@ export async function provisionSelfServeOffice(
 
   // Create the manager login from the originating signup row (item 5). The row
   // holds the buyer's chosen credentials (never sent to Stripe); we read it back
-  // here — inside the payment webhook — so the office and its manager only ever
+  // here (inside the payment webhook) so the office and its manager only ever
   // come into being on a confirmed payment. Skipped when no signupId is present
   // (e.g. the older welcome-email setup-token flow, which has no pre-chosen login).
   const signupId = meta.signupId ? Number.parseInt(meta.signupId, 10) : NaN;

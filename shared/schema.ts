@@ -638,8 +638,8 @@ export type PaidOfficeSignup = typeof paidOfficeSignups.$inferSelect;
 // It is the durable bridge from "email captured" (step 1) through "verified"
 // (step 2) and "office details entered" (step 4 checkout) to the Stripe webhook
 // that provisions the real office + manager user (step 5). The row id is passed
-// to Stripe as checkout metadata (signupId) so the payment webhook — the SOLE
-// activation trigger — can read the manager's chosen credentials and create the
+// to Stripe as checkout metadata (signupId) so the payment webhook (the SOLE
+// activation trigger) can read the manager's chosen credentials and create the
 // login WITHOUT ever putting the password into Stripe. Credentials never leave
 // our database. Separate from demo_signups (anonymous free-demo visitors) and
 // from paid_office_signups (the post-payment admin Vault record).

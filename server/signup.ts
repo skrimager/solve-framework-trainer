@@ -6,7 +6,7 @@ import { planForSeatCount, isEnterpriseSeatCount } from "@shared/pricing";
 // unit-tested directly, mirroring server/demo.ts. The email-verification
 // primitives themselves (6-digit code generation, expiry, constant-time
 // validation, email normalization) are REUSED from server/demo.ts rather than
-// duplicated — this file only adds the signup-specific pieces on top: a resend
+// duplicated. This file only adds the signup-specific pieces on top: a resend
 // cooldown, the office-setup input validation, and the transactional email
 // bodies for the verification code and consultant enrollment.
 // ---------------------------------------------------------------------------

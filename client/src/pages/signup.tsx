@@ -16,9 +16,9 @@ import {
 } from "@shared/pricing";
 
 // Self-serve manager signup. One page, three steps, email first:
-//   1. capture  — email + company (every started signup becomes a real contact)
-//   2. verify   — 6-digit code emailed to that address
-//   3. setup    — office name, manager name, login, seats, dashboard, then pay
+//   1. capture: email + company (every started signup becomes a real contact)
+//   2. verify: 6-digit code emailed to that address
+//   3. setup: office name, manager name, login, seats, dashboard, then pay
 // Payment (the Stripe redirect) is the sole activation trigger; the office and
 // the manager login are created by the payment webhook, never here.
 

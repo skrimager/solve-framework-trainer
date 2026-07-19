@@ -336,8 +336,8 @@ export async function sendPaidCheckoutAdminNotification(details: PaidOfficeDetai
 
 // Sends the manager signup's 6-digit verification code (step 2) through the SAME
 // Resend transport as every other email here. The code IS the gate to setting up
-// an office, so this returns whether the send succeeded — the caller surfaces a
-// retry on false. Never throws.
+// an office, so this returns whether the send succeeded so the caller can
+// surface a retry on false. Never throws.
 export async function sendSignupVerificationCode(email: string, code: string): Promise<boolean> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
