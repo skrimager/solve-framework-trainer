@@ -52,7 +52,11 @@ import {
   realConversationCapBlockedMessage,
   REAL_CONVERSATION_MONTHLY_CAP,
 } from "./realConversationCap";
-import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail } from "./notifications";
+import {
+  canResendSignupCode,
+  validateOfficeSetupInput,
+} from "./signup";
 import {
   buildSequence,
   planApproval,
@@ -103,6 +107,7 @@ import {
   createSelfServeCheckoutSession,
   setSeatQuantity,
   handleStripeEvent,
+  addDashboard,
 } from "./billing";
 import { generateUniqueInviteCode } from "./invite";
 import {
@@ -331,6 +336,204 @@ export async function registerRoutes(
     }
   });
 
+  // Add the optional Manager Dashboard to an already-active office (the friendly
+  // in-dashboard upsell). Adds the dashboard line to the existing Stripe
+  // subscription at the office's current tier; access follows the persisted
+  // managerItemId. Idempotent via addDashboard (no-op if already present).
+  app.post("/api/billing/add-dashboard", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const { userId } = req.body ?? {};
+    const user = await storage.getUser(Number(userId));
+    if (!user || user.role !== "manager") {
+      return res.status(403).json({ message: "Only a manager can add the dashboard" });
+    }
+    const office = await storage.getOffice(user.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+    if (!officeIsActive(office)) {
+      return res.status(402).json({ message: "Your office subscription is not active" });
+    }
+    if (office.managerItemId) {
+      return res.status(409).json({ message: "The Manager Dashboard is already active for your office." });
+    }
+    try {
+      await addDashboard(office);
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Add dashboard failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not add the dashboard" });
+    }
+  });
+
+  // --- Self-serve manager signup (email-first, verify, office setup, pay) ------
+  // Step 1: capture email + company FIRST. Creates (or refreshes) the signup row
+  // keyed by email and emails a 6-digit verification code. Every started signup
+  // becomes a durable, reachable record from the very first screen.
+  app.post("/api/signup/start", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      email: z.string().trim().email("A valid email is required").max(200),
+      company: z.string().trim().min(1, "Company name is required").max(200),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const company = parsed.data.company;
+    if (isDisposableEmail(email)) {
+      return res.status(400).json({ message: "Please use a permanent business email address." });
+    }
+
+    const now = new Date();
+    const code = generateVerificationCode();
+    const patch = { code, codeExpiresAt: codeExpiryFrom(now.getTime()), lastSentAt: now.toISOString() };
+
+    let signup = await storage.getOfficeSignupByEmail(email);
+    if (!signup) {
+      signup = await storage.createOfficeSignup({
+        email,
+        company,
+        code: patch.code,
+        codeExpiresAt: patch.codeExpiresAt,
+        verified: false,
+        dashboard: false,
+        createdAt: now.toISOString(),
+        lastSentAt: patch.lastSentAt,
+      });
+    } else {
+      // Refresh the company name (they may have corrected it) and issue a new code.
+      await storage.updateOfficeSignup(signup.id, { ...patch, company });
+    }
+
+    const sent = await sendSignupVerificationCode(email, code);
+    if (!sent) {
+      return res.status(502).json({ message: "We couldn't send your code just now. Please try again in a moment.", retryable: true });
+    }
+    res.json({ ok: true });
+  });
+
+  // Step 2: verify the 6-digit code. On success the email is marked verified and
+  // the buyer may proceed to office setup. The code is single-use.
+  app.post("/api/signup/verify", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      email: z.string().trim().email("A valid email is required").max(200),
+      code: z.string().trim().min(4).max(10),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const signup = await storage.getOfficeSignupByEmail(email);
+    if (!signup || !isCodeValid(signup, parsed.data.code)) {
+      return res.status(400).json({ message: "That code is incorrect or has expired. Please try again." });
+    }
+    await storage.updateOfficeSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
+    res.json({ verified: true, company: signup.company });
+  });
+
+  // Resend the verification code (step 2 helper). Cooldown-limited so the button
+  // cannot be hammered into an email flood.
+  app.post("/api/signup/resend", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({ email: z.string().trim().email("A valid email is required").max(200) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const signup = await storage.getOfficeSignupByEmail(email);
+    if (!signup) {
+      return res.status(404).json({ message: "Start your signup with your email and company first." });
+    }
+    if (!canResendSignupCode(signup)) {
+      return res.status(429).json({ message: "Please wait a moment before requesting another code." });
+    }
+    const now = new Date();
+    const code = generateVerificationCode();
+    await storage.updateOfficeSignup(signup.id, {
+      code,
+      codeExpiresAt: codeExpiryFrom(now.getTime()),
+      lastSentAt: now.toISOString(),
+    });
+    const sent = await sendSignupVerificationCode(email, code);
+    if (!sent) {
+      return res.status(502).json({ message: "We couldn't resend your code just now. Please try again in a moment.", retryable: true });
+    }
+    res.json({ ok: true });
+  });
+
+  // Step 3/4: the verified buyer submits their office details and starts payment.
+  // Their chosen login credentials are stored on the signup row (NEVER sent to
+  // Stripe); only the signup row id rides on Checkout metadata so the payment
+  // webhook — the sole activation trigger — can create the office + manager login.
+  app.post("/api/signup/checkout", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const schema = z.object({
+      email: z.string().trim().email("A valid email is required").max(200),
+      company: z.string().trim().min(1, "Company name is required").max(200),
+      managerName: z.string().trim().min(1, "Your name is required").max(200),
+      username: z.string().trim().min(1, "A username is required").max(100),
+      password: z.string().min(6, "Please choose a password of at least 6 characters").max(200),
+      seatCount: z.coerce.number().int().min(1, "At least one consultant is required"),
+      includeDashboard: z.boolean().default(false),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const { company, managerName, username, password, seatCount, includeDashboard } = parsed.data;
+
+    const signup = await storage.getOfficeSignupByEmail(email);
+    if (!signup) {
+      return res.status(404).json({ message: "Start your signup with your email and company first." });
+    }
+    if (!signup.verified) {
+      return res.status(403).json({ message: "Please verify your email before continuing to payment." });
+    }
+
+    const inputError = validateOfficeSetupInput({ company, managerName, username, password, seatCount });
+    if (inputError) return res.status(400).json({ message: inputError });
+
+    // Reject a username already taken up front for a clear error (provisioning
+    // still disambiguates as a safety net if it is taken between now and payment).
+    if (await storage.getUserByUsername(username.trim())) {
+      return res.status(409).json({ message: "That username is already taken. Please choose another." });
+    }
+
+    // Persist the office-setup inputs so the payment webhook can provision from them.
+    await storage.updateOfficeSignup(signup.id, {
+      company,
+      managerName,
+      username: username.trim(),
+      password,
+      seatCount,
+      dashboard: includeDashboard,
+    });
+
+    try {
+      const url = await createSelfServeCheckoutSession({
+        officeName: company,
+        seatCount,
+        includeDashboard,
+        email,
+        signupId: signup.id,
+      });
+      res.json({ url });
+    } catch (err: any) {
+      console.error("Signup checkout creation failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not start checkout" });
+    }
+  });
+
   // --- Self-serve office setup (welcome-email link -> checkout -> provisioning) ---
   // Validate a setup token and return prefill data for the office setup page.
   app.get("/api/office-setup/:token", async (req, res) => {
@@ -534,6 +737,46 @@ export async function registerRoutes(
     });
 
     res.json({ user: publicUser(user) });
+  });
+
+  // Manager enrolls consultants by email (step 6). Sends each address an
+  // enrollment email with the office invite code and an activation link. This is
+  // the guided path INTO the existing invite-code self-join system: it creates no
+  // users and consumes no seats (each consultant still activates themselves via
+  // /api/register/consultant with the code). The manager handing out the code
+  // directly keeps working exactly as before. Best-effort per recipient.
+  app.post("/api/manager/enroll-consultants", async (req, res) => {
+    const schema = z.object({
+      userId: z.coerce.number().int(),
+      emails: z.array(z.string().trim().email()).min(1, "Add at least one email").max(100),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const manager = await storage.getUser(parsed.data.userId);
+    if (!manager || manager.role !== "manager") {
+      return res.status(403).json({ message: "Only a manager can enroll consultants" });
+    }
+    const office = await storage.getOffice(manager.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    const activateUrl = `${APP_URL}/#/register?code=${encodeURIComponent(office.inviteCode)}`;
+    const results = await Promise.all(
+      parsed.data.emails.map(async (raw) => {
+        const email = normalizeEmail(raw);
+        const sent = await sendConsultantEnrollmentEmail(email, {
+          officeName: office.name,
+          inviteCode: office.inviteCode,
+          activateUrl,
+        });
+        return { email, sent };
+      }),
+    );
+    res.json({
+      sent: results.filter((r) => r.sent).map((r) => r.email),
+      failed: results.filter((r) => !r.sent).map((r) => r.email),
+    });
   });
 
   // Remove (deactivate) a consultant's seat — decrements the Stripe seat quantity and
@@ -3945,10 +4188,10 @@ async function checkSeatAccess(
   // Free-path offices awaiting admin activation can register/log in but not practice.
   // Checked before the Stripe gate so pending offices show the activation message.
   if (office.status === "pending") {
-    return { ok: false, status: 403, message: "Your office is being activated. You'll be practicing within 1 business day." };
+    return { ok: false, status: 403, message: "Your office activates as soon as payment is complete. Once it is, you can start practicing right away." };
   }
   if (!officeIsActive(office)) {
-    return { ok: false, status: 402, message: "Your office subscription is inactive. Billing must be brought current to continue training." };
+    return { ok: false, status: 402, message: "Your office subscription is inactive. Billing must be brought current to continue practicing." };
   }
   if (!user.seatActive) {
     return { ok: false, status: 402, message: "You don't have an active training seat yet." };

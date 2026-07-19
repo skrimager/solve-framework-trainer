@@ -324,9 +324,15 @@ export function OfficeSetupComplete() {
           <Card className="border-2" style={{ borderColor: ORANGE }}>
             <CardHeader>
               <CardTitle className="text-lg" style={{ color: NAVY }} data-testid="text-complete-title">
-                {data.officeName} is ready
+                Your office is active
               </CardTitle>
-              <CardDescription>Share this invite code so your consultants can join.</CardDescription>
+              <CardDescription data-testid="text-complete-subtitle">
+                {data.officeName} is live now. Here is your code for {data.seatCount} consultant
+                {data.seatCount === 1 ? "" : "s"}.
+                {data.dashboard
+                  ? " Your Manager Dashboard is ready and fills in as your team joins."
+                  : ""}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="rounded-md border-2 border-dashed p-4 text-center" style={{ borderColor: ORANGE }}>

@@ -1,7 +1,7 @@
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { GraduationCap, LayoutDashboard, PlayCircle, ArrowLeft } from "lucide-react";
+import { GraduationCap, LayoutDashboard, PlayCircle, Building2, ArrowLeft } from "lucide-react";
 import solveLogo from "@assets/solve-framework-logo.png";
 
 // Root chooser. Minimal, on-brand entry point that routes each kind of visitor to
@@ -18,6 +18,13 @@ export default function Home() {
       title: "I'm here to practice",
       description: "Consultant discovery practice and certification.",
       testId: "link-choose-practice",
+    },
+    {
+      to: "/signup",
+      icon: Building2,
+      title: "Set up your office",
+      description: "Get your whole team practicing discovery conversations.",
+      testId: "link-choose-signup",
     },
     {
       to: "/command-center",

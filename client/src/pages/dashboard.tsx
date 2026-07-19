@@ -37,6 +37,7 @@ import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { verticalLabel } from "@/lib/verticals";
+import { planForSeatCount } from "@shared/pricing";
 import type { Office, Scenario } from "@shared/schema";
 
 // Manager command-center palette (matches manager-login.tsx and the manager
@@ -251,8 +252,12 @@ export default function Dashboard() {
           {section === "team" && (
             <TeamSection office={office} isManager={user?.role === "manager"} userId={user?.id} officeId={user?.officeId} />
           )}
-          {section === "scenarios" && <ScenariosSection stats={stats} loading={statsLoading} locked={statsError} />}
-          {section === "leaderboard" && <LeaderboardSection stats={stats} loading={statsLoading} locked={statsError} full />}
+          {section === "scenarios" && (
+            <ScenariosSection stats={stats} loading={statsLoading} locked={statsError} office={office} isManager={user?.role === "manager"} />
+          )}
+          {section === "leaderboard" && (
+            <LeaderboardSection stats={stats} loading={statsLoading} locked={statsError} office={office} isManager={user?.role === "manager"} full />
+          )}
         </main>
       </div>
     </div>
@@ -305,18 +310,55 @@ function EmptyState({ message, testId }: { message: string; testId?: string }) {
   );
 }
 
-// Shown when the dashboard-stats endpoint reports the office is not entitled to
-// the paid Manager Dashboard add-on (HTTP 403). A calm informational state, not
-// a hard error or a pushy upsell.
-function AddOnLocked() {
+// Shown when the office has not purchased the paid Manager Dashboard add-on
+// (the dashboard-stats endpoint returns 403). Never a discouraging error: a
+// friendly invitation showing what the dashboard unlocks, the monthly price at
+// the office's tier, and a one-click "Add Dashboard" for managers. Consultants
+// see the same invitation without the action.
+function AddOnLocked({ office, isManager }: { office?: Office; isManager?: boolean }) {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const plan = planForSeatCount(office?.activeSeatCount ?? 1) ?? planForSeatCount(1);
+  const priceLine = plan ? `$${plan.dashboardRate}/month` : "a flat monthly rate";
+
+  async function addDashboard() {
+    setBusy(true);
+    try {
+      await apiRequest("POST", "/api/billing/add-dashboard", { userId: user?.id });
+      toast({
+        title: "Manager Dashboard added",
+        description: "Your team analytics are activating now.",
+      });
+      window.location.reload();
+    } catch (err: any) {
+      toast({ title: "Couldn't add the dashboard", description: humanError(err), variant: "destructive" });
+      setBusy(false);
+    }
+  }
+
   return (
     <Panel testId="panel-dashboard-locked">
-      <div className="py-8 text-center">
-        <p className="text-sm font-medium text-white">Manager Dashboard add-on not active</p>
-        <p className="mx-auto mt-1 max-w-md text-xs text-white/50">
-          Your office does not currently include the Manager Dashboard add-on, so team analytics,
-          streaks, and rankings are unavailable.
+      <div className="py-8 text-center space-y-3">
+        <p className="text-sm font-semibold text-white" data-testid="text-dashboard-upsell-title">
+          See your whole team in one place
         </p>
+        <p className="mx-auto max-w-md text-xs text-white/60">
+          The Manager Dashboard brings every consultant's progress, scores, streaks, and rankings
+          together so you can coach with confidence. Add it to your office for {priceLine}.
+        </p>
+        {isManager && (
+          <Button
+            type="button"
+            onClick={addDashboard}
+            disabled={busy}
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            data-testid="button-add-dashboard"
+          >
+            {busy ? "Adding…" : "Add Dashboard"}
+          </Button>
+        )}
       </div>
     </Panel>
   );
@@ -375,7 +417,7 @@ function DashboardSection({
   office?: Office;
   isManager: boolean;
 }) {
-  if (locked) return <AddOnLocked />;
+  if (locked) return <AddOnLocked office={office} isManager={isManager} />;
   if (loading || !stats) {
     return (
       <div className="space-y-6">
@@ -674,10 +716,10 @@ function TeamSection({
 // Scenarios section: real practice distribution across verticals.
 // ---------------------------------------------------------------------------
 
-function ScenariosSection({ stats, loading, locked }: { stats?: DashboardStats; loading: boolean; locked?: boolean }) {
+function ScenariosSection({ stats, loading, locked, office, isManager }: { stats?: DashboardStats; loading: boolean; locked?: boolean; office?: Office; isManager?: boolean }) {
   const { data: scenarios } = useQuery<Scenario[]>({ queryKey: ["/api/scenarios"] });
 
-  if (locked) return <AddOnLocked />;
+  if (locked) return <AddOnLocked office={office} isManager={isManager} />;
   if (loading || !stats) {
     return <Skeleton className="h-72 rounded-xl" />;
   }
@@ -739,8 +781,8 @@ function ScenariosSection({ stats, loading, locked }: { stats?: DashboardStats; 
 // Leaderboard section: full ranked list.
 // ---------------------------------------------------------------------------
 
-function LeaderboardSection({ stats, loading, locked }: { stats?: DashboardStats; loading: boolean; locked?: boolean; full?: boolean }) {
-  if (locked) return <AddOnLocked />;
+function LeaderboardSection({ stats, loading, locked, office, isManager }: { stats?: DashboardStats; loading: boolean; locked?: boolean; full?: boolean; office?: Office; isManager?: boolean }) {
+  if (locked) return <AddOnLocked office={office} isManager={isManager} />;
   if (loading || !stats) {
     return <Skeleton className="h-72 rounded-xl" />;
   }
@@ -782,9 +824,10 @@ function PendingBanner() {
       style={{ borderColor: ORANGE, backgroundColor: NAVY }}
       data-testid="banner-office-pending"
     >
-      <h2 className="text-lg font-semibold text-white">Your office is being activated</h2>
+      <h2 className="text-lg font-semibold text-white">Finish setting up your office</h2>
       <p className="text-sm text-white/60">
-        You'll be practicing within 1 business day. We'll email you the moment your office is ready.
+        Your office activates as soon as your payment is complete. Once it is, you and your
+        consultants can start practicing right away.
       </p>
     </div>
   );

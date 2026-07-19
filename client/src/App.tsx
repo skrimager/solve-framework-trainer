@@ -9,6 +9,7 @@ import Home from "@/pages/home";
 import Login from "@/pages/login";
 import ManagerLogin from "@/pages/manager-login";
 import Register from "@/pages/register";
+import Signup from "@/pages/signup";
 import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
 import Results from "@/pages/results";
@@ -53,6 +54,9 @@ function AppRouter() {
           login so browser password managers treat the two as separate contexts. */}
       <Route path="/command-center" component={CommandCenter} />
       <Route path="/register" component={Register} />
+      {/* Self-serve manager signup: email capture, verify, office setup, then
+          Stripe checkout. Payment is the sole activation trigger. Public, no auth. */}
+      <Route path="/signup" component={Signup} />
       {/* Public free voice demo: no auth. The email+code verification and a
           signed demo token gate it server-side, so it stays outside RequireAuth
           and never touches the trainee/admin login flows. */}

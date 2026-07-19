@@ -1,18 +1,25 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiRequest } from "@/lib/queryClient";
+import { hashToSearch } from "@/lib/hashLocation";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Check, Copy } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import solveLogo from "@assets/solve-framework-logo.png";
 
-type Path = "choose" | "manager" | "consultant";
+type Path = "choose" | "consultant";
 
 export default function Register() {
-  const [path, setPath] = useState<Path>("choose");
+  // A consultant enrollment email links here with ?code=INVITE so the invite
+  // field is prefilled and we drop them straight onto the consultant form.
+  const invitedCode = useMemo(
+    () => (new URLSearchParams(hashToSearch(window.location.hash)).get("code") ?? "").trim().toUpperCase(),
+    [],
+  );
+  const [path, setPath] = useState<Path>(invitedCode ? "consultant" : "choose");
   const [, navigate] = useLocation();
 
   return (
@@ -29,9 +36,8 @@ export default function Register() {
           <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
         </div>
 
-        {path === "choose" && <ChoosePath onChoose={setPath} />}
-        {path === "manager" && <ManagerForm onBack={() => setPath("choose")} />}
-        {path === "consultant" && <ConsultantForm onBack={() => setPath("choose")} />}
+        {path === "choose" && <ChoosePath onChoose={setPath} navigate={navigate} />}
+        {path === "consultant" && <ConsultantForm onBack={() => setPath("choose")} initialCode={invitedCode} />}
 
         <div className="text-center">
           <button
@@ -50,7 +56,7 @@ export default function Register() {
   );
 }
 
-function ChoosePath({ onChoose }: { onChoose: (p: Path) => void }) {
+function ChoosePath({ onChoose, navigate }: { onChoose: (p: Path) => void; navigate: (to: string) => void }) {
   return (
     <Card className="border-2" style={{ borderColor: "#E06D00" }}>
       <CardHeader>
@@ -60,7 +66,7 @@ function ChoosePath({ onChoose }: { onChoose: (p: Path) => void }) {
       <CardContent className="space-y-3">
         <button
           type="button"
-          onClick={() => onChoose("manager")}
+          onClick={() => navigate("/signup")}
           className="w-full text-left rounded-md border px-4 py-3 hover-elevate active-elevate-2"
           data-testid="button-choose-manager"
         >
@@ -81,110 +87,8 @@ function ChoosePath({ onChoose }: { onChoose: (p: Path) => void }) {
   );
 }
 
-function ManagerForm({ onBack }: { onBack: () => void }) {
-  const [officeName, setOfficeName] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [inviteCode, setInviteCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [, navigate] = useLocation();
-  const { toast } = useToast();
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      const res = await apiRequest("POST", "/api/register/manager", { officeName, username, password, displayName });
-      const data = await res.json();
-      setInviteCode(data.office.inviteCode);
-    } catch (err: any) {
-      toast({
-        title: "Couldn't create your office",
-        description: humanError(err),
-        variant: "destructive",
-      });
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  function copyCode() {
-    if (!inviteCode) return;
-    navigator.clipboard?.writeText(inviteCode).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
-
-  if (inviteCode) {
-    return (
-      <Card className="border-2" style={{ borderColor: "#E06D00" }}>
-        <CardHeader>
-          <CardTitle className="text-lg">Your office is ready</CardTitle>
-          <CardDescription>Share this invite code with your consultants so they can join your office.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="rounded-md border-2 border-dashed p-4 text-center" style={{ borderColor: "#E06D00" }}>
-            <p className="text-xs text-muted-foreground mb-1">Invite code</p>
-            <p className="text-3xl font-bold tracking-widest" data-testid="text-generated-invite-code">{inviteCode}</p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              onClick={copyCode}
-              data-testid="button-copy-invite-code"
-            >
-              {copied ? <Check className="w-4 h-4 mr-1" /> : <Copy className="w-4 h-4 mr-1" />}
-              {copied ? "Copied" : "Copy code"}
-            </Button>
-          </div>
-          <Button
-            type="button"
-            className="w-full"
-            style={{ backgroundColor: "#E06D00", color: "white" }}
-            onClick={() => navigate("/command-center")}
-            data-testid="button-go-to-signin"
-          >
-            Continue to sign in
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="border-2" style={{ borderColor: "#E06D00" }}>
-      <CardHeader>
-        <CardTitle className="text-lg">Set up your office</CardTitle>
-        <CardDescription>You'll be the manager for this office.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Field id="officeName" label="Office name" value={officeName} onChange={setOfficeName} testId="input-office-name" />
-          <Field id="displayName" label="Your name" value={displayName} onChange={setDisplayName} testId="input-display-name" />
-          <Field id="username" label="Username" value={username} onChange={setUsername} autoComplete="username" testId="input-username" />
-          <Field id="password" label="Password" type="password" value={password} onChange={setPassword} autoComplete="new-password" testId="input-password" />
-          <Button
-            type="submit"
-            className="w-full"
-            style={{ backgroundColor: "#E06D00", color: "white" }}
-            disabled={isSubmitting}
-            data-testid="button-submit-manager"
-          >
-            {isSubmitting ? "Creating..." : "Create office"}
-          </Button>
-          <BackButton onBack={onBack} />
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ConsultantForm({ onBack }: { onBack: () => void }) {
-  const [inviteCode, setInviteCode] = useState("");
+function ConsultantForm({ onBack, initialCode }: { onBack: () => void; initialCode?: string }) {
+  const [inviteCode, setInviteCode] = useState(initialCode ?? "");
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");

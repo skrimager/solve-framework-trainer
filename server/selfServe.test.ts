@@ -338,6 +338,120 @@ describe("handleStripeEvent routing for self-serve", () => {
   });
 });
 
+// Item 5: a paid checkout that carries a signupId must create the manager login
+// from the office_signups row — but ONLY inside the payment-driven provisioning,
+// and never more than once even if the webhook is redelivered. The plaintext
+// password lives in our DB (office_signups), never on Stripe metadata.
+describe("provisionSelfServeOffice manager-user creation (signupId)", () => {
+  let signupRows: Map<number, any>;
+  let users: any[];
+
+  function withSignup(overrides: any = {}) {
+    return {
+      metadata: {
+        selfServe: "true",
+        officeName: "Acme",
+        seatCount: "3",
+        dashboard: "false",
+        signupId: "42",
+        ...overrides,
+      },
+    };
+  }
+
+  beforeEach(() => {
+    offices = new Map();
+    nextOfficeId = 1;
+    signups = [];
+    tokens = new Map();
+    users = [];
+    signupRows = new Map();
+    signupRows.set(42, {
+      id: 42,
+      email: "buyer@example.com",
+      company: "Acme",
+      username: "dana",
+      password: "s3cret-plain",
+      managerName: "Dana Rivers",
+      seatCount: 3,
+      dashboard: false,
+      verified: true,
+    });
+
+    (storage as any).getOfficeByStripeSubscriptionId = async (s: string) =>
+      [...offices.values()].find((o) => o.stripeSubscriptionId === s);
+    (storage as any).getOfficeByInviteCode = async (code: string) =>
+      [...offices.values()].find((o) => o.inviteCode === code);
+    (storage as any).listOffices = async () => [...offices.values()];
+    (storage as any).createOffice = async (data: any) => {
+      const office = { id: nextOfficeId++, managerItemId: null, seatItemId: null, activeSeatCount: 0, ...data };
+      offices.set(office.id, office);
+      return office;
+    };
+    (storage as any).updateOffice = async (id: number, patch: Partial<Office>) => {
+      const o = offices.get(id);
+      if (!o) return undefined;
+      const next = { ...o, ...patch };
+      offices.set(id, next);
+      return next;
+    };
+    (storage as any).createPaidOfficeSignup = async (data: any) => {
+      const row = { id: signups.length + 1, ...data };
+      signups.push(row);
+      return row;
+    };
+    (storage as any).getOfficeSetupToken = async (t: string) => tokens.get(t);
+    (storage as any).updateOfficeSetupToken = async () => undefined;
+    (storage as any).getOfficeSignup = async (id: number) => signupRows.get(id);
+    (storage as any).updateOfficeSignup = async (id: number, patch: any) => {
+      const row = signupRows.get(id);
+      if (row) Object.assign(row, patch);
+      return row;
+    };
+    (storage as any).getUserByUsername = async (u: string) => users.find((x) => x.username === u);
+    (storage as any).createUser = async (data: any) => {
+      const row = { id: users.length + 1, ...data };
+      users.push(row);
+      return row;
+    };
+  });
+
+  test("creates a manager login from the signup row and consumes the password", async () => {
+    const office = await provisionSelfServeOffice(withSignup(), fakeSubscription(withSignup()));
+    assert.ok(office);
+    assert.equal(users.length, 1, "exactly one manager user created");
+    assert.equal(users[0].role, "manager");
+    assert.equal(users[0].officeId, office!.id);
+    assert.equal(users[0].username, "dana");
+    assert.equal(users[0].displayName, "Dana Rivers");
+    // Plaintext password must be cleared from the signup row after use.
+    assert.equal(signupRows.get(42)!.password, null);
+  });
+
+  test("is idempotent: a redelivered webhook does not create a second manager user", async () => {
+    const first = await provisionSelfServeOffice(withSignup(), fakeSubscription(withSignup()));
+    const second = await provisionSelfServeOffice(withSignup(), fakeSubscription(withSignup()));
+    assert.equal(first!.id, second!.id, "same office returned");
+    assert.equal(offices.size, 1, "no duplicate office");
+    assert.equal(users.length, 1, "no duplicate manager user on redelivery");
+  });
+
+  test("disambiguates a colliding manager username", async () => {
+    users.push({ id: 99, username: "dana", role: "manager", officeId: 7 });
+    await provisionSelfServeOffice(withSignup(), fakeSubscription(withSignup()));
+    const created = users.find((u) => u.id !== 99);
+    assert.ok(created);
+    assert.notEqual(created.username, "dana");
+    assert.match(created.username, /^dana\d+$/);
+  });
+
+  test("skips manager creation when no signupId rides on the metadata (legacy setup-token flow)", async () => {
+    const office = await provisionSelfServeOffice(fakeSession(), fakeSubscription());
+    assert.ok(office);
+    assert.equal(users.length, 0, "no manager user without a signupId");
+  });
+});
+
 describe("welcome email setup CTA (item 2)", () => {
   test("appends the Set Up Your Office link when a setupUrl is given", () => {
     const url = "https://app.test/#/office-setup/abc123";
