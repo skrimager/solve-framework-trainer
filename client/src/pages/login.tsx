@@ -8,28 +8,39 @@ import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
+import { postLoginPath, wrongCredentialTypeRedirect } from "@/lib/routes";
 import trainerPhoto from "@assets/trainer-photo-1.png";
 
 export default function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [wrongType, setWrongType] = useState<{ redirectTo: string; message: string } | null>(null);
   const { user, setUser } = useAuth();
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
   useEffect(() => {
     if (user) {
-      navigate(user.role === "consultant" ? "/scenarios" : "/dashboard");
+      navigate(postLoginPath(user.role));
     }
   }, [user]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setIsSubmitting(true);
+    setWrongType(null);
     try {
       const res = await apiRequest("POST", "/api/login", { username, password });
       const loggedInUser = await res.json();
+      // Credentials are valid; if they belong to a manager account, don't sign
+      // them in on the consultant form. Point them at the Command Center to sign
+      // in there (no cross-form auto-submit of credentials).
+      const mismatch = wrongCredentialTypeRedirect("consultant", loggedInUser.role);
+      if (mismatch) {
+        setWrongType(mismatch);
+        return;
+      }
       setUser(loggedInUser);
     } catch (err: any) {
       toast({
@@ -68,7 +79,7 @@ export default function Login() {
           >
             <SolveMark />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">Practice Scenarios</h1>
+          <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">Consultant Practice Login</h1>
           <p className="text-sm text-muted-foreground">Consultant access to SOLVE Platform™ discovery practice.</p>
         </div>
         <Card className="border-2" style={{ borderColor: "#E06D00" }}>
@@ -111,6 +122,24 @@ export default function Login() {
                 {isSubmitting ? "Signing in..." : "Sign in"}
               </Button>
             </form>
+            {wrongType && (
+              <div
+                className="mt-4 rounded-md border p-3 text-sm"
+                style={{ borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.08)" }}
+                data-testid="text-wrong-credential-type"
+              >
+                <p className="text-foreground">{wrongType.message}</p>
+                <button
+                  type="button"
+                  onClick={() => navigate(wrongType.redirectTo)}
+                  className="mt-2 font-medium hover:underline"
+                  style={{ color: "#E06D00" }}
+                  data-testid="button-go-command-center"
+                >
+                  Go to the Command Center
+                </button>
+              </div>
+            )}
             <p className="mt-4 text-center text-sm text-muted-foreground">
               New here?{" "}
               <button
@@ -124,14 +153,13 @@ export default function Login() {
               </button>
             </p>
             <p className="mt-2 text-center text-xs text-muted-foreground">
-              Manager?{" "}
               <button
                 type="button"
-                onClick={() => navigate("/manager-login")}
+                onClick={() => navigate("/command-center")}
                 className="font-medium hover:underline"
                 data-testid="link-manager-login"
               >
-                Command center login
+                Are you a manager? Command Center is here →
               </button>
             </p>
           </CardContent>

@@ -145,7 +145,7 @@ function ManagerForm({ onBack }: { onBack: () => void }) {
             type="button"
             className="w-full"
             style={{ backgroundColor: "#E06D00", color: "white" }}
-            onClick={() => navigate("/manager-login")}
+            onClick={() => navigate("/command-center")}
             data-testid="button-go-to-signin"
           >
             Continue to sign in
@@ -203,7 +203,7 @@ function ConsultantForm({ onBack }: { onBack: () => void }) {
         displayName,
       });
       toast({ title: "Account created", description: "You've joined your office. Please sign in." });
-      navigate("/");
+      navigate("/practice");
     } catch (err: any) {
       toast({
         title: "Couldn't join the office",

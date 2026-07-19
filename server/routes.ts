@@ -413,7 +413,7 @@ export async function registerRoutes(
         inviteCode: office.inviteCode,
         seatCount: office.activeSeatCount,
         dashboard: !!office.managerItemId,
-        commandCenterUrl: `${APP_URL}/#/manager-login`,
+        commandCenterUrl: `${APP_URL}/#/command-center`,
       });
     } catch (err: any) {
       console.error("Office setup completion lookup failed:", err);

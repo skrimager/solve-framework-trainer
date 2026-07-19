@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,31 +7,41 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { wrongCredentialTypeRedirect } from "@/lib/routes";
 
-// Manager command-center login. Same backend flow as the consultant login at
-// "/" (single POST /api/login; role is backend-derived), just wrapped in a
-// distinct dark "control room" chrome so managers have a recognizable entry
-// point separate from the light consultant screen and the lime admin vault.
+// Manager command-center login. Same backend flow as the consultant login
+// (single POST /api/login; role is backend-derived), but deliberately styled to
+// look nothing like the dark orange consultant screen: a bright, light "control
+// room" with blue and orange accents. Signing in swaps this route to the manager
+// dashboard (see CommandCenter in App.tsx), so this component never navigates on
+// its own success.
+const BLUE = "#2563EB";
+const ORANGE = "#E06D00";
+
 export default function ManagerLogin() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { user, setUser } = useAuth();
+  const [wrongType, setWrongType] = useState<{ redirectTo: string; message: string } | null>(null);
+  const { setUser } = useAuth();
   const [, navigate] = useLocation();
   const { toast } = useToast();
-
-  useEffect(() => {
-    if (user) {
-      navigate(user.role === "consultant" ? "/scenarios" : "/dashboard");
-    }
-  }, [user]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setIsSubmitting(true);
+    setWrongType(null);
     try {
       const res = await apiRequest("POST", "/api/login", { username, password });
       const loggedInUser = await res.json();
+      // Credentials are valid; if they belong to a consultant account, don't sign
+      // them in here. Point them at Practice to sign in there (no cross-form
+      // auto-submit of credentials).
+      const mismatch = wrongCredentialTypeRedirect("manager", loggedInUser.role);
+      if (mismatch) {
+        setWrongType(mismatch);
+        return;
+      }
       setUser(loggedInUser);
     } catch (err: any) {
       toast({
@@ -47,15 +57,15 @@ export default function ManagerLogin() {
   return (
     <div
       className="relative min-h-dvh flex items-center justify-center px-4 py-10 overflow-hidden"
-      style={{ backgroundColor: "#05162D" }}
+      style={{ backgroundColor: "#F5F8FF" }}
     >
-      {/* Command-center grid overlay */}
+      {/* Light command-center grid overlay in blue */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0"
         style={{
           backgroundImage:
-            "linear-gradient(rgba(224,109,0,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(224,109,0,0.08) 1px, transparent 1px)",
+            "linear-gradient(rgba(37,99,235,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(37,99,235,0.06) 1px, transparent 1px)",
           backgroundSize: "44px 44px",
           maskImage: "radial-gradient(ellipse at center, black 40%, transparent 85%)",
           WebkitMaskImage: "radial-gradient(ellipse at center, black 40%, transparent 85%)",
@@ -65,51 +75,55 @@ export default function ManagerLogin() {
         <div className="text-center space-y-3">
           <div
             className="mx-auto w-16 h-16 rounded-2xl flex items-center justify-center"
-            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(224,109,0,0.35)" }}
+            style={{ backgroundColor: BLUE, boxShadow: "0 8px 30px rgba(37,99,235,0.25)" }}
             aria-hidden="true"
           >
-            <span className="text-2xl font-bold" style={{ color: "#F1830D" }}>S</span>
+            <span className="text-2xl font-bold text-white">S</span>
           </div>
           <div className="flex items-center justify-center gap-2">
             <span
               className="w-2 h-2 rounded-full animate-pulse"
-              style={{ backgroundColor: "#F1830D", boxShadow: "0 0 8px #F1830D" }}
+              style={{ backgroundColor: ORANGE, boxShadow: "0 0 8px rgba(224,109,0,0.6)" }}
               aria-hidden="true"
             />
             <span
-              className="font-mono text-[11px] uppercase tracking-[0.25em] text-white/70"
+              className="font-mono text-[11px] uppercase tracking-[0.25em]"
+              style={{ color: BLUE }}
               data-testid="text-command-status"
             >
               Office Command · Live
             </span>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white" data-testid="text-manager-title">
-            Command Center
+          <h1
+            className="text-2xl font-bold tracking-tight"
+            style={{ color: "#0A1A30" }}
+            data-testid="text-manager-title"
+          >
+            Command Center · Manager Login
           </h1>
-          <p className="text-sm text-white/60">Oversee your team's live discovery practice.</p>
+          <p className="text-sm text-muted-foreground" data-testid="text-manager-hero">
+            See who's practicing, who's improving, who's ready.
+          </p>
         </div>
         <Card
-          className="border-2"
+          className="border-2 bg-white"
           style={{
-            borderColor: "#E06D00",
-            backgroundColor: "#0A1A30",
-            boxShadow: "0 8px 40px rgba(224,109,0,0.15)",
+            borderColor: BLUE,
+            boxShadow: "0 8px 40px rgba(37,99,235,0.12)",
           }}
         >
           <CardHeader>
-            <CardTitle className="font-mono text-sm uppercase tracking-[0.2em] text-white">
+            <CardTitle className="font-mono text-sm uppercase tracking-[0.2em]" style={{ color: "#0A1A30" }}>
               Manager Access
             </CardTitle>
-            <CardDescription className="text-white/60">
-              Sign in to your office command center.
-            </CardDescription>
+            <CardDescription>Sign in to your office command center.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
                 <Label
                   htmlFor="manager-username"
-                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-white/70"
+                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
                 >
                   Username
                 </Label>
@@ -119,14 +133,13 @@ export default function ManagerLogin() {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
-                  className="bg-white/5 text-white border-white/20"
                   required
                 />
               </div>
               <div className="space-y-2">
                 <Label
                   htmlFor="manager-password"
-                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-white/70"
+                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
                 >
                   Password
                 </Label>
@@ -137,32 +150,48 @@ export default function ManagerLogin() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
-                  className="bg-white/5 text-white border-white/20"
                   required
                 />
               </div>
               <Button
                 type="submit"
                 className="w-full font-mono uppercase tracking-[0.18em]"
-                style={{ backgroundColor: "#E06D00", color: "white" }}
+                style={{ backgroundColor: BLUE, color: "white" }}
                 disabled={isSubmitting}
                 data-testid="button-manager-login"
               >
                 {isSubmitting ? "Authorizing..." : "Enter command center"}
               </Button>
             </form>
+            {wrongType && (
+              <div
+                className="mt-4 rounded-md border p-3 text-sm"
+                style={{ borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }}
+                data-testid="text-wrong-credential-type"
+              >
+                <p className="text-foreground">{wrongType.message}</p>
+                <button
+                  type="button"
+                  onClick={() => navigate(wrongType.redirectTo)}
+                  className="mt-2 font-medium hover:underline"
+                  style={{ color: ORANGE }}
+                  data-testid="button-go-practice"
+                >
+                  Go to Practice
+                </button>
+              </div>
+            )}
           </CardContent>
         </Card>
-        <p className="text-center text-xs text-white/50">
-          Not a manager?{" "}
+        <p className="text-center text-xs text-muted-foreground">
           <button
             type="button"
-            onClick={() => navigate("/")}
+            onClick={() => navigate("/practice")}
             className="font-medium hover:underline"
-            style={{ color: "#F1830D" }}
+            style={{ color: ORANGE }}
             data-testid="link-consultant-login"
           >
-            Consultant login
+            Looking for the consultant practice login? →
           </button>
         </p>
       </div>

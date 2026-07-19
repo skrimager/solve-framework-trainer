@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
+import Home from "@/pages/home";
 import Login from "@/pages/login";
 import ManagerLogin from "@/pages/manager-login";
 import Register from "@/pages/register";
@@ -27,15 +28,30 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// The manager command center is one route that shows the manager login when
+// signed out and the dashboard once a manager is signed in, so "/command-center"
+// serves both faces of the manager experience and "/dashboard" can safely
+// redirect here without a redirect loop. A consultant who lands here is bounced
+// to their own practice area.
+function CommandCenter() {
+  const { user } = useAuth();
+  if (!user) return <ManagerLogin />;
+  if (user.role === "consultant") return <Redirect to="/scenarios" />;
+  return <Dashboard />;
+}
+
 function AppRouter() {
   return (
     <Switch>
-      <Route path="/" component={Login} />
-      {/* Manager command-center login: same /api/login flow as the consultant
-          login at "/", just a distinct dark "control room" chrome so managers
-          have their own recognizable entry point. Role-based redirect is still
-          backend-derived and handled inside the page. */}
-      <Route path="/manager-login" component={ManagerLogin} />
+      {/* Root chooser: one tap to the consultant practice login, the manager
+          command center, or the free demo. */}
+      <Route path="/" component={Home} />
+      {/* Consultant practice login (dark orange theme). */}
+      <Route path="/practice" component={Login} />
+      {/* Manager command center: distinct light login when signed out, dashboard
+          when signed in. Rendered by a different component from the consultant
+          login so browser password managers treat the two as separate contexts. */}
+      <Route path="/command-center" component={CommandCenter} />
       <Route path="/register" component={Register} />
       {/* Public free voice demo: no auth. The email+code verification and a
           signed demo token gate it server-side, so it stays outside RequireAuth
@@ -66,12 +82,8 @@ function AppRouter() {
           <Results />
         </RequireAuth>
       </Route>
-      <Route path="/dashboard">
-        <RequireAuth>
-          <Dashboard />
-        </RequireAuth>
-      </Route>
-      <Route path="/certification">
+      {/* Certification path view: levels, progress, credentials. */}
+      <Route path="/academy">
         <RequireAuth>
           <Certification />
         </RequireAuth>
@@ -87,6 +99,13 @@ function AppRouter() {
       <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin" component={AdminDashboard} />
       <Route path="/admin/opportunities" component={AdminDashboard} />
+      {/* Backward-compatible aliases so old bookmarks and email links keep
+          working. "/dashboard" points at the command center (which shows the
+          dashboard once signed in), covering pre-rename manager links. */}
+      <Route path="/login"><Redirect to="/practice" /></Route>
+      <Route path="/manager-login"><Redirect to="/command-center" /></Route>
+      <Route path="/dashboard"><Redirect to="/command-center" /></Route>
+      <Route path="/certification"><Redirect to="/academy" /></Route>
       <Route component={NotFound} />
     </Switch>
   );
