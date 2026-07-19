@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import {
   ResponsiveContainer,
   LineChart,
@@ -29,8 +29,10 @@ import {
   LogOut,
   ArrowLeft,
   ClipboardCheck,
+  Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
@@ -701,6 +703,9 @@ function TeamSection({
   return (
     <div className="space-y-6">
       {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
+      {isManager && office && officeActive(office) && userId != null && (
+        <EmailInviteCard userId={userId} officeName={office.name} />
+      )}
       {userId != null && officeId != null && (
         <div className="rounded-xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
           <div className="[&_*]:!text-inherit">
@@ -814,6 +819,85 @@ function InviteCodeCard({ office }: { office: Office }) {
         <span className="font-medium text-white/70">{office.name}</span> at sign-up.
       </p>
     </div>
+  );
+}
+
+// Email-invite path (the second consultant enrollment path alongside the invite
+// code above). Sends an enrollment email per address via
+// POST /api/manager/enroll-consultants, which returns which addresses were sent
+// and which failed so we can report both back to the manager.
+function EmailInviteCard({ userId, officeName }: { userId: number; officeName: string }) {
+  const { toast } = useToast();
+  const [raw, setRaw] = useState("");
+
+  const enroll = useMutation({
+    mutationFn: async (emails: string[]) => {
+      const res = await apiRequest("POST", "/api/manager/enroll-consultants", { userId, emails });
+      return res.json() as Promise<{ sent: string[]; failed: string[] }>;
+    },
+    onSuccess: ({ sent, failed }) => {
+      if (sent.length > 0) {
+        toast({
+          title: sent.length === 1 ? "Invite sent" : `${sent.length} invites sent`,
+          description: sent.join(", "),
+        });
+        setRaw("");
+      }
+      if (failed.length > 0) {
+        toast({
+          title: failed.length === 1 ? "One invite didn't send" : `${failed.length} invites didn't send`,
+          description: `${failed.join(", ")}. Check the addresses and try again.`,
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (err: any) => {
+      toast({ title: "Couldn't send invites", description: humanError(err), variant: "destructive" });
+    },
+  });
+
+  // Managers paste addresses separated by commas or new lines; split on either,
+  // trim, and drop blanks before handing the list to the endpoint.
+  const emails = raw
+    .split(/[\n,]+/)
+    .map((e) => e.trim())
+    .filter(Boolean);
+
+  return (
+    <Panel
+      title="Invite consultants by email"
+      caption="Send each consultant a link to join your office. They can also join with the code above."
+      testId="panel-email-invite"
+    >
+      <div className="space-y-3">
+        <Textarea
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          placeholder="consultant@example.com, another@example.com"
+          rows={3}
+          className="min-h-20 bg-transparent text-white placeholder:text-white/35"
+          style={{ backgroundColor: PANEL, borderColor: "rgba(255,255,255,0.15)" }}
+          data-testid="input-consultant-emails"
+        />
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-white/45">
+            Invites will join <span className="font-medium text-white/70">{officeName}</span>. Separate
+            addresses with commas or new lines.
+          </p>
+          <Button
+            type="button"
+            onClick={() => enroll.mutate(emails)}
+            disabled={emails.length === 0 || enroll.isPending}
+            className="gap-1.5 shrink-0"
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            data-testid="button-send-invites"
+          >
+            <Mail className="h-4 w-4" />
+            {enroll.isPending ? "Sending…" : "Send Invite"}
+          </Button>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
