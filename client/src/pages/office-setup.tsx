@@ -356,7 +356,7 @@ export function OfficeSetupComplete() {
                 type="button"
                 className="w-full"
                 style={{ backgroundColor: ORANGE, color: "white" }}
-                onClick={() => navigate("/manager-login")}
+                onClick={() => navigate("/command-center")}
                 data-testid="button-go-command-center"
               >
                 Go to your Command Center

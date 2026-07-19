@@ -367,7 +367,7 @@ export default function Scenarios() {
             {activeLevel === "advanced" && !certified && (
               <Button
                 size="sm"
-                onClick={() => navigate("/certification")}
+                onClick={() => navigate("/academy")}
                 disabled={capBlocked}
                 style={examEligible && !capBlocked ? { backgroundColor: "#E06D00", color: "white" } : undefined}
                 variant={examEligible ? "default" : "outline"}

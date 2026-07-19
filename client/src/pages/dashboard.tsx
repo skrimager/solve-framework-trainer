@@ -220,7 +220,7 @@ export default function Dashboard() {
               className="text-white/70 hover:text-white"
               onClick={() => {
                 setUser(null);
-                navigate("/");
+                navigate("/command-center");
               }}
               aria-label="Sign out"
               data-testid="button-logout"

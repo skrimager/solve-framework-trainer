@@ -88,7 +88,7 @@ describe("buildPaidWelcomeEmail", () => {
     assert.match(html, /background-color:#E06D00/);
     assert.match(html, /border:1px solid #0A1A30/);
     // The CTA anchor points at the manager login and is not a bare text link.
-    assert.match(html, /href="[^"]*\/#\/manager-login"/);
+    assert.match(html, /href="[^"]*\/#\/command-center"/);
     assert.doesNotMatch(html, /<button/);
   });
 
@@ -99,7 +99,7 @@ describe("buildPaidWelcomeEmail", () => {
 
   test("plain-text version keeps a spelled-out Command Center link", () => {
     const { text } = buildPaidWelcomeEmail(details);
-    assert.match(text, /Open your Command Center: http[^\s]*\/#\/manager-login/);
+    assert.match(text, /Open your Command Center: http[^\s]*\/#\/command-center/);
     assert.doesNotMatch(text, /__CTA_BUTTON__/);
   });
 

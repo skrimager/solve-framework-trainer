@@ -100,8 +100,8 @@ export async function createManagerCheckoutSession(
     client_reference_id: String(office.id),
     line_items: lineItems,
     subscription_data: { metadata: { officeId: String(office.id) } },
-    success_url: `${APP_URL}/dashboard?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${APP_URL}/dashboard?checkout=cancelled`,
+    success_url: `${APP_URL}/#/command-center?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_URL}/#/command-center?checkout=cancelled`,
   });
   if (!session.url) throw new Error("Stripe did not return a Checkout URL");
   return session.url;
@@ -176,7 +176,7 @@ export async function createBillingPortalSession(office: Office): Promise<string
   const stripe = getStripe();
   const session = await stripe.billingPortal.sessions.create({
     customer: office.stripeCustomerId,
-    return_url: `${APP_URL}/dashboard`,
+    return_url: `${APP_URL}/#/command-center`,
   });
   return session.url;
 }

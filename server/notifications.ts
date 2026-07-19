@@ -236,7 +236,7 @@ export interface PaidOfficeDetails {
 // first-week plan. Personal "from hello@" note, same friendly transport as the
 // welcome drip. Plain-text is authored and rendered to matching HTML.
 export function buildPaidWelcomeEmail(details: PaidOfficeDetails): { subject: string; html: string; text: string } {
-  const commandCenterUrl = `${APP_URL}/#/manager-login`;
+  const commandCenterUrl = `${APP_URL}/#/command-center`;
   const subject = `Your SOLVE Framework office is ready: ${details.officeName}`;
   // Sentinel marks where the primary call-to-action button is injected in the
   // HTML render. The plain-text version keeps a spelled-out link on its own line
