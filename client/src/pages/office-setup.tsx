@@ -44,6 +44,11 @@ export default function OfficeSetup() {
 
   const [officeName, setOfficeName] = useState("");
   const [seatCount, setSeatCount] = useState(1);
+  // Raw text backing the seat count input. Kept separate from the numeric
+  // seatCount so the field can sit empty while the user is retyping (e.g.
+  // clearing "1" before typing "7") without snapping back to 1 on every
+  // keystroke.
+  const [seatCountText, setSeatCountText] = useState("1");
   const [includeDashboard, setIncludeDashboard] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -152,8 +157,22 @@ export default function OfficeSetup() {
                     id="seatCount"
                     type="number"
                     min={1}
-                    value={seatCount}
-                    onChange={(e) => setSeatCount(Math.max(1, Number(e.target.value) || 1))}
+                    value={seatCountText}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setSeatCountText(raw);
+                      if (raw.trim() === "") return;
+                      const parsed = Number(raw);
+                      if (Number.isFinite(parsed)) {
+                        setSeatCount(Math.max(1, parsed));
+                      }
+                    }}
+                    onBlur={() => {
+                      const parsed = Number(seatCountText);
+                      const next = seatCountText.trim() === "" || !Number.isFinite(parsed) ? 1 : Math.max(1, parsed);
+                      setSeatCount(next);
+                      setSeatCountText(String(next));
+                    }}
                     required
                     data-testid="input-seat-count"
                   />
