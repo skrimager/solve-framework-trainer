@@ -13,8 +13,10 @@ import { Progress } from "@/components/ui/progress";
 import { AppShell } from "@/components/app-shell";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
+import type { Level } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Award, Lock, CheckCircle2, XCircle } from "lucide-react";
+import { buildProgressionPath } from "@/lib/progression";
+import { Award, Lock, CheckCircle2, XCircle, Check } from "lucide-react";
 
 type Track = "consulting" | "leadership";
 
@@ -241,6 +243,7 @@ export default function Certification() {
         {/* Overview / gating when no exam is in progress. */}
         {!exam && !writtenResult && status && (
           <>
+            <ProgressionPath level={status.level as Level} certified={status.certified} />
             <OverviewCard
               status={status}
               starting={startExam.isPending}
@@ -256,6 +259,78 @@ export default function Certification() {
         )}
       </div>
     </AppShell>
+  );
+}
+
+// The full Beginner -> Intermediate -> Advanced -> Certified path, always shown
+// in its entirety. The consultant's current stage is highlighted in orange;
+// stages they have passed show a check; locked stages are greyed out but stay
+// visible and state exactly what unlocks them (real thresholds from the practice
+// dashboard). This only surfaces the surrounding context. It does not change any
+// unlock or exam-gating rules.
+function ProgressionPath({ level, certified }: { level: Level; certified: boolean }) {
+  const stages = buildProgressionPath(level, certified);
+  return (
+    <Card style={{ borderColor: "#0A1A30" }} data-testid="path-progression">
+      <CardHeader>
+        <CardTitle className="text-lg">Your certification path</CardTitle>
+        <CardDescription>
+          Beginner → Intermediate → Advanced → Certified. Certification requires completing 5 Advanced
+          sessions scoring 85 or higher, then passing the certification exam.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {stages.map((stage) => {
+          const isCurrent = stage.state === "current";
+          const isLocked = stage.state === "locked";
+          const isComplete = stage.state === "complete";
+          return (
+            <div
+              key={stage.key}
+              className="flex items-start gap-3 rounded-md border p-3"
+              style={
+                isCurrent
+                  ? { borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.08)" }
+                  : { borderColor: "var(--border)" }
+              }
+              data-testid={`path-stage-${stage.key}`}
+              data-state={stage.state}
+            >
+              <span className="mt-0.5 shrink-0" aria-hidden="true">
+                {isComplete ? (
+                  <Check className="h-4 w-4" style={{ color: "#E06D00" }} />
+                ) : isCurrent ? (
+                  <Award className="h-4 w-4" style={{ color: "#E06D00" }} />
+                ) : (
+                  <Lock className="h-4 w-4 text-muted-foreground" />
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p
+                    className="text-sm font-semibold"
+                    style={isCurrent ? { color: "#E06D00" } : isLocked ? undefined : { color: "#0A1A30" }}
+                    data-testid={`path-stage-label-${stage.key}`}
+                  >
+                    {stage.label}
+                  </p>
+                  {isCurrent && (
+                    <Badge style={{ backgroundColor: "#E06D00", color: "white" }} data-testid="path-current-badge">
+                      You are here
+                    </Badge>
+                  )}
+                </div>
+                {isLocked && stage.unlockCriteria && (
+                  <p className="text-xs text-muted-foreground" data-testid={`path-unlock-${stage.key}`}>
+                    {stage.unlockCriteria}
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
   );
 }
 
