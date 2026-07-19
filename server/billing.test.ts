@@ -251,6 +251,28 @@ describe("optional dashboard add-on", () => {
     assert.equal(offices.get(1)!.managerItemId, null);
     assert.equal(offices.get(1)!.seatItemId, "si_seat", "seat line is untouched");
   });
+
+  // The dashboard "state" the manager UI branches on is purely office.managerItemId:
+  // set => dashboard is ACTIVE (full analytics, never an "add-on not active" error);
+  // unset => not purchased, so the UI shows the friendly upsell. addDashboard /
+  // removeDashboard are the only transitions, and the price billed must match the
+  // tier's dashboard sell line shown in that upsell.
+  test("dashboard state flips purchased<->not, and the tier price billed matches the upsell price", async () => {
+    const calls: any[] = [];
+    fakeStripe(null, calls);
+    // Office tier (6-20 seats): the upsell shows $389/mo, billed at the Office dashboard price.
+    offices.set(1, makeOffice({ managerItemId: null, seatItemId: "si_seat", activeSeatCount: 10 }));
+
+    const dashboardActive = (o: Office) => !!o.managerItemId;
+    assert.equal(dashboardActive(offices.get(1)!), false, "starts not purchased -> upsell state");
+
+    await addDashboard(offices.get(1)!);
+    assert.equal(dashboardActive(offices.get(1)!), true, "purchased -> dashboard active state");
+    assert.deepEqual(calls[0], ["subscriptionItems.create", DASH_OFFICE, 1], "billed at the Office-tier dashboard price");
+
+    await removeDashboard(offices.get(1)!);
+    assert.equal(dashboardActive(offices.get(1)!), false, "removed -> back to upsell state");
+  });
 });
 
 describe("handleStripeEvent", () => {

@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -162,6 +162,10 @@ export interface IStorage {
   updateOfficeSetupToken(id: number, patch: Partial<InsertOfficeSetupToken>): Promise<OfficeSetupToken | undefined>;
   createPaidOfficeSignup(signup: InsertPaidOfficeSignup): Promise<PaidOfficeSignup>;
   listPaidOfficeSignups(): Promise<PaidOfficeSignup[]>;
+  getOfficeSignupByEmail(email: string): Promise<OfficeSignup | undefined>;
+  getOfficeSignup(id: number): Promise<OfficeSignup | undefined>;
+  createOfficeSignup(signup: InsertOfficeSignup): Promise<OfficeSignup>;
+  updateOfficeSignup(id: number, patch: Partial<InsertOfficeSignup>): Promise<OfficeSignup | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -686,6 +690,26 @@ export class DatabaseStorage implements IStorage {
 
   async listPaidOfficeSignups(): Promise<PaidOfficeSignup[]> {
     return db.select().from(paidOfficeSignups).orderBy(desc(paidOfficeSignups.id));
+  }
+
+  async getOfficeSignupByEmail(email: string): Promise<OfficeSignup | undefined> {
+    const rows = await db.select().from(officeSignups).where(eq(officeSignups.email, email));
+    return rows[0];
+  }
+
+  async getOfficeSignup(id: number): Promise<OfficeSignup | undefined> {
+    const rows = await db.select().from(officeSignups).where(eq(officeSignups.id, id));
+    return rows[0];
+  }
+
+  async createOfficeSignup(signup: InsertOfficeSignup): Promise<OfficeSignup> {
+    const rows = await db.insert(officeSignups).values(signup).returning();
+    return rows[0];
+  }
+
+  async updateOfficeSignup(id: number, patch: Partial<InsertOfficeSignup>): Promise<OfficeSignup | undefined> {
+    const rows = await db.update(officeSignups).set(patch).where(eq(officeSignups.id, id)).returning();
+    return rows[0];
   }
 }
 

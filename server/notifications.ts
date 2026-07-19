@@ -334,6 +334,48 @@ export async function sendPaidCheckoutAdminNotification(details: PaidOfficeDetai
   }
 }
 
+// Sends the manager signup's 6-digit verification code (step 2) through the SAME
+// Resend transport as every other email here. The code IS the gate to setting up
+// an office, so this returns whether the send succeeded so the caller can
+// surface a retry on false. Never throws.
+export async function sendSignupVerificationCode(email: string, code: string): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[notifications] RESEND_API_KEY is not set; cannot send signup verification code.");
+    return false;
+  }
+  try {
+    const { buildSignupVerificationEmail } = await import("./signup");
+    const { subject, html } = buildSignupVerificationEmail(code);
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: INBOUND_FROM_ADDRESS, to: [email], subject, html }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} for signup code to ${email}: ${detail}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to send signup verification code to ${email}:`, err);
+    return false;
+  }
+}
+
+// Sends one consultant enrollment email (step 6) through the friendly hello@
+// mailbox, same transport as the buyer welcome. Best-effort: returns whether the
+// send succeeded so the caller can report a per-recipient failure. Never throws.
+export async function sendConsultantEnrollmentEmail(
+  to: string,
+  details: { officeName: string; inviteCode: string; activateUrl: string },
+): Promise<boolean> {
+  const { buildConsultantEnrollmentEmail } = await import("./signup");
+  const { subject, html, text } = buildConsultantEnrollmentEmail(details);
+  return sendInboundEmail(to, subject, html, text);
+}
+
 // Sends a public demo's 6-digit verification code to the visitor's own email,
 // reusing the exact same Resend transport as sendLeadNotification. Unlike the
 // best-effort lead email, the code IS the demo's auth, so this returns whether

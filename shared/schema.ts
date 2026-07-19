@@ -631,6 +631,42 @@ export const insertPaidOfficeSignupSchema = createInsertSchema(paidOfficeSignups
 export type InsertPaidOfficeSignup = z.infer<typeof insertPaidOfficeSignupSchema>;
 export type PaidOfficeSignup = typeof paidOfficeSignups.$inferSelect;
 
+// A self-serve manager/office signup in progress, keyed by email. One row per
+// email captures the email-verification state (6-digit code, same pattern as
+// demo_signups) AND the office-setup inputs the buyer chooses before paying
+// (manager name, chosen login username/password, seat count, dashboard yes/no).
+// It is the durable bridge from "email captured" (step 1) through "verified"
+// (step 2) and "office details entered" (step 4 checkout) to the Stripe webhook
+// that provisions the real office + manager user (step 5). The row id is passed
+// to Stripe as checkout metadata (signupId) so the payment webhook (the SOLE
+// activation trigger) can read the manager's chosen credentials and create the
+// login WITHOUT ever putting the password into Stripe. Credentials never leave
+// our database. Separate from demo_signups (anonymous free-demo visitors) and
+// from paid_office_signups (the post-payment admin Vault record).
+export const officeSignups = pgTable("office_signups", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(), // captured first (step 1), the verified contact
+  company: text("company").notNull(), // company / office name captured first (step 1)
+  code: text("code"), // current 6-digit verification code (nullable once consumed/expired)
+  codeExpiresAt: text("code_expires_at"), // ISO timestamp; code invalid past this
+  verified: boolean("verified").notNull().default(false), // flips true once a code is confirmed (step 2)
+  // Office-setup inputs, filled in when the verified buyer starts checkout (step 4).
+  // Null until then. The password is plaintext to match the existing /api/login
+  // credential model; it is stored here (never in Stripe) and consumed once by the
+  // provisioning webhook to create the manager user.
+  managerName: text("manager_name"),
+  username: text("username"),
+  password: text("password"),
+  seatCount: integer("seat_count"),
+  dashboard: boolean("dashboard").notNull().default(false),
+  createdAt: text("created_at").notNull(),
+  lastSentAt: text("last_sent_at"), // ISO timestamp of the most recent code email (resend cadence)
+});
+
+export const insertOfficeSignupSchema = createInsertSchema(officeSignups).omit({ id: true });
+export type InsertOfficeSignup = z.infer<typeof insertOfficeSignupSchema>;
+export type OfficeSignup = typeof officeSignups.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request

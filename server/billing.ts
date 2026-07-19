@@ -121,12 +121,13 @@ export interface SelfServeCheckoutInput {
   email?: string; // prospect email, prefills the Stripe customer + receipt
   setupToken?: string; // originating office_setup_token, marked used on provision
   contactId?: number; // originating lead, if any
+  signupId?: number; // originating office_signups row; provisioning reads it to create the manager user
 }
 
 export async function createSelfServeCheckoutSession(
   input: SelfServeCheckoutInput,
 ): Promise<string> {
-  const { officeName, seatCount, includeDashboard, email, setupToken, contactId } = input;
+  const { officeName, seatCount, includeDashboard, email, setupToken, contactId, signupId } = input;
   if (isEnterpriseSeatCount(seatCount)) {
     throw new EnterpriseQuoteRequiredError(seatCount);
   }
@@ -154,6 +155,9 @@ export async function createSelfServeCheckoutSession(
   if (email) provisioning.email = email;
   if (setupToken) provisioning.setupToken = setupToken;
   if (contactId != null) provisioning.contactId = String(contactId);
+  // Only the signup row ID rides on Stripe metadata, never the manager's chosen
+  // password. Provisioning reads the row from our DB to create the manager login.
+  if (signupId != null) provisioning.signupId = String(signupId);
 
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
@@ -352,6 +356,29 @@ export async function provisionSelfServeOffice(
   // Map seat/dashboard line items back onto the office (item ids + seat count).
   await syncOfficeFromSubscription(office, subscription);
 
+  // Create the manager login from the originating signup row (item 5). The row
+  // holds the buyer's chosen credentials (never sent to Stripe); we read it back
+  // here (inside the payment webhook) so the office and its manager only ever
+  // come into being on a confirmed payment. Skipped when no signupId is present
+  // (e.g. the older welcome-email setup-token flow, which has no pre-chosen login).
+  const signupId = meta.signupId ? Number.parseInt(meta.signupId, 10) : NaN;
+  if (Number.isInteger(signupId)) {
+    const signup = await storage.getOfficeSignup(signupId);
+    if (signup && signup.username && signup.password) {
+      const username = await uniqueUsername(signup.username);
+      await storage.createUser({
+        officeId: office.id,
+        username,
+        password: signup.password,
+        role: "manager",
+        displayName: (signup.managerName ?? "").trim() || username,
+        currentLevel: "beginner",
+      });
+      // Consume the credentials so the plaintext password does not linger.
+      await storage.updateOfficeSignup(signup.id, { password: null, code: null, codeExpiresAt: null });
+    }
+  }
+
   // Mark the originating setup token used so its link cannot be reused.
   if (meta.setupToken) {
     const token = await storage.getOfficeSetupToken(meta.setupToken);
@@ -400,6 +427,19 @@ async function uniqueOfficeName(name: string): Promise<string> {
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
   return `${name} (${Date.now()})`;
+}
+
+// The username is globally unique. A buyer's chosen manager username may already
+// be taken by another office's user, so append a numeric suffix until it is free
+// rather than failing the whole (already-paid) provisioning.
+async function uniqueUsername(desired: string): Promise<string> {
+  const base = desired.trim();
+  if (!(await storage.getUserByUsername(base))) return base;
+  for (let n = 2; n < 10000; n++) {
+    const candidate = `${base}${n}`;
+    if (!(await storage.getUserByUsername(candidate))) return candidate;
+  }
+  return `${base}${Date.now()}`;
 }
 
 // Handle a verified Stripe event. Idempotent: a redelivered event whose id we've
