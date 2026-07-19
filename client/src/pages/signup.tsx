@@ -281,6 +281,11 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [seatCount, setSeatCount] = useState(1);
+  // Raw text backing the seat count input. Kept separate from the numeric
+  // seatCount so the field can sit empty while the user is retyping (e.g.
+  // clearing "1" before typing "7") without snapping back to 1 on every
+  // keystroke.
+  const [seatCountText, setSeatCountText] = useState("1");
   const [includeDashboard, setIncludeDashboard] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -371,8 +376,24 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
               id="seatCount"
               type="number"
               min={1}
-              value={seatCount}
-              onChange={(e) => setSeatCount(Math.max(1, Number(e.target.value) || 1))}
+              value={seatCountText}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setSeatCountText(raw);
+                if (raw.trim() === "") return;
+                const parsed = Number(raw);
+                if (Number.isFinite(parsed)) {
+                  setSeatCount(Math.max(1, parsed));
+                }
+              }}
+              onBlur={() => {
+                // If the user leaves the field empty or invalid, snap back to
+                // a valid number both in the numeric state and what's shown.
+                const parsed = Number(seatCountText);
+                const next = seatCountText.trim() === "" || !Number.isFinite(parsed) ? 1 : Math.max(1, parsed);
+                setSeatCount(next);
+                setSeatCountText(String(next));
+              }}
               required
               data-testid="input-seat-count"
             />
