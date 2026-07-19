@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
-import { LogOut, ArrowLeft, ClipboardCheck } from "lucide-react";
+import { LogOut, ArrowLeft, ClipboardCheck, Award } from "lucide-react";
 
 export function AppShell({
   title,
@@ -34,6 +34,20 @@ export function AppShell({
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            {/* Persistent path into SOLVE Academy, reachable from day one at any
+                level (not gated behind Advanced) so every consultant can find
+                the certification path from their first session. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/academy")}
+              className="gap-1.5"
+              style={{ borderColor: "#0A1A30", color: "#0A1A30" }}
+              data-testid="link-nav-academy"
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Academy</span>
+            </Button>
             <Button
               variant="outline"
               size="sm"
