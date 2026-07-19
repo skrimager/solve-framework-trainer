@@ -74,9 +74,9 @@ export default function Home() {
                 data-testid={opt.testId}
               >
                 <opt.icon className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} />
-                <span className="flex flex-col">
-                  <span className="font-semibold">{opt.title}</span>
-                  <span className="text-xs text-muted-foreground">{opt.description}</span>
+                <span className="flex flex-col min-w-0 flex-1">
+                  <span className="font-semibold whitespace-normal break-words">{opt.title}</span>
+                  <span className="text-xs text-muted-foreground whitespace-normal break-words">{opt.description}</span>
                 </span>
               </Button>
             ))}
