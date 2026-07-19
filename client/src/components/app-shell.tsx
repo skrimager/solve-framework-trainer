@@ -3,6 +3,7 @@ import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { LogOut, ArrowLeft, ClipboardCheck, Award } from "lucide-react";
+import solveLogo from "@assets/solve-framework-logo.png";
 
 export function AppShell({
   title,
@@ -22,12 +23,7 @@ export function AppShell({
       <header className="border-b bg-card shrink-0">
         <div className={`max-w-5xl mx-auto px-4 sm:px-6 flex items-center justify-between gap-4 ${compact ? "py-2" : "py-4"}`}>
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: "#0A1A30" }} aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <path d="M4 16c0-2 1.5-3 3-3s2 1 3 1 1.5-1 3-1 3 1 3 3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                <circle cx="15.5" cy="8" r="3.25" fill="#E06D00" />
-              </svg>
-            </div>
+            <img src={solveLogo} alt="The SOLVE Framework" className="h-8 w-auto shrink-0" data-testid="img-solve-logo" />
             <div className="min-w-0">
               <h1 className="text-sm font-semibold leading-tight truncate" data-testid="text-page-title">{title}</h1>
               {!compact && <p className="text-xs text-muted-foreground truncate">SOLVE Platform™ - discovery training</p>}
