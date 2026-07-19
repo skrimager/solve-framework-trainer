@@ -14,7 +14,7 @@ async function request(method: string, url: string, body?: unknown): Promise<Res
   return res;
 }
 
-export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo" | "opportunities";
+export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo" | "opportunities" | "paid-signups";
 
 // --- Opportunity Intelligence ---
 export type ProspectSearchRow = {
@@ -118,6 +118,16 @@ export type ContactPatch = {
   note?: string;
 };
 
+export type PaidSignupRow = {
+  id: number;
+  officeName: string;
+  seatCount: number;
+  dashboard: string;
+  stripeSubscriptionId: string;
+  contactEmail: string;
+  createdAt: string;
+};
+
 export const adminApi = {
   async login(username: string, password: string): Promise<void> {
     const res = await request("POST", "/api/admin/login", { username, password });
@@ -204,6 +214,24 @@ export const adminApi = {
     const res = await request("GET", "/api/admin/opportunities/activity");
     if (!res.ok) throw new Error(`${res.status}`);
     return res.json();
+  },
+
+  // --- Self-serve office setup (items 6 & 7) ---
+  // Manual activation of a free-path (pending) office. This is the only path that
+  // brings a /api/register/manager office live.
+  async activateOffice(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/offices/${id}/activate`);
+    if (!res.ok) throw new Error("activate failed");
+  },
+
+  async listPaidSignups(): Promise<{ rows: PaidSignupRow[] }> {
+    const res = await request("GET", "/api/admin/paid-signups");
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
+  },
+
+  async downloadPaidSignupsCsv(): Promise<void> {
+    await downloadBlob("/api/admin/paid-signups?format=csv", "paid-signups.csv");
   },
 };
 

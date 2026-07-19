@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   sendLeadNotification,
   buildLeadEmail,
+  buildPaidWelcomeEmail,
   __setFetchForTests,
 } from "./notifications";
 import type { Lead } from "@shared/schema";
@@ -66,6 +67,47 @@ describe("buildLeadEmail", () => {
     const { html } = buildLeadEmail(makeLead({ message: "<script>x</script>" }));
     assert.doesNotMatch(html, /<script>/);
     assert.match(html, /&lt;script&gt;/);
+  });
+});
+
+describe("buildPaidWelcomeEmail", () => {
+  const details = {
+    officeName: "Riverside Realty",
+    inviteCode: "RIVER-1234",
+    seatCount: 8,
+    dashboard: true,
+  };
+
+  test("renders the primary CTA as a table-based, inline-styled button", () => {
+    const { html } = buildPaidWelcomeEmail(details);
+    // Table-based layout with a single anchor styled as a button.
+    assert.match(html, /<table role="presentation"/);
+    assert.match(html, /Open your Command Center<\/a>/);
+    // Inline styles only (no external classes) and brand colors.
+    assert.match(html, /display:inline-block/);
+    assert.match(html, /background-color:#E06D00/);
+    assert.match(html, /border:1px solid #0A1A30/);
+    // The CTA anchor points at the manager login and is not a bare text link.
+    assert.match(html, /href="[^"]*\/#\/manager-login"/);
+    assert.doesNotMatch(html, /<button/);
+  });
+
+  test("never uses the reserved admin lime color", () => {
+    const { html } = buildPaidWelcomeEmail(details);
+    assert.doesNotMatch(html, /C6F135/i);
+  });
+
+  test("plain-text version keeps a spelled-out Command Center link", () => {
+    const { text } = buildPaidWelcomeEmail(details);
+    assert.match(text, /Open your Command Center: http[^\s]*\/#\/manager-login/);
+    assert.doesNotMatch(text, /__CTA_BUTTON__/);
+  });
+
+  test("includes the invite code and does not use 'train' as a verb", () => {
+    const { html, text } = buildPaidWelcomeEmail(details);
+    assert.match(html, /RIVER-1234/);
+    assert.match(text, /practicing/);
+    assert.doesNotMatch(text, /\btrain(ing|ed|s)?\b/i);
   });
 });
 

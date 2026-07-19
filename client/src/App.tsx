@@ -1,5 +1,5 @@
 import { Switch, Route, Router, Redirect } from "wouter";
-import { useHashLocation } from "wouter/use-hash-location";
+import { useHashLocation } from "@/lib/hashLocation";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -18,6 +18,7 @@ import AdminLogin from "@/pages/admin-login";
 import AdminDashboard from "@/pages/admin-dashboard";
 import Demo from "@/pages/demo";
 import DemoDashboard from "@/pages/dashboard-demo";
+import OfficeSetup, { OfficeSetupComplete } from "@/pages/office-setup";
 import { AuthProvider, useAuth } from "@/lib/auth";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -45,6 +46,11 @@ function AppRouter() {
           endpoint; intentionally outside RequireAuth and with no path into the
           authenticated app. */}
       <Route path="/dashboard-demo" component={DemoDashboard} />
+      {/* Self-serve office setup from the welcome-email link: public, no auth. The
+          completion route must precede the token route so ":token" does not swallow
+          "complete". */}
+      <Route path="/office-setup/complete" component={OfficeSetupComplete} />
+      <Route path="/office-setup/:token" component={OfficeSetup} />
       <Route path="/scenarios">
         <RequireAuth>
           <Scenarios />

@@ -1,5 +1,6 @@
 import type { Lead } from "@shared/schema";
 import { buildVerificationEmail } from "./demo";
+import { APP_URL } from "./stripe";
 
 // Lead-notification emails via the Resend HTTP API. No SDK dependency: we POST
 // directly to https://api.resend.com/emails with a plain fetch.
@@ -58,6 +59,25 @@ function escapeHtml(value: string): string {
 
 function labelFor(key: string): string {
   return FIELD_LABELS[key] ?? key;
+}
+
+// Table-based, fully inline-styled CTA button for transactional emails. Email
+// clients strip <style> blocks and mishandle <button>, so the button is an
+// anchor styled inline inside a single-cell table for reliable rendering across
+// Gmail, Outlook, and Apple Mail. Brand colors: orange fill with a navy border
+// and white label. Lime is intentionally not used here (reserved for admin).
+function renderEmailButton(label: string, url: string): string {
+  const safeLabel = escapeHtml(label);
+  const safeUrl = escapeHtml(url);
+  return (
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;border-collapse:separate;">` +
+    `<tr><td style="border-radius:6px;background-color:#E06D00;">` +
+    `<a href="${safeUrl}" target="_blank" rel="noopener" ` +
+    `style="display:inline-block;padding:12px 28px;font-family:Arial,Helvetica,sans-serif;` +
+    `font-size:15px;font-weight:bold;line-height:1;color:#ffffff;text-decoration:none;` +
+    `border:1px solid #0A1A30;border-radius:6px;">${safeLabel}</a>` +
+    `</td></tr></table>`
+  );
 }
 
 export function buildLeadEmail(lead: Lead): { subject: string; html: string } {
@@ -197,6 +217,120 @@ export async function sendInboundEmail(
   } catch (err) {
     console.warn(`[notifications] Failed to send inbound lead email to ${to}:`, err);
     return false;
+  }
+}
+
+// --- Self-serve paid signup emails (items 5 and 7) --------------------------
+
+export interface PaidOfficeDetails {
+  officeName: string;
+  inviteCode: string;
+  seatCount: number;
+  dashboard: boolean;
+  stripeSubscriptionId?: string | null;
+  contactEmail?: string | null;
+}
+
+// Buyer-facing access email sent right after a paid checkout provisions the office
+// (item 5): invite code, how the team joins, the Command Center link, and a short
+// first-week plan. Personal "from hello@" note, same friendly transport as the
+// welcome drip. Plain-text is authored and rendered to matching HTML.
+export function buildPaidWelcomeEmail(details: PaidOfficeDetails): { subject: string; html: string; text: string } {
+  const commandCenterUrl = `${APP_URL}/#/manager-login`;
+  const subject = `Your SOLVE Framework office is ready: ${details.officeName}`;
+  // Sentinel marks where the primary call-to-action button is injected in the
+  // HTML render. The plain-text version keeps a spelled-out link on its own line
+  // so text-only clients still get a usable URL.
+  const ctaMarker = "__CTA_BUTTON__";
+  const lines = [
+    `Welcome to SOLVE Framework, and thanks for setting up ${details.officeName}.`,
+    "",
+    `Your office is active. Here is everything you need to get your team practicing.`,
+    "",
+    `Team invite code: ${details.inviteCode}`,
+    "",
+    "How your consultants join:",
+    `1. Send them the Command Center link: ${commandCenterUrl}`,
+    `2. Have each consultant register and enter the invite code ${details.inviteCode}.`,
+    "3. They will land in their practice dashboard, ready for their first discovery session.",
+    "",
+    "Your first week:",
+    "Day 1: Log in to the Command Center and invite your consultants.",
+    "Day 2: Have each consultant run their first practice discovery conversation.",
+    "Day 3: Review scores together and pick one skill to focus on.",
+    "Day 5: Run a second round and compare progress in the Command Center.",
+    "",
+    ctaMarker,
+    "",
+    "If you have any questions, just reply to this email.",
+  ];
+  const text = lines
+    .map((line) => (line === ctaMarker ? `Open your Command Center: ${commandCenterUrl}` : line))
+    .join("\n");
+
+  const htmlBody = lines
+    .map((line) => {
+      if (line === "") return "<br>";
+      if (line === ctaMarker) return renderEmailButton("Open your Command Center", commandCenterUrl);
+      const escaped = escapeHtml(line).replace(
+        /(https?:\/\/[^\s]+)/g,
+        (url) => `<a href="${url}">${url}</a>`,
+      );
+      return `<p style="margin:0 0 8px;">${escaped}</p>`;
+    })
+    .join("");
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111;">${htmlBody}</div>`;
+
+  return { subject, html, text };
+}
+
+export async function sendPaidWelcomeEmail(to: string, details: PaidOfficeDetails): Promise<boolean> {
+  const { subject, html, text } = buildPaidWelcomeEmail(details);
+  return sendInboundEmail(to, subject, html, text);
+}
+
+// Admin notification of a completed paid checkout (item 7). Goes to the same
+// hello@ recipient as lead notifications, via the notifications@ system address.
+export async function sendPaidCheckoutAdminNotification(details: PaidOfficeDetails): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[notifications] RESEND_API_KEY is not set; skipping paid checkout admin notification.");
+    return;
+  }
+  try {
+    const rows: Array<[string, string]> = [
+      ["Office", details.officeName],
+      ["Consultant seats", String(details.seatCount)],
+      ["Manager Dashboard", details.dashboard ? "Yes" : "No"],
+      ["Stripe subscription", details.stripeSubscriptionId ?? "n/a"],
+      ["Buyer email", details.contactEmail ?? "n/a"],
+    ];
+    const tableRows = rows
+      .map(
+        ([label, value]) =>
+          `<tr><td style="padding:4px 12px 4px 0;font-weight:bold;">${escapeHtml(label)}</td><td style="padding:4px 0;">${escapeHtml(value)}</td></tr>`,
+      )
+      .join("");
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111;">
+  <h2 style="margin:0 0 12px;">New paid office signup</h2>
+  <table style="border-collapse:collapse;">${tableRows}</table>
+</div>`;
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: FROM_ADDRESS,
+        to: [TO_ADDRESS],
+        subject: `New paid office signup: ${details.officeName}`,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} for paid signup notice: ${detail}`);
+    }
+  } catch (err) {
+    console.warn("[notifications] Failed to send paid checkout admin notification:", err);
   }
 }
 

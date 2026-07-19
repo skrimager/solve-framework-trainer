@@ -259,12 +259,18 @@ function salutation(name: string | null | undefined): string {
   return first ? `Hi ${first},` : "Hi there,";
 }
 
-export function buildWelcomeEmailBody(name: string | null | undefined): string {
+export function buildWelcomeEmailBody(name: string | null | undefined, setupUrl?: string): string {
+  // Optional self-serve office-setup CTA (item 2). Added without altering any of the
+  // existing welcome copy; when no URL is provided the body is byte-identical to the
+  // original so nothing downstream (drip, tests) changes.
+  const setupCta = setupUrl
+    ? `\n\nReady to set up your whole office?\n\nSet Up Your Office: ${setupUrl}`
+    : "";
   return `${salutation(name)}
 
 This is Wade.
 
-First, thank you for giving the SOLVE Framework a chance.
+First, thank you for giving the SOLVE Framework a chance.${setupCta}
 
 Whether you're in sales, leadership, consulting, customer service, healthcare, real estate, financial services, or another profession entirely, my goal is the same:
 
@@ -366,9 +372,10 @@ export interface InboundDripStep {
 }
 
 // The full three-step inbound sequence for one contact, rendered with their name.
-export function buildInboundDripSequence(name: string | null | undefined): InboundDripStep[] {
+// An optional setupUrl adds the "Set Up Your Office" CTA to the day-0 welcome only.
+export function buildInboundDripSequence(name: string | null | undefined, setupUrl?: string): InboundDripStep[] {
   return [
-    { step: 1, emailSubject: WELCOME_SUBJECT, emailBody: buildWelcomeEmailBody(name) },
+    { step: 1, emailSubject: WELCOME_SUBJECT, emailBody: buildWelcomeEmailBody(name, setupUrl) },
     { step: 2, emailSubject: INBOUND_DAY3_SUBJECT, emailBody: buildInboundDay3Body(name) },
     { step: 3, emailSubject: INBOUND_DAY7_SUBJECT, emailBody: buildInboundDay7Body(name) },
   ];
@@ -407,12 +414,13 @@ export interface InboundEnrollDeps {
 export async function enrollInboundLead(
   deps: InboundEnrollDeps,
   contact: Pick<Contact, "id" | "name" | "email">,
+  setupUrl?: string,
 ): Promise<void> {
   try {
     const now = deps.now ? deps.now() : new Date();
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
-    const sequence = buildInboundDripSequence(contact.name);
+    const sequence = buildInboundDripSequence(contact.name, setupUrl);
 
     for (const step of sequence) {
       if (step.step === 1) {

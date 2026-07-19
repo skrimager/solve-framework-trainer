@@ -129,6 +129,7 @@ export type SalesRow = {
   officeId: number;
   officeName: string;
   subscriptionStatus: string;
+  status: string; // provisioning status: 'active' | 'pending'
   active: boolean;
   seatCount: number;
   seatsMrr: number;
@@ -150,6 +151,7 @@ export function computeSalesRow(office: Office): SalesRow {
     officeId: office.id,
     officeName: office.name,
     subscriptionStatus: office.subscriptionStatus,
+    status: office.status,
     active,
     seatCount,
     seatsMrr: seats,

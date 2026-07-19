@@ -141,6 +141,13 @@
       "when": 1783106662000,
       "tag": "0019_real_conversations",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1783106662500,
+      "tag": "0020_self_serve_signup",
+      "breakpoints": true
     }
   ]
 }
