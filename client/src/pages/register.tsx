@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft, Check, Copy } from "lucide-react";
+import solveLogo from "@assets/solve-framework-logo.png";
 
 type Path = "choose" | "manager" | "consultant";
 
@@ -18,13 +19,12 @@ export default function Register() {
     <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-10">
       <div className="w-full max-w-sm mx-auto space-y-6">
         <div className="text-center space-y-4">
-          <div
-            className="mx-auto w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg"
-            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(224,109,0,0.35)" }}
-            aria-hidden="true"
-          >
-            <SolveMark />
-          </div>
+          <img
+            src={solveLogo}
+            alt="The SOLVE Framework"
+            className="mx-auto h-20 w-auto max-w-full"
+            data-testid="img-solve-logo"
+          />
           <h1 className="text-2xl font-bold tracking-tight" data-testid="text-register-title">Create your account</h1>
           <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
         </div>
@@ -302,19 +302,4 @@ function humanError(err: any): string {
     }
   }
   return "Please check your details and try again.";
-}
-
-function SolveMark() {
-  return (
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" aria-label="SOLVE Framework logo">
-      <path
-        d="M4 16c0-2 1.5-3 3-3s2 1 3 1 1.5-1 3-1 3 1 3 3"
-        stroke="white"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="15.5" cy="8" r="3.25" fill="#E06D00" />
-    </svg>
-  );
 }

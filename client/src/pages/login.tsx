@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
 import { postLoginPath, wrongCredentialTypeRedirect } from "@/lib/routes";
 import trainerPhoto from "@assets/trainer-photo-1.png";
+import solveLogo from "@assets/solve-framework-logo.png";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -72,13 +73,12 @@ export default function Login() {
         </div>
         <div className="w-full max-w-sm mx-auto space-y-6">
         <div className="text-center space-y-4">
-          <div
-            className="mx-auto w-24 h-24 rounded-3xl flex items-center justify-center shadow-lg"
-            style={{ backgroundColor: "#0A1A30", boxShadow: "0 8px 30px rgba(224,109,0,0.35)" }}
-            aria-hidden="true"
-          >
-            <SolveMark />
-          </div>
+          <img
+            src={solveLogo}
+            alt="The SOLVE Framework"
+            className="mx-auto h-24 w-auto max-w-full"
+            data-testid="img-solve-logo"
+          />
           <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">Consultant Practice Login</h1>
           <p className="text-sm text-muted-foreground">Consultant access to SOLVE Platform™ discovery practice.</p>
         </div>
@@ -178,20 +178,5 @@ export default function Login() {
         </div>
       </div>
     </div>
-  );
-}
-
-function SolveMark() {
-  return (
-    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" aria-label="SOLVE Framework logo">
-      <path
-        d="M4 16c0-2 1.5-3 3-3s2 1 3 1 1.5-1 3-1 3 1 3 3"
-        stroke="white"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="15.5" cy="8" r="3.25" fill="#E06D00" />
-    </svg>
   );
 }
