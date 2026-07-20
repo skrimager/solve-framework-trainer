@@ -8,6 +8,7 @@ import { registerRealConversationRoutes, withStalledStep } from "./routes";
 import {
   parsePastedTranscript,
   parseAudioTranscript,
+  detectSuspiciousAudioTranscript,
   stripLeadingTimestamp,
   deriveStalledStep,
   isValidSubmissionType,
@@ -450,6 +451,75 @@ describe("parseAudioTranscript (Phase 2)", () => {
   });
 });
 
+describe("detectSuspiciousAudioTranscript (Phase 2 misattribution guardrail)", () => {
+  test("clean, well-separated, similarly-sized turns are NOT suspicious", () => {
+    const result = detectSuspiciousAudioTranscript([
+      { text: "Hi, I'm just looking at options today.", start: 0, end: 3 },
+      { text: "Great, what brought you in to see us?", start: 3.6, end: 6 },
+      { text: "We're outgrowing our current place fast.", start: 6.7, end: 9 },
+      { text: "Tell me more about what changed lately.", start: 9.8, end: 12 },
+    ]);
+    assert.equal(result.suspicious, false);
+    assert.deepEqual(result.reasons, []);
+  });
+
+  test("a short gap between consecutive segments flags a likely split turn", () => {
+    // The gap between turns 2 and 3 is 0.1s (< 0.3s), i.e. one utterance Whisper
+    // split, which shifts every later role assignment.
+    const result = detectSuspiciousAudioTranscript([
+      { text: "Hi there, thanks for coming in.", start: 0, end: 3 },
+      { text: "So the reason I called was about", start: 3.5, end: 6 },
+      { text: "upgrading our current setup soon.", start: 6.1, end: 8 },
+      { text: "Got it, tell me what changed.", start: 8.6, end: 11 },
+    ]);
+    assert.equal(result.suspicious, true);
+    assert.ok(result.reasons.some((r) => /split/i.test(r)));
+  });
+
+  test("two or fewer turns is suspicious (too little to attribute speakers)", () => {
+    const result = detectSuspiciousAudioTranscript([
+      { text: "Hi, I'm just looking.", start: 0, end: 2 },
+      { text: "Happy to help, what matters most to you?", start: 2.8, end: 5 },
+    ]);
+    assert.equal(result.suspicious, true);
+    assert.ok(result.reasons.some((r) => /turn/i.test(r)));
+  });
+
+  test("an implausibly long turn relative to the rest is suspicious (merged speakers)", () => {
+    // No timings, and four turns, so only the long-turn heuristic can fire. The
+    // long turn is well over 4x the median turn length.
+    const result = detectSuspiciousAudioTranscript([
+      { text: "Hi there." },
+      { text: "Good morning." },
+      {
+        text:
+          "So we have been thinking about this for a while and honestly the current " +
+          "system keeps failing and it is costing us real money every single week and " +
+          "we really need something that just works so tell me what you would recommend " +
+          "for a place our size because we cannot keep doing this the way we have been.",
+      },
+      { text: "Understood, thanks." },
+    ]);
+    assert.equal(result.suspicious, true);
+    assert.ok(result.reasons.some((r) => /longer|merged/i.test(r)));
+  });
+
+  test("missing segment timings skip the gap check without crashing", () => {
+    // Three similarly-sized turns, no start/end: nothing to flag.
+    const result = detectSuspiciousAudioTranscript([
+      { text: "What brought you in today?" },
+      { text: "I need help choosing an option." },
+      { text: "Let's walk through what matters most." },
+    ]);
+    assert.equal(result.suspicious, false);
+  });
+
+  test("undefined/empty segments are treated as too few turns, not an error", () => {
+    assert.equal(detectSuspiciousAudioTranscript(undefined).suspicious, true);
+    assert.equal(detectSuspiciousAudioTranscript([]).suspicious, true);
+  });
+});
+
 // ===========================================================================
 // Routes: bare express app, injected scorer, stubbed storage
 // ===========================================================================
@@ -814,6 +884,55 @@ describe("real conversation audio route", () => {
     assert.equal(res.status, 400);
     assert.equal(created.length, 0);
     longServer.close();
+  });
+
+  test("MANUAL REVIEW: suspicious segment timing stores the row, flags it, and skips scoring", async () => {
+    // A short (0.1s) gap between segments 2 and 3 mimics one speaker's turn split
+    // by Whisper, so the guardrail should flag the row instead of auto-scoring it.
+    const suspiciousTranscriber = makeFakeTranscriber({
+      text: "Hi there, thanks for coming in. So the reason I called was about upgrading our setup. Got it, tell me what changed.",
+      duration: 90,
+      segments: [
+        { text: "Hi there, thanks for coming in.", start: 0, end: 3 },
+        { text: "So the reason I called was about", start: 3.5, end: 6 },
+        { text: "upgrading our current setup soon.", start: 6.1, end: 8 },
+        { text: "Got it, tell me what changed.", start: 8.6, end: 11 },
+      ],
+    });
+    const reviewApp = express();
+    reviewApp.use(express.json());
+    registerRealConversationRoutes(reviewApp, {
+      scorer: fakeScorer.scorer,
+      transcriber: suspiciousTranscriber.transcriber,
+    });
+    const reviewServer = reviewApp.listen(0);
+    await new Promise<void>((resolve) => reviewServer.on("listening", () => resolve()));
+    const addr = reviewServer.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const form = new FormData();
+    form.append("userId", "1");
+    form.append("consentAccepted", "true");
+    form.append("audio", new Blob([Buffer.from("x")], { type: "audio/mpeg" }), "call.mp3");
+    const res = await fetch(`http://127.0.0.1:${port}/api/real-conversations/audio`, {
+      method: "POST",
+      body: form,
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+
+    // Row is stored but held for manual review with no score.
+    assert.equal(body.needsManualReview, true);
+    assert.ok(typeof body.flagReasons === "string" && body.flagReasons.length > 0);
+    assert.equal(body.overallScore, null);
+    assert.equal(body.rubricScores, null);
+    assert.equal(body.feedback, null);
+    assert.equal(body.stalledStep, null);
+    assert.equal(body.submissionType, "audio");
+    assert.equal(created.length, 1);
+
+    // The scorer must NOT run for a flagged transcript.
+    assert.equal(fakeScorer.calls.length, 0, "the scorer must be skipped when flagged");
+    reviewServer.close();
   });
 
   test("TRANSCRIPTION FAILURE: a Whisper error returns an error and creates no row", async () => {
