@@ -678,8 +678,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createScoreCacheEntry(entry: InsertScoreCache): Promise<ScoreCache> {
-    const rows = await db.insert(scoreCache).values(entry).returning();
-    return rows[0];
+    // onConflictDoNothing guards against a rare race: two identical
+    // never-before-seen submissions computing their score concurrently would
+    // otherwise throw a unique-constraint error on the second insert. On a
+    // conflict, fall through and read back whichever row won the race so the
+    // caller still gets a valid ScoreCache row.
+    const rows = await db.insert(scoreCache).values(entry).onConflictDoNothing().returning();
+    if (rows[0]) return rows[0];
+    const existing = await this.getScoreCacheEntry(entry.contentHash);
+    if (existing) return existing;
+    throw new Error("Failed to create or read back score cache entry");
   }
 
   // --- Self-serve office setup ---
