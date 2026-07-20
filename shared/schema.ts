@@ -667,6 +667,32 @@ export const insertOfficeSignupSchema = createInsertSchema(officeSignups).omit({
 export type InsertOfficeSignup = z.infer<typeof insertOfficeSignupSchema>;
 export type OfficeSignup = typeof officeSignups.$inferSelect;
 
+// Deterministic result cache for Real Conversation Scoring. OpenAI's Responses
+// API has no seed parameter and does not guarantee identical output even at
+// temperature 0, so the same transcript can score differently on repeat runs.
+// We guarantee determinism by construction: a sha256 hash over everything that
+// affects the score (transcript role+content in order, difficulty, track,
+// transactionType) keys a stored result. Identical input -> identical stored
+// output, with no API call on a hit. `rubric` is JSON text (same convention as
+// sessions.rubricScores). `transcript`/`transactionType` are kept for
+// debuggability; they are not read on lookup (the hash is the key).
+export const scoreCache = pgTable("score_cache", {
+  id: serial("id").primaryKey(),
+  contentHash: text("content_hash").notNull().unique(), // sha256 over normalized transcript + params
+  rubric: text("rubric").notNull(), // JSON: RubricScores | LeadershipRubricScores
+  feedback: text("feedback").notNull(),
+  overall: integer("overall").notNull(),
+  track: text("track").notNull(),
+  difficulty: text("difficulty").notNull(),
+  transactionType: text("transaction_type"), // real-estate txn type, if any (part of the hash input)
+  transcript: text("transcript").notNull(), // JSON of the normalized {role, content}[] that was scored
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertScoreCacheSchema = createInsertSchema(scoreCache).omit({ id: true });
+export type InsertScoreCache = z.infer<typeof insertScoreCacheSchema>;
+export type ScoreCache = typeof scoreCache.$inferSelect;
+
 // Rubric scores shape (stored as JSON text in sessions.rubricScores)
 export const rubricScoresSchema = z.object({
   needsDiscovery: z.number(), // "drill vs. hole" — uncovering real need vs. stated request
