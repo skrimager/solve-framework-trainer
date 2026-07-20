@@ -5,8 +5,12 @@ import {
   buildCustomerReplyPrompt,
   buildCustomerReplyStablePrefix,
   CONVERSATION_REALISM_RULES,
+  computeScoreCacheHash,
+  scoreTranscript,
+  type ScoreResponder,
+  type ScoreCacheStore,
 } from "./llm";
-import type { TranscriptMessage } from "@shared/schema";
+import type { TranscriptMessage, ScoreCache, InsertScoreCache } from "@shared/schema";
 
 const PERSONA = "You are Denise, 52, looking at a home in a manufactured-housing community.";
 
@@ -773,5 +777,177 @@ describe("DIFFICULTY_BEHAVIOR progression (prompt construction)", () => {
     const p = buildCustomerReplyStablePrefix(PERSONA, "advanced").toLowerCase();
     assert.ok(p.includes("skeptical"));
     assert.ok(p.includes("hidden"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scoreTranscript deterministic content-hash cache.
+//
+// OpenAI's Responses API has no seed parameter and does not guarantee identical
+// output even at temperature 0, so identical input can score differently on a
+// repeat call. scoreTranscript makes scoring deterministic by construction: it
+// hashes the inputs and, on a hit, returns the stored result WITHOUT calling the
+// API. These tests inject a spy responder (to count API calls) and an in-memory
+// cache (so no Postgres is touched).
+// ---------------------------------------------------------------------------
+
+// Minimal in-memory ScoreCacheStore mirroring the storage methods' contract.
+function makeInMemoryCache(): ScoreCacheStore & { size: () => number } {
+  const rows = new Map<string, ScoreCache>();
+  let nextId = 1;
+  return {
+    async getScoreCacheEntry(contentHash: string) {
+      return rows.get(contentHash);
+    },
+    async createScoreCacheEntry(entry: InsertScoreCache) {
+      const row = { id: nextId++, ...entry } as ScoreCache;
+      rows.set(entry.contentHash, row);
+      return row;
+    },
+    size: () => rows.size,
+  };
+}
+
+// A spy responder that counts calls and returns valid scoring JSON. Each call
+// returns distinct feedback so we can prove two genuine API calls can differ.
+function makeSpyResponder(): ScoreResponder & { calls: () => number } {
+  let count = 0;
+  const fn = (async () => {
+    count += 1;
+    return JSON.stringify({
+      needsDiscovery: 8,
+      objectionPrevention: 7,
+      trustBuilding: 9,
+      naturalClose: 6,
+      relationshipContinuity: 7,
+      closeOutcome: "scheduled_next_step",
+      feedback: `feedback #${count}`,
+    });
+  }) as ScoreResponder & { calls: () => number };
+  fn.calls = () => count;
+  return fn;
+}
+
+function turn(role: TranscriptMessage["role"], content: string): TranscriptMessage {
+  return { role, content, timestamp: "2026-01-01T00:00:00.000Z" };
+}
+
+describe("scoreTranscript - deterministic content-hash cache", () => {
+  const baseTranscript = [
+    turn("consultant", "Hi, what brings you in today?"),
+    turn("customer", "I'm looking at a manufactured home but worried about lot rent."),
+    turn("consultant", "Tell me more about that concern."),
+  ];
+
+  test("identical input hits the cache: result is reused and the API is called only ONCE", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    const first = await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    const second = await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+
+    assert.equal(responder.calls(), 1, "second identical call must be served from cache, not the API");
+    assert.deepEqual(second, first, "cached result must deep-equal the originally computed result");
+    assert.equal(cache.size(), 1, "one cache entry for one distinct input");
+  });
+
+  test("genuinely different transcript content does NOT collide: API called TWICE, results may differ", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    const a = await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    // One extra sentence -> different content -> different hash -> cache miss.
+    const longer = [...baseTranscript, turn("customer", "Also, can I keep my current lender?")];
+    const b = await scoreTranscript(longer, "intermediate", "consulting", null, { responder, cache });
+
+    assert.equal(responder.calls(), 2, "different content must each hit the API (no false-positive collision)");
+    assert.equal(cache.size(), 2, "two distinct inputs -> two cache entries");
+    assert.notDeepEqual(a.feedback, b.feedback, "independent scorings are free to differ");
+  });
+
+  test("a single changed word in the transcript is a cache miss", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    const edited = [
+      baseTranscript[0],
+      turn("customer", "I'm looking at a manufactured house but worried about lot rent."),
+      baseTranscript[2],
+    ];
+    await scoreTranscript(edited, "intermediate", "consulting", null, { responder, cache });
+
+    assert.equal(responder.calls(), 2, "one different word must produce a different hash and a fresh API call");
+  });
+
+  test("changing only difficulty is a cache miss", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    await scoreTranscript(baseTranscript, "advanced", "consulting", null, { responder, cache });
+
+    assert.equal(responder.calls(), 2, "same transcript, different difficulty -> different hash -> API called again");
+  });
+
+  test("changing only track is a cache miss", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    await scoreTranscript(baseTranscript, "intermediate", "leadership", null, { responder, cache });
+
+    assert.equal(responder.calls(), 2, "same transcript, different track -> different hash -> API called again");
+  });
+
+  test("changing only transactionType is a cache miss", async () => {
+    const cache = makeInMemoryCache();
+    const responder = makeSpyResponder();
+
+    await scoreTranscript(baseTranscript, "intermediate", "consulting", null, { responder, cache });
+    await scoreTranscript(baseTranscript, "intermediate", "consulting", "resale_buyer", { responder, cache });
+
+    assert.equal(responder.calls(), 2, "same transcript, different transactionType -> different hash -> API called again");
+  });
+});
+
+describe("computeScoreCacheHash - stability and sensitivity", () => {
+  const transcript = [
+    turn("consultant", "Hello there."),
+    turn("customer", "Hi, I have some questions."),
+  ];
+
+  test("is stable across calls for byte-identical input", () => {
+    const h1 = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+    const h2 = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+    assert.equal(h1, h2);
+  });
+
+  test("null and undefined transactionType hash the same (both mean 'no type')", () => {
+    const h1 = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+    const h2 = computeScoreCacheHash(transcript, "intermediate", "consulting", undefined);
+    assert.equal(h1, h2);
+  });
+
+  test("turn order matters (role+content sequence is part of the hash)", () => {
+    const reordered = [transcript[1], transcript[0]];
+    assert.notEqual(
+      computeScoreCacheHash(transcript, "intermediate", "consulting", null),
+      computeScoreCacheHash(reordered, "intermediate", "consulting", null),
+    );
+  });
+
+  test("each of the four inputs independently changes the hash", () => {
+    const base = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+    const diffText = computeScoreCacheHash(
+      [transcript[0], turn("customer", "Hi, I have a question.")],
+      "intermediate",
+      "consulting",
+      null,
+    );
+    assert.notEqual(base, diffText);
+    assert.notEqual(base, computeScoreCacheHash(transcript, "advanced", "consulting", null));
+    assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "leadership", null));
+    assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "consulting", "resale_buyer"));
   });
 });

@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -155,6 +155,10 @@ export interface IStorage {
   listRealConversationsBySubjectRep(subjectRepUserId: number): Promise<RealConversation[]>;
   // Phase 3: office-wide, to compute each consultant's monthly usage meter.
   listRealConversationsByOffice(officeId: number): Promise<RealConversation[]>;
+
+  // Deterministic scoring cache (see scoreTranscript in server/llm.ts).
+  getScoreCacheEntry(contentHash: string): Promise<ScoreCache | undefined>;
+  createScoreCacheEntry(entry: InsertScoreCache): Promise<ScoreCache>;
 
   // --- Self-serve office setup (welcome-email token + paid signup provisioning) ---
   createOfficeSetupToken(token: InsertOfficeSetupToken): Promise<OfficeSetupToken>;
@@ -665,6 +669,25 @@ export class DatabaseStorage implements IStorage {
       .from(realConversations)
       .where(eq(realConversations.officeId, officeId))
       .orderBy(desc(realConversations.id));
+  }
+
+  // --- Deterministic scoring cache ---
+  async getScoreCacheEntry(contentHash: string): Promise<ScoreCache | undefined> {
+    const rows = await db.select().from(scoreCache).where(eq(scoreCache.contentHash, contentHash));
+    return rows[0];
+  }
+
+  async createScoreCacheEntry(entry: InsertScoreCache): Promise<ScoreCache> {
+    // onConflictDoNothing guards against a rare race: two identical
+    // never-before-seen submissions computing their score concurrently would
+    // otherwise throw a unique-constraint error on the second insert. On a
+    // conflict, fall through and read back whichever row won the race so the
+    // caller still gets a valid ScoreCache row.
+    const rows = await db.insert(scoreCache).values(entry).onConflictDoNothing().returning();
+    if (rows[0]) return rows[0];
+    const existing = await this.getScoreCacheEntry(entry.contentHash);
+    if (existing) return existing;
+    throw new Error("Failed to create or read back score cache entry");
   }
 
   // --- Self-serve office setup ---

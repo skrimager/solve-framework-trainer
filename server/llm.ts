@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import OpenAI, { toFile } from "openai";
-import type { TranscriptMessage, RubricScores, LeadershipRubricScores } from "@shared/schema";
+import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
+import { storage } from "./storage";
 
 const client = new OpenAI();
 
@@ -723,10 +724,66 @@ export function detectCloseIntent(text: string): boolean {
   return CLOSE_INTENT_PATTERNS.some((re) => re.test(normalized));
 }
 
+// The scoring result shape returned to callers and cached verbatim.
+export type ScoreResult = { rubric: RubricScores | LeadershipRubricScores; feedback: string; overall: number };
+
+// The one API call scoreTranscript makes, factored out so tests can inject a
+// spy/stub without reaching OpenAI. Mirrors the WrittenGradeResponder seam:
+// production defaults to the shared client; tests pass their own. Takes the
+// fully-built input and the routing cache key, returns raw output_text.
+export type ScoreResponder = (input: string, promptCacheKey: string) => Promise<string>;
+
+const defaultScoreResponder: ScoreResponder = async (input, promptCacheKey) => {
+  const response = await client.responses.create({
+    model: CHAT_MODEL,
+    input,
+    prompt_cache_key: promptCacheKey,
+  });
+  return response.output_text || "";
+};
+
+// The subset of storage scoreTranscript needs, injectable so tests can supply an
+// in-memory fake instead of hitting Postgres.
+export interface ScoreCacheStore {
+  getScoreCacheEntry(contentHash: string): Promise<ScoreCache | undefined>;
+  createScoreCacheEntry(entry: InsertScoreCache): Promise<ScoreCache>;
+}
+
+// Stable sha256 over EVERYTHING that affects the scoring result: each turn's
+// role + exact text in order, plus difficulty, track, and transactionType. The
+// serialized structure is built with a fixed key order here (not relying on the
+// insertion order of objects handed in by arbitrary callers), so byte-identical
+// inputs always hash identically and any trivial difference (one changed word,
+// a different track/difficulty/transactionType) yields a different hash.
+export function computeScoreCacheHash(
+  transcript: TranscriptMessage[],
+  difficulty: string,
+  track: string,
+  transactionType: string | null | undefined
+): string {
+  const normalized = {
+    transcript: transcript.map((m) => ({ role: m.role, content: m.content })),
+    difficulty,
+    track,
+    transactionType: transactionType ?? null,
+  };
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
 // Scores a completed session. Branches on the scenario's `track`: consulting
 // sessions use the discovery rubric (RubricScores); leadership sessions use the
 // conflict-management rubric (LeadershipRubricScores). Both are stored the same
 // way (JSON text in sessions.rubricScores) and disambiguated by track on read.
+//
+// Results are cached by a content hash of the inputs (see computeScoreCacheHash)
+// so identical input deterministically returns the identical stored output with
+// NO API call. OpenAI's Responses API has no seed parameter and does not
+// guarantee identical output even at temperature 0, so this cache — not
+// model-level determinism — is what makes repeat scoring reproducible.
+//
+// `deps` is injected only by tests (spy responder + in-memory cache); production
+// callers pass nothing and get the real OpenAI client and Postgres-backed
+// storage. The public 4-arg signature is unchanged so existing callers work.
 export async function scoreTranscript(
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
@@ -734,8 +791,24 @@ export async function scoreTranscript(
   // Internal-only real-estate transaction type (never trainee-facing). When the
   // scenario carries one, it selects the close-expectation baseline and injects
   // matching guidance into the scoring prompt. Ignored for leadership sessions.
-  transactionType: string | null | undefined = null
-): Promise<{ rubric: RubricScores | LeadershipRubricScores; feedback: string; overall: number }> {
+  transactionType: string | null | undefined = null,
+  deps: { responder?: ScoreResponder; cache?: ScoreCacheStore } = {}
+): Promise<ScoreResult> {
+  const responder = deps.responder ?? defaultScoreResponder;
+  const cache = deps.cache ?? storage;
+
+  // Deterministic short-circuit: identical inputs return the stored result and
+  // make no API call.
+  const contentHash = computeScoreCacheHash(transcript, difficulty, track, transactionType);
+  const cached = await cache.getScoreCacheEntry(contentHash);
+  if (cached) {
+    return {
+      rubric: JSON.parse(cached.rubric) as RubricScores | LeadershipRubricScores,
+      feedback: cached.feedback,
+      overall: cached.overall,
+    };
+  }
+
   const transcriptText = transcript
     .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
     .join("\n");
@@ -762,13 +835,7 @@ export async function scoreTranscript(
     ? `${system}\n\n${calibration}\n\n${txnCalibration}`
     : `${system}\n\n${calibration}`;
 
-  const response = await client.responses.create({
-    model: CHAT_MODEL,
-    input: `${stablePrefix}\n\nTranscript:\n${transcriptText}`,
-    prompt_cache_key: cacheKeyForPrefix(stablePrefix),
-  });
-
-  const raw = (response.output_text || "").trim();
+  const raw = (await responder(`${stablePrefix}\n\nTranscript:\n${transcriptText}`, cacheKeyForPrefix(stablePrefix))).trim();
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     throw new Error("Scoring model did not return valid JSON");
@@ -791,7 +858,24 @@ export async function scoreTranscript(
         closeExpectationForTransactionType(transactionType)
       );
 
-  return { rubric, feedback: parsed.feedback ?? "", overall };
+  const result: ScoreResult = { rubric, feedback: parsed.feedback ?? "", overall };
+
+  // Persist under the content hash so the identical input returns this exact
+  // result next time with no API call. The raw transcript + params are stored
+  // for debuggability; lookups key only on contentHash.
+  await cache.createScoreCacheEntry({
+    contentHash,
+    rubric: JSON.stringify(result.rubric),
+    feedback: result.feedback,
+    overall: result.overall,
+    track,
+    difficulty,
+    transactionType: transactionType ?? null,
+    transcript: JSON.stringify(transcript.map((m) => ({ role: m.role, content: m.content }))),
+    createdAt: new Date().toISOString(),
+  });
+
+  return result;
 }
 
 // Grades a single free-text ("written") certification answer against a rubric,
