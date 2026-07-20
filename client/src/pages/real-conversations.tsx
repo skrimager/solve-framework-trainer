@@ -95,6 +95,33 @@ function parseServerMessage(raw?: string): string | undefined {
   return (match ? match[1] : raw).trim() || undefined;
 }
 
+// Shown instead of a score when an audio submission was held for manual review
+// because Whisper's speaker guess looked unreliable (see the audio guardrail in
+// server/routes.ts). An honest explanation beats a confusing missing score.
+function ManualReviewNotice({ conversation }: { conversation: DecoratedRealConversation }) {
+  return (
+    <Card data-testid="card-manual-review">
+      <CardHeader>
+        <CardTitle className="text-lg">Needs manual review before scoring</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground" data-testid="text-manual-review-message">
+          This recording needs manual review before scoring due to a potential speaker mix-up.
+          The system transcribes audio without knowing who is speaking, so it could not reliably
+          tell your turns apart from the customer's here. For an accurate score, paste the
+          conversation as a labeled transcript with speaker names instead.
+        </p>
+        {conversation.managerSubmitted && (
+          <p className="text-sm" data-testid="text-manual-review-attribution">
+            <span className="font-medium">Submitted by your manager</span>
+            {conversation.submittedByName ? ` (${conversation.submittedByName})` : ""}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // Read-only rubric breakdown, mirroring the practice results layout.
 function ScoreBreakdown({ conversation }: { conversation: DecoratedRealConversation }) {
   const rubric: Record<string, number> | null = conversation.rubricScores
@@ -361,6 +388,11 @@ export default function RealConversations() {
                   mp3, m4a, or wav. Up to 25MB, about 30 minutes. Transcription can take a
                   minute for longer recordings.
                 </p>
+                <p className="text-xs text-muted-foreground" data-testid="text-audio-accuracy-note">
+                  For the most accurate score, paste a labeled transcript with speaker names
+                  (for example "Me:" and "Customer:"). Audio scoring is a best-effort estimate,
+                  since the system cannot always tell who is speaking from voice alone.
+                </p>
                 {audioFile && (
                   <p className="text-sm font-medium" data-testid="text-audio-filename">
                     Selected: {audioFile.name}
@@ -411,7 +443,12 @@ export default function RealConversations() {
           </CardContent>
         </Card>
 
-        {result && <ScoreBreakdown conversation={result} />}
+        {result &&
+          (result.needsManualReview ? (
+            <ManualReviewNotice conversation={result} />
+          ) : (
+            <ScoreBreakdown conversation={result} />
+          ))}
 
         {/* The rep's history, split into two clearly separate sections: their
             practice sessions and their Real Conversations. The Real Conversations
@@ -522,6 +559,14 @@ export default function RealConversations() {
                           data-testid={`text-row-attribution-${rc.id}`}
                         >
                           Submitted by your manager{rc.submittedByName ? ` (${rc.submittedByName})` : ""}
+                        </p>
+                      )}
+                      {rc.needsManualReview && (
+                        <p
+                          className="text-xs text-muted-foreground"
+                          data-testid={`text-row-manual-review-${rc.id}`}
+                        >
+                          Needs manual review before scoring
                         </p>
                       )}
                     </div>

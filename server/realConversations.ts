@@ -52,7 +52,13 @@ export type RealConversationTranscriber = (input: {
   buffer: Buffer;
   filename: string;
   mimetype: string;
-}) => Promise<{ text: string; duration?: number; segments?: { text: string }[] }>;
+}) => Promise<{ text: string; duration?: number; segments?: AudioSegment[] }>;
+
+// A single Whisper segment: its text plus the start/end offsets (seconds) Whisper
+// reports in verbose_json. Timings are optional because the sentence-split
+// fallback (no Whisper segments) has none, and older/other transcribers may omit
+// them; the suspicious-transcript detector simply skips timing checks when absent.
+export type AudioSegment = { text: string; start?: number; end?: number };
 
 // The exact consent language the rep must agree to before a submission is
 // accepted. Kept as a single exported constant so the server gate and the client
@@ -262,7 +268,7 @@ function pushOrAppend(
 // an authoritative reconstruction.
 export function parseAudioTranscript(
   text: string,
-  segments?: { text: string }[]
+  segments?: AudioSegment[]
 ): TranscriptMessage[] {
   const nowIso = new Date().toISOString();
 
@@ -282,6 +288,86 @@ export function parseAudioTranscript(
     content,
     timestamp: nowIso,
   }));
+}
+
+// --- Audio misattribution guardrail (Phase 2 hardening) ---
+//
+// Whisper has no speaker diarization, so parseAudioTranscript blindly alternates
+// customer/consultant across segments. That is fragile: if Whisper splits ONE
+// speaker's turn into two segments (a mid-sentence breath/pause), every later
+// turn's role shifts by one and the rubric score is corrupted. These heuristics
+// flag transcripts where blind alternation is likely wrong so the route can route
+// them to manual review instead of silently emitting a misleading score.
+
+// A gap this small (seconds) between the end of one segment and the start of the
+// next indicates a continuous utterance Whisper split, not a real turn change.
+export const SHORT_SEGMENT_GAP_SECONDS = 0.3;
+// A single turn longer than this multiple of the median turn length suggests two
+// real turns were merged into one segment (no pause detected between speakers).
+export const LONG_TURN_MEDIAN_MULTIPLE = 4;
+// Fewer turns than this is too little back-and-forth to attribute speakers from
+// alternation with any confidence (and too little conversation to score well).
+export const MIN_MEANINGFUL_TURNS = 3;
+
+function median(sortedAscending: number[]): number {
+  if (sortedAscending.length === 0) return 0;
+  const mid = Math.floor(sortedAscending.length / 2);
+  return sortedAscending.length % 2 === 1
+    ? sortedAscending[mid]
+    : (sortedAscending[mid - 1] + sortedAscending[mid]) / 2;
+}
+
+// Inspects Whisper segments for the misattribution risks above and returns
+// whether the audio transcript should be held for manual review, with
+// human-readable reasons. Never throws and never mutates its input; a transcript
+// with clean, well-separated, similarly-sized turns returns suspicious:false.
+export function detectSuspiciousAudioTranscript(
+  segments: AudioSegment[] | undefined
+): { suspicious: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const turns = (segments ?? [])
+    .map((s) => ({ text: (s.text ?? "").trim(), start: s.start, end: s.end }))
+    .filter((s) => s.text.length > 0);
+
+  // (b) Too few turns to trust alternation (or to score meaningfully).
+  if (turns.length < MIN_MEANINGFUL_TURNS) {
+    reasons.push(
+      `Only ${turns.length} spoken turn(s) were detected, too little back-and-forth to reliably tell who is speaking.`
+    );
+  }
+
+  // (a) A very short gap between consecutive segments: one utterance Whisper
+  // split, which shifts every subsequent role assignment by one.
+  for (let i = 1; i < turns.length; i++) {
+    const prevEnd = turns[i - 1].end;
+    const curStart = turns[i].start;
+    if (typeof prevEnd === "number" && typeof curStart === "number") {
+      const gap = curStart - prevEnd;
+      if (gap < SHORT_SEGMENT_GAP_SECONDS) {
+        reasons.push(
+          `A ${gap.toFixed(
+            2
+          )}s gap between turns ${i} and ${i + 1} suggests one speaker's turn was split, which can misassign every later speaker label.`
+        );
+        break; // One instance is enough to warrant review.
+      }
+    }
+  }
+
+  // (c) An implausibly long turn relative to the rest: two real turns likely
+  // merged into a single Whisper segment with no detected pause between speakers.
+  if (turns.length >= 2) {
+    const lengths = turns.map((t) => t.text.split(/\s+/).filter(Boolean).length);
+    const med = median([...lengths].sort((a, b) => a - b));
+    const longest = Math.max(...lengths);
+    if (med > 0 && longest > med * LONG_TURN_MEDIAN_MULTIPLE) {
+      reasons.push(
+        `One turn is far longer (${longest} words) than the typical turn (${med}), suggesting two speakers were merged into one segment.`
+      );
+    }
+  }
+
+  return { suspicious: reasons.length > 0, reasons };
 }
 
 // Lines that are email transport/header noise rather than conversational content.

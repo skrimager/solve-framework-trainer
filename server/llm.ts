@@ -16,7 +16,11 @@ export async function transcribeAudio(input: {
   buffer: Buffer;
   filename: string;
   mimetype: string;
-}): Promise<{ text: string; duration?: number; segments?: { text: string }[] }> {
+}): Promise<{
+  text: string;
+  duration?: number;
+  segments?: { text: string; start?: number; end?: number }[];
+}> {
   const file = await toFile(input.buffer, input.filename, { type: input.mimetype });
   const result = await client.audio.transcriptions.create({
     file,
@@ -26,7 +30,10 @@ export async function transcribeAudio(input: {
   return {
     text: result.text ?? "",
     duration: result.duration,
-    segments: result.segments?.map((s) => ({ text: s.text })),
+    // Whisper's verbose_json segments carry start/end in seconds. We thread those
+    // through so the audio parser can spot segments split mid-utterance (a tiny
+    // inter-segment gap) that would otherwise corrupt blind role alternation.
+    segments: result.segments?.map((s) => ({ text: s.text, start: s.start, end: s.end })),
   };
 }
 

@@ -39,6 +39,7 @@ import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } 
 import {
   parsePastedTranscript,
   parseAudioTranscript,
+  detectSuspiciousAudioTranscript,
   deriveStalledStep,
   isAllowedAudioFile,
   REAL_CONVERSATION_CONSENT_TEXT,
@@ -3294,11 +3295,41 @@ export function registerRealConversationRoutes(
           return res.status(400).json({ message: "That audio had no recognizable speech to score." });
         }
 
+        // Guardrail: Whisper has no speaker diarization, so the audio parser blindly
+        // alternates customer/consultant. When the segment timing suggests a turn was
+        // split or merged, blind alternation is likely wrong, so we store the row for
+        // manual review and skip scoring rather than emit a misleading auto-score.
+        const review = detectSuspiciousAudioTranscript(transcription.segments);
+        const nowIso = new Date().toISOString();
+
+        if (review.suspicious) {
+          const flagged = await storage.createRealConversation({
+            submittedByUserId: submitterId,
+            subjectRepUserId: subject.subjectRepUserId,
+            officeId: subject.officeId,
+            submissionType: "audio",
+            rawTranscript: transcriptText,
+            originalAudioFilename: file.originalname,
+            // Left unscored (nullable), matching the existing "not yet scored" shape.
+            overallScore: null,
+            rubricScores: null,
+            feedback: null,
+            stalledStep: null,
+            consentAccepted: true,
+            consentAcceptedAt: nowIso,
+            createdAt: nowIso,
+            submissionCountedForCap: true,
+            fieldVerifiedEligible: null,
+            needsManualReview: true,
+            flagReasons: review.reasons.join(" "),
+          });
+          return res.json(flagged);
+        }
+
         // Same unchanged engine, same downstream handling as text/email.
         const { rubric, feedback, overall } = await scorer(parsed);
         const stalledStep = deriveStalledStep(rubric as any);
 
-        const nowIso = new Date().toISOString();
         const created = await storage.createRealConversation({
           submittedByUserId: submitterId,
           subjectRepUserId: subject.subjectRepUserId,
@@ -3316,6 +3347,8 @@ export function registerRealConversationRoutes(
           // Counted toward the cap at creation time and never recalculated.
           submissionCountedForCap: true,
           fieldVerifiedEligible: null,
+          needsManualReview: false,
+          flagReasons: null,
         });
 
         res.json(created);

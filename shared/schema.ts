@@ -291,6 +291,12 @@ export const realConversations = pgTable("real_conversations", {
   // --- Reserved for later phases (nullable, no Phase 1 logic reads these) ---
   submissionCountedForCap: boolean("submission_counted_for_cap"), // Phase 3 fair-use capping
   fieldVerifiedEligible: boolean("field_verified_eligible"), // Phase 4 "Field Verified" badge
+  // Audio misattribution guardrail: when Whisper's segment timing looks like a
+  // speaker turn was split/merged (see detectSuspiciousAudioTranscript), the audio
+  // route stores the row but skips scoring and flags it for manual review instead
+  // of emitting a misleading auto-score. Null for paste submissions and clean audio.
+  needsManualReview: boolean("needs_manual_review"),
+  flagReasons: text("flag_reasons"), // human-readable reasons the row was flagged
 });
 
 export const insertRealConversationSchema = createInsertSchema(realConversations).omit({ id: true });
