@@ -11,7 +11,7 @@ import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
 
 // Monthly fair-use practice standing returned by GET /api/users/:id/practice-usage.
@@ -418,14 +418,17 @@ export default function Scenarios() {
               Reachable from any level via the persistent top-nav button. */}
           {activeLevel === "beginner" && (
             <Card
-              className="border-2"
-              style={{ borderColor: "#0A1A30" }}
+              className="border-2 shadow-[0_0_20px_rgba(224,109,0,0.25)]"
+              style={{ borderColor: "#E06D00" }}
               data-testid="card-upload-real-conversation"
             >
               <CardHeader>
-                <CardTitle className="text-lg" style={{ color: "#0A1A30" }}>
-                  Upload Real Conversation
-                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
+                  <CardTitle className="text-lg" style={{ color: "#FBF9F5" }}>
+                    Upload Real Conversation
+                  </CardTitle>
+                </div>
                 <CardDescription className="pt-1">
                   Already had this conversation for real? Paste it in or upload the audio and
                   score it against the same SOLVE rubric.
