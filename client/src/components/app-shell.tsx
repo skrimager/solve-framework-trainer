@@ -1,9 +1,8 @@
 import { ReactNode } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { LogOut, ArrowLeft, ClipboardCheck, Award } from "lucide-react";
-import solveLogo from "@assets/solve-framework-logo.png";
 
 export function AppShell({
   title,
@@ -23,7 +22,14 @@ export function AppShell({
       <header className="border-b bg-card shrink-0">
         <div className={`max-w-5xl mx-auto px-4 sm:px-6 flex items-center justify-between gap-4 ${compact ? "py-2" : "py-4"}`}>
           <div className="flex items-center gap-3 min-w-0">
-            <img src={solveLogo} alt="The SOLVE Framework" className="h-8 w-auto shrink-0" data-testid="img-solve-logo" />
+            <Link href="/" className="shrink-0 inline-flex items-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: compact ? "6px 12px" : "8px 16px" }} data-testid="link-home-logo">
+              <img
+                src="/solve-wordmark-bigtag-transparent.png"
+                alt="SOLVE Framework - Practice. Performance. Period."
+                className={`w-auto block ${compact ? "h-10" : "h-14"}`}
+                data-testid="img-solve-logo"
+              />
+            </Link>
             <div className="min-w-0">
               <h1 className="text-sm font-semibold leading-tight truncate" data-testid="text-page-title">{title}</h1>
               {!compact && <p className="text-xs text-muted-foreground truncate">SOLVE Platform™ - discovery training</p>}

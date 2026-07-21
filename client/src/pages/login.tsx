@@ -10,7 +10,6 @@ import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
 import { postLoginPath, wrongCredentialTypeRedirect } from "@/lib/routes";
 import trainerPhoto from "@assets/trainer-photo-1.png";
-import solveLogo from "@assets/solve-framework-logo.png";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -73,12 +72,14 @@ export default function Login() {
         </div>
         <div className="w-full max-w-sm mx-auto space-y-6">
         <div className="text-center space-y-4">
-          <img
-            src={solveLogo}
-            alt="The SOLVE Framework"
-            className="mx-auto h-24 w-auto max-w-full"
-            data-testid="img-solve-logo"
-          />
+          <div className="inline-flex items-center justify-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: "8px 16px" }}>
+            <img
+              src="/solve-wordmark-bigtag-transparent.png"
+              alt="SOLVE Framework - Practice. Performance. Period."
+              className="h-[72px] w-auto max-w-full block"
+              data-testid="img-solve-logo"
+            />
+          </div>
           <h1 className="text-3xl font-bold tracking-tight" data-testid="text-app-title">Consultant Practice Login</h1>
           <p className="text-sm text-muted-foreground">Consultant access to SOLVE Platform™ discovery practice.</p>
         </div>

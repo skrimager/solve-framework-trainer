@@ -7,7 +7,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
-import solveLogo from "@assets/solve-framework-logo.png";
 import {
   ENTERPRISE_MIN_SEATS,
   ENTERPRISE_CONTACT_EMAIL,
@@ -51,12 +50,14 @@ export default function Signup() {
     <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-10">
       <div className="w-full max-w-md mx-auto space-y-6">
         <div className="text-center space-y-4">
-          <img
-            src={solveLogo}
-            alt="The SOLVE Framework"
-            className="mx-auto h-20 w-auto max-w-full"
-            data-testid="img-solve-logo"
-          />
+          <div className="inline-flex items-center justify-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: "8px 16px" }}>
+            <img
+              src="/solve-wordmark-bigtag-transparent.png"
+              alt="SOLVE Framework - Practice. Performance. Period."
+              className="h-[72px] w-auto max-w-full block"
+              data-testid="img-solve-logo"
+            />
+          </div>
           <h1 className="text-2xl font-bold tracking-tight" style={{ color: NAVY }} data-testid="text-signup-title">
             Set up your office
           </h1>
