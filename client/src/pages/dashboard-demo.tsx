@@ -37,11 +37,11 @@ export default function DemoDashboard() {
 
       <header className="border-b bg-card">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3">
-          <Link href="/" className="shrink-0" data-testid="link-home-logo">
+          <Link href="/" className="shrink-0 inline-flex items-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: "8px 16px" }} data-testid="link-home-logo">
             <img
               src="/solve-wordmark-bigtag-transparent.png"
               alt="SOLVE Framework - Practice. Performance. Period."
-              className="h-14 w-auto"
+              className="h-14 w-auto block"
               data-testid="img-solve-logo"
             />
           </Link>

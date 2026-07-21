@@ -22,11 +22,11 @@ export function AppShell({
       <header className="border-b bg-card shrink-0">
         <div className={`max-w-5xl mx-auto px-4 sm:px-6 flex items-center justify-between gap-4 ${compact ? "py-2" : "py-4"}`}>
           <div className="flex items-center gap-3 min-w-0">
-            <Link href="/" className="shrink-0" data-testid="link-home-logo">
+            <Link href="/" className="shrink-0 inline-flex items-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: compact ? "6px 12px" : "8px 16px" }} data-testid="link-home-logo">
               <img
                 src="/solve-wordmark-bigtag-transparent.png"
                 alt="SOLVE Framework - Practice. Performance. Period."
-                className={`w-auto ${compact ? "h-10" : "h-14"}`}
+                className={`w-auto block ${compact ? "h-10" : "h-14"}`}
                 data-testid="img-solve-logo"
               />
             </Link>

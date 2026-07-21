@@ -25,12 +25,14 @@ export default function Register() {
     <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-10">
       <div className="w-full max-w-sm mx-auto space-y-6">
         <div className="text-center space-y-4">
-          <img
-            src="/solve-wordmark-bigtag-transparent.png"
-            alt="SOLVE Framework - Practice. Performance. Period."
-            className="mx-auto h-[72px] w-auto max-w-full"
-            data-testid="img-solve-logo"
-          />
+          <div className="inline-flex items-center justify-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: "8px 16px" }}>
+            <img
+              src="/solve-wordmark-bigtag-transparent.png"
+              alt="SOLVE Framework - Practice. Performance. Period."
+              className="h-[72px] w-auto max-w-full block"
+              data-testid="img-solve-logo"
+            />
+          </div>
           <h1 className="text-2xl font-bold tracking-tight" data-testid="text-register-title">Create your account</h1>
           <p className="text-sm text-muted-foreground">Discovery architecture practice, not sales scripts.</p>
         </div>
