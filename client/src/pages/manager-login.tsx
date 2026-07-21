@@ -8,7 +8,6 @@ import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { wrongCredentialTypeRedirect } from "@/lib/routes";
-import solveLogo from "@assets/solve-framework-logo.png";
 
 // Manager command-center login. Same backend flow as the consultant login
 // (single POST /api/login; role is backend-derived), but deliberately styled to
@@ -75,9 +74,9 @@ export default function ManagerLogin() {
       <div className="relative w-full max-w-md space-y-6">
         <div className="text-center space-y-3">
           <img
-            src={solveLogo}
-            alt="The SOLVE Framework"
-            className="mx-auto h-16 w-auto max-w-full"
+            src="/solve-logo-square.png"
+            alt="SOLVE Framework"
+            className="mx-auto h-[72px] w-auto max-w-full rounded-xl"
             data-testid="img-solve-logo"
           />
           <div className="flex items-center justify-center gap-2">

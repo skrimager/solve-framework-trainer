@@ -2,7 +2,6 @@ import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { GraduationCap, LayoutDashboard, PlayCircle, Building2, ArrowLeft } from "lucide-react";
-import solveLogo from "@assets/solve-framework-logo.png";
 
 // Root chooser. Minimal, on-brand entry point that routes each kind of visitor to
 // the right place: consultants to practice, managers to the command center, and
@@ -47,9 +46,9 @@ export default function Home() {
       <div className="w-full max-w-md mx-auto space-y-6">
         <div className="text-center space-y-4">
           <img
-            src={solveLogo}
-            alt="The SOLVE Framework"
-            className="mx-auto h-20 w-auto max-w-full"
+            src="/solve-wordmark-bigtag-transparent.png"
+            alt="SOLVE Framework - Practice. Performance. Period."
+            className="mx-auto h-[72px] w-auto max-w-full"
             data-testid="img-solve-logo"
           />
           <h1 className="text-2xl font-bold tracking-tight" data-testid="text-home-title">

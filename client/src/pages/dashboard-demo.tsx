@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConsultantRoster, type RosterReadOnlyData } from "@/components/consultant-roster";
-import solveLogo from "@assets/solve-framework-logo.png";
 
 // Brand palette (shared with the rest of the app / marketing site).
 const NAVY = "#0A1A30";
@@ -37,7 +37,14 @@ export default function DemoDashboard() {
 
       <header className="border-b bg-card">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3">
-          <img src={solveLogo} alt="The SOLVE Framework" className="h-8 w-auto shrink-0" data-testid="img-solve-logo" />
+          <Link href="/" className="shrink-0" data-testid="link-home-logo">
+            <img
+              src="/solve-wordmark-bigtag-transparent.png"
+              alt="SOLVE Framework - Practice. Performance. Period."
+              className="h-14 w-auto"
+              data-testid="img-solve-logo"
+            />
+          </Link>
           <div className="min-w-0">
             <h1 className="text-sm font-semibold leading-tight truncate" data-testid="text-page-title">
               Manager overview
