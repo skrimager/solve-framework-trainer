@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
@@ -138,6 +138,24 @@ export interface IStorage {
   listDueLeadDripEmails(nowIso: string): Promise<LeadDripEmail[]>;
   listLeadDripEmailsByContact(contactId: number): Promise<LeadDripEmail[]>;
   updateLeadDripEmail(id: number, patch: Partial<InsertLeadDripEmail>): Promise<LeadDripEmail | undefined>;
+
+  // --- Demo-activation drip (day 0/1/3 auto-enrolled from /api/demo/verify) ---
+  getDemoSignup(id: number): Promise<DemoSignup | undefined>;
+  listDemoSessionsBySignup(signupId: number): Promise<DemoSession[]>;
+  createDemoDripEmail(email: InsertDemoDripEmail): Promise<DemoDripEmail>;
+  listDueDemoDripEmails(nowIso: string): Promise<DemoDripEmail[]>;
+  listDemoDripEmailsBySignup(signupId: number): Promise<DemoDripEmail[]>;
+  updateDemoDripEmail(id: number, patch: Partial<InsertDemoDripEmail>): Promise<DemoDripEmail | undefined>;
+
+  // --- Monthly "Practice makes money!" lifecycle email ---
+  createMonthlyLifecycleEmail(email: InsertMonthlyLifecycleEmail): Promise<MonthlyLifecycleEmail>;
+  listDueMonthlyLifecycleEmails(nowIso: string): Promise<MonthlyLifecycleEmail[]>;
+  listMonthlyLifecycleEmails(): Promise<MonthlyLifecycleEmail[]>;
+  updateMonthlyLifecycleEmail(id: number, patch: Partial<InsertMonthlyLifecycleEmail>): Promise<MonthlyLifecycleEmail | undefined>;
+
+  // --- One-click unsubscribe suppression (shared by the new lifecycle emails) ---
+  createEmailSuppression(suppression: InsertEmailSuppression): Promise<EmailSuppression>;
+  getEmailSuppression(email: string): Promise<EmailSuppression | undefined>;
 
   // --- SOLVE Coach follow-up Q&A ---
   createCoachingMessage(message: InsertCoachingMessage): Promise<CoachingMessage>;
@@ -612,6 +630,79 @@ export class DatabaseStorage implements IStorage {
 
   async updateLeadDripEmail(id: number, patch: Partial<InsertLeadDripEmail>): Promise<LeadDripEmail | undefined> {
     const rows = await db.update(leadDripEmails).set(patch).where(eq(leadDripEmails.id, id)).returning();
+    return rows[0];
+  }
+
+  // --- Demo-activation drip ---
+  async getDemoSignup(id: number): Promise<DemoSignup | undefined> {
+    const rows = await db.select().from(demoSignups).where(eq(demoSignups.id, id));
+    return rows[0];
+  }
+
+  async listDemoSessionsBySignup(signupId: number): Promise<DemoSession[]> {
+    return db.select().from(demoSessions).where(eq(demoSessions.signupId, signupId)).orderBy(demoSessions.id);
+  }
+
+  async createDemoDripEmail(email: InsertDemoDripEmail): Promise<DemoDripEmail> {
+    const rows = await db.insert(demoDripEmails).values(email).returning();
+    return rows[0];
+  }
+
+  async listDueDemoDripEmails(nowIso: string): Promise<DemoDripEmail[]> {
+    return db
+      .select()
+      .from(demoDripEmails)
+      .where(and(eq(demoDripEmails.status, "scheduled"), lte(demoDripEmails.scheduledAt, nowIso)))
+      .orderBy(demoDripEmails.id);
+  }
+
+  async listDemoDripEmailsBySignup(signupId: number): Promise<DemoDripEmail[]> {
+    return db.select().from(demoDripEmails).where(eq(demoDripEmails.signupId, signupId)).orderBy(demoDripEmails.id);
+  }
+
+  async updateDemoDripEmail(id: number, patch: Partial<InsertDemoDripEmail>): Promise<DemoDripEmail | undefined> {
+    const rows = await db.update(demoDripEmails).set(patch).where(eq(demoDripEmails.id, id)).returning();
+    return rows[0];
+  }
+
+  // --- Monthly "Practice makes money!" lifecycle email ---
+  async createMonthlyLifecycleEmail(email: InsertMonthlyLifecycleEmail): Promise<MonthlyLifecycleEmail> {
+    const rows = await db.insert(monthlyLifecycleEmails).values(email).returning();
+    return rows[0];
+  }
+
+  async listDueMonthlyLifecycleEmails(nowIso: string): Promise<MonthlyLifecycleEmail[]> {
+    return db
+      .select()
+      .from(monthlyLifecycleEmails)
+      .where(and(eq(monthlyLifecycleEmails.status, "scheduled"), lte(monthlyLifecycleEmails.scheduledAt, nowIso)))
+      .orderBy(monthlyLifecycleEmails.id);
+  }
+
+  async listMonthlyLifecycleEmails(): Promise<MonthlyLifecycleEmail[]> {
+    return db.select().from(monthlyLifecycleEmails).orderBy(monthlyLifecycleEmails.id);
+  }
+
+  async updateMonthlyLifecycleEmail(id: number, patch: Partial<InsertMonthlyLifecycleEmail>): Promise<MonthlyLifecycleEmail | undefined> {
+    const rows = await db.update(monthlyLifecycleEmails).set(patch).where(eq(monthlyLifecycleEmails.id, id)).returning();
+    return rows[0];
+  }
+
+  // --- One-click unsubscribe suppression ---
+  async createEmailSuppression(suppression: InsertEmailSuppression): Promise<EmailSuppression> {
+    const rows = await db
+      .insert(emailSuppressions)
+      .values(suppression)
+      .onConflictDoNothing({ target: emailSuppressions.email })
+      .returning();
+    if (rows[0]) return rows[0];
+    // Already suppressed: return the existing row so the caller stays idempotent.
+    const existing = await db.select().from(emailSuppressions).where(eq(emailSuppressions.email, suppression.email));
+    return existing[0];
+  }
+
+  async getEmailSuppression(email: string): Promise<EmailSuppression | undefined> {
+    const rows = await db.select().from(emailSuppressions).where(eq(emailSuppressions.email, email));
     return rows[0];
   }
 

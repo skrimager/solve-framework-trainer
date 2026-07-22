@@ -438,6 +438,10 @@ export const demoSignups = pgTable("demo_signups", {
   sessionsUsed: integer("sessions_used").notNull().default(0), // all-time started demo sessions; capped at 3
   createdAt: text("created_at").notNull(),
   lastSentAt: text("last_sent_at"), // ISO timestamp of the most recent code email (for resend cadence/visibility)
+  // One-click opt-out for the new demo-activation + monthly lifecycle emails. When
+  // true, those senders skip this signup (the authoritative gate is email_suppressions
+  // by email; this mirror keeps a demo row self-describing for admin export).
+  unsubscribed: boolean("unsubscribed").notNull().default(false),
 });
 
 export const insertDemoSignupSchema = createInsertSchema(demoSignups).omit({ id: true });
@@ -595,6 +599,63 @@ export const leadDripEmails = pgTable("lead_drip_emails", {
 export const insertLeadDripEmailSchema = createInsertSchema(leadDripEmails).omit({ id: true });
 export type InsertLeadDripEmail = z.infer<typeof insertLeadDripEmailSchema>;
 export type LeadDripEmail = typeof leadDripEmails.$inferSelect;
+
+// Demo-activation drip. Mirrors lead_drip_emails exactly but is keyed to a
+// demo_signups row (not a contact), since demo visitors never become contacts.
+// Enrolled when a visitor verifies their code (demo_signups.verified -> true).
+// Step 1 (day 0) welcome is sent inline and recorded `sent`; steps 2 (day 1) and
+// 3 (day 3) are scheduled for the shared background sender to deliver when due.
+export const demoDripEmails = pgTable("demo_drip_emails", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").notNull().references(() => demoSignups.id),
+  sequenceStep: integer("sequence_step").notNull(), // 1 (day 0) | 2 (day 1) | 3 (day 3)
+  emailSubject: text("email_subject").notNull(),
+  emailBody: text("email_body").notNull(), // plain text; rendered to HTML at send time
+  scheduledAt: text("scheduled_at"), // ISO timestamp this step is due to send
+  sentAt: text("sent_at"), // ISO timestamp set once actually sent
+  status: text("status").notNull().default("scheduled"), // 'scheduled' | 'sent' | 'stopped'
+});
+
+export const insertDemoDripEmailSchema = createInsertSchema(demoDripEmails).omit({ id: true });
+export type InsertDemoDripEmail = z.infer<typeof insertDemoDripEmailSchema>;
+export type DemoDripEmail = typeof demoDripEmails.$inferSelect;
+
+// Monthly "Practice makes money!" lifecycle email. Two segments, one table.
+// `recipientType` distinguishes a demo signup (unconverted, conversion nudge)
+// from a paying seat-active user (retention nudge). `email` is denormalized so a
+// send never has to re-resolve a recipient row, and a row is self-perpetuating:
+// after one sends, the sender enqueues the next month's row for still-eligible
+// recipients. Same idempotent scheduled/sent/stopped contract as the drips.
+export const monthlyLifecycleEmails = pgTable("monthly_lifecycle_emails", {
+  id: serial("id").primaryKey(),
+  recipientType: text("recipient_type").notNull(), // 'demo_signup' | 'paying_user'
+  recipientId: integer("recipient_id").notNull(), // demo_signups.id or users.id
+  email: text("email").notNull(), // denormalized recipient address
+  emailSubject: text("email_subject").notNull(),
+  emailBody: text("email_body").notNull(), // plain text; rendered to HTML at send time
+  scheduledAt: text("scheduled_at").notNull(), // ISO timestamp this send is due
+  sentAt: text("sent_at"), // ISO timestamp set once actually sent
+  status: text("status").notNull().default("scheduled"), // 'scheduled' | 'sent' | 'stopped'
+});
+
+export const insertMonthlyLifecycleEmailSchema = createInsertSchema(monthlyLifecycleEmails).omit({ id: true });
+export type InsertMonthlyLifecycleEmail = z.infer<typeof insertMonthlyLifecycleEmailSchema>;
+export type MonthlyLifecycleEmail = typeof monthlyLifecycleEmails.$inferSelect;
+
+// One-click unsubscribe suppression list, keyed by normalized email. This is the
+// authoritative send-time gate for the new demo-activation + monthly lifecycle
+// emails, and covers BOTH populations (demo signups and paying users) with a
+// single lookup. It intentionally does NOT affect the existing inbound/outbound
+// drips, which are out of scope.
+export const emailSuppressions = pgTable("email_suppressions", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(), // normalized (trimmed + lowercased)
+  suppressedAt: text("suppressed_at").notNull(), // ISO timestamp of the opt-out
+});
+
+export const insertEmailSuppressionSchema = createInsertSchema(emailSuppressions).omit({ id: true });
+export type InsertEmailSuppression = z.infer<typeof insertEmailSuppressionSchema>;
+export type EmailSuppression = typeof emailSuppressions.$inferSelect;
 
 // A unique, expiring token emailed to an inbound lead so they can open the
 // self-serve office setup page (/#/office-setup/:token) without logging in.
