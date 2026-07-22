@@ -39,7 +39,7 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
-  currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances at 85%+ average score
+  currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances after 5 sessions that EACH individually score >= 85 at the current level (not an average; see REQUIRED_QUALIFYING_SESSIONS/ADVANCE_THRESHOLD in server/llm.ts)
   leadershipLevel: text("leadership_level").notNull().default("beginner"), // Leadership/Conflict-Management track level, tracked independently from currentLevel so a user can be Advanced in one track and Beginner in the other
   // A paid, occupied consultant seat. Set true only after the office's Stripe seat
   // quantity has been incremented for this user (consultants and managers who buy
