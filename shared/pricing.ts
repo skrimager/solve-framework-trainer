@@ -19,6 +19,21 @@ export const PLAN_TIERS: readonly PlanTier[] = [
   { tier: "company", minSeats: 21, maxSeats: 35, seatRate: 41, dashboardRate: 529 },
 ];
 
+// Annual prepay: an extra 20% off the Manager Dashboard ONLY, never seats. It is
+// applied at checkout as a Stripe coupon scoped to the dashboard product, so it
+// stacks on whatever the dashboard's current monthly rate is (the launch rate now,
+// the standard rate after the launch deadline) without recomputing any amount here.
+// The marketing figures are monthly-equivalent, not annual totals: the underlying
+// rate stays monthly and the coupon simply reduces the dashboard line by 20%.
+export const ANNUAL_DASHBOARD_DISCOUNT_PERCENT = 20;
+
+// The monthly-equivalent dashboard rate a buyer sees when they choose annual prepay:
+// the current monthly rate less the 20% annual discount, rounded to whole dollars
+// (e.g. 249 -> 199, 389 -> 311, 529 -> 423). Display only; Stripe applies the coupon.
+export function annualDashboardMonthlyEquivalent(monthlyRate: number): number {
+  return Math.round(monthlyRate * (1 - ANNUAL_DASHBOARD_DISCOUNT_PERCENT / 100));
+}
+
 // 36+ seats is Enterprise: a custom quote handled off-platform, never self-serve.
 export const ENTERPRISE_MIN_SEATS = 36;
 

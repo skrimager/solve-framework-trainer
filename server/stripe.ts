@@ -19,12 +19,20 @@ import Stripe from "stripe";
 //   STRIPE_DASHBOARD_TEAM_PRICE_ID   price_... ($249/mo optional dashboard, Team)
 //   STRIPE_DASHBOARD_OFFICE_PRICE_ID price_... ($389/mo optional dashboard, Office)
 //   STRIPE_DASHBOARD_COMPANY_PRICE_ID price_... ($529/mo optional dashboard, Company)
+//   STRIPE_DASHBOARD_ANNUAL_COUPON_ID  <coupon_...> optional 20%-off-dashboard annual coupon
 //   APP_URL                          base URL for Checkout/Portal redirects
 import type { SelfServeTier } from "./billing";
 
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? "";
 export const APP_URL = process.env.APP_URL ?? "http://localhost:5000";
+
+// Optional: the Stripe Coupon id for the annual-prepay dashboard discount (20% off
+// the dashboard only). Must be a coupon whose applies_to.products is the Manager
+// Dashboard product, so it can only ever reduce the dashboard line, never seats.
+// Empty by default: until it is set the annual option is not offered and checkout
+// behaves exactly as before. Create the coupon with scripts/stripe-setup.ts.
+export const STRIPE_DASHBOARD_ANNUAL_COUPON_ID = process.env.STRIPE_DASHBOARD_ANNUAL_COUPON_ID ?? "";
 
 const SEAT_PRICE_ID_BY_TIER: Record<SelfServeTier, string> = {
   team: process.env.STRIPE_SEAT_TEAM_PRICE_ID ?? "",
@@ -60,6 +68,11 @@ export function isDashboardPriceId(priceId: string): boolean {
 // the app still boots (and demo accounts still work) without Stripe credentials.
 export function isStripeConfigured(): boolean {
   return STRIPE_SECRET_KEY.length > 0;
+}
+
+// The annual-prepay dashboard discount is only offered when its coupon is wired up.
+export function isAnnualDashboardDiscountConfigured(): boolean {
+  return STRIPE_DASHBOARD_ANNUAL_COUPON_ID.length > 0;
 }
 
 let _stripe: Stripe | null = null;
