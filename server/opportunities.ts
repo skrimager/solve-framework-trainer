@@ -1,6 +1,8 @@
 import type { IStorage } from "./storage";
 import type { Contact, ProspectOutreach } from "@shared/schema";
 import { sendProspectEmail, sendInboundEmail } from "./notifications";
+import { sendDueDemoDripEmails, type DemoDripSendDeps } from "./demoDrip";
+import { seedMonthlyLifecycleEmails, sendDueMonthlyEmails, type MonthlySeedDeps, type MonthlySendDeps } from "./monthlyEmail";
 
 // ===========================================================================
 // Opportunity Intelligence: outbound discovery-training drip logic.
@@ -218,6 +220,17 @@ export function startOutreachScheduler(storage: SchedulerStorage): void {
     sendDueLeadDripEmails({ storage, send: sendInboundEmail }).catch((err) => {
       console.error("[opportunities] inbound lead drip sender tick failed:", err);
     });
+    // The new lifecycle emails share this one timer too (never a second one).
+    sendDueDemoDripEmails({ storage, send: sendInboundEmail }).catch((err) => {
+      console.error("[opportunities] demo-activation drip sender tick failed:", err);
+    });
+    // Seed any newly eligible recipients, then send the due monthly rows. Seed
+    // first so a brand-new recipient's due-now row goes out on the same tick.
+    seedMonthlyLifecycleEmails({ storage })
+      .then(() => sendDueMonthlyEmails({ storage, send: sendInboundEmail }))
+      .catch((err) => {
+        console.error("[opportunities] monthly lifecycle sender tick failed:", err);
+      });
   }, DRIP_INTERVAL_MS);
   // Don't keep the event loop alive solely for the drip timer.
   if (typeof schedulerHandle.unref === "function") schedulerHandle.unref();
@@ -497,5 +510,10 @@ export async function sendDueLeadDripEmails(deps: LeadDripSendDeps): Promise<{ s
   return { sent, failed };
 }
 
-// The scheduler storage surface: outbound prospect drip + inbound lead drip.
-export type SchedulerStorage = DripDeps["storage"] & LeadDripSendDeps["storage"];
+// The scheduler storage surface: outbound prospect drip + inbound lead drip +
+// the new demo-activation drip and monthly lifecycle emails.
+export type SchedulerStorage = DripDeps["storage"] &
+  LeadDripSendDeps["storage"] &
+  DemoDripSendDeps["storage"] &
+  MonthlySeedDeps["storage"] &
+  MonthlySendDeps["storage"];

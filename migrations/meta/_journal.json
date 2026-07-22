@@ -162,6 +162,20 @@
       "when": 1783106663500,
       "tag": "0022_score_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1783106664000,
+      "tag": "0023_demo_activation_drip",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1783106664500,
+      "tag": "0024_monthly_lifecycle_and_suppression",
+      "breakpoints": true
     }
   ]
 }

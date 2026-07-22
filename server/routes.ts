@@ -65,6 +65,13 @@ import {
   enrollInboundLead,
   SEQUENCE_STEPS,
 } from "./opportunities";
+import { enrollDemoDrip } from "./demoDrip";
+import {
+  verifyUnsubscribeToken,
+  normalizeUnsubEmail,
+  unsubscribeConfirmationHtml,
+  unsubscribeInvalidHtml,
+} from "./unsubscribe";
 import {
   MAX_DEMO_SESSIONS,
   DEMO_SCENARIO_SLUG,
@@ -1711,6 +1718,32 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     res.status(204).end();
   });
 
+  // One-click unsubscribe for the new lifecycle emails (demo-activation drip +
+  // monthly "Practice makes money" email). Public, no auth: a signed token
+  // encodes the recipient's email. On a valid token we add the email to the
+  // authoritative suppression list (idempotent) and, if it belongs to a demo
+  // signup, flip that row's mirror flag. Always returns a friendly HTML page.
+  app.get("/api/unsubscribe", async (req, res) => {
+    const token = typeof req.query.token === "string" ? req.query.token : undefined;
+    const email = verifyUnsubscribeToken(token);
+    if (!email) {
+      return res.status(400).type("html").send(unsubscribeInvalidHtml());
+    }
+    try {
+      const normalized = normalizeUnsubEmail(email);
+      await storage.createEmailSuppression({ email: normalized, suppressedAt: new Date().toISOString() });
+      const signup = await storage.getDemoSignupByEmail(normalized);
+      if (signup && !signup.unsubscribed) {
+        await storage.updateDemoSignup(signup.id, { unsubscribed: true });
+      }
+    } catch (err) {
+      console.warn("[unsubscribe] Failed to record suppression:", err);
+      // Still show the confirmation: the user asked to opt out, and a transient
+      // write error should not surface as a scary error page.
+    }
+    res.status(200).type("html").send(unsubscribeConfirmationHtml());
+  });
+
   // Lead capture from the marketing site "Request Access" form.
   app.post("/api/leads", async (req, res) => {
     applyCors(req, res);
@@ -1924,6 +1957,13 @@ export function registerPublicAndAdminRoutes(app: Express): void {
 
     // Consume the code (single-use) and mark verified.
     await storage.updateDemoSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
+
+    // Enroll into the demo-activation drip on the FIRST verification only (never
+    // backfill an already-verified signup). Fire-and-forget: best-effort, never
+    // throws, so it can never block or fail the verify response.
+    if (!signup.verified) {
+      void enrollDemoDrip({ storage, send: sendInboundEmail }, { id: signup.id, email });
+    }
 
     if (isSessionLimitReached(signup.sessionsUsed, email)) {
       return res.json({ verified: true, limitReached: true, remaining: 0 });
