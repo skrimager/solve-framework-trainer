@@ -13,6 +13,7 @@ import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
 import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
+import { REQUIRED_QUALIFYING, QUALIFYING_SCORE } from "@/lib/progression";
 
 // Monthly fair-use practice standing returned by GET /api/users/:id/practice-usage.
 type PracticeCap = {
@@ -213,8 +214,6 @@ export default function Scenarios() {
   // REQUIRED_QUALIFYING sessions that EACH individually score QUALIFYING_SCORE+
   // at their current level. Mirror that count here so the banner can show
   // progress toward the next level (and, at Advanced, toward exam eligibility).
-  const REQUIRED_QUALIFYING = 5;
-  const QUALIFYING_SCORE = 85;
   const qualifyingCount = (mySessions ?? []).filter((s) => {
     if (s.status !== "completed" || s.score == null || s.score < QUALIFYING_SCORE) return false;
     const sc = (scenarios ?? []).find((x) => x.id === s.scenarioId);

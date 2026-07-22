@@ -1,12 +1,17 @@
 import type { Level } from "@/lib/auth";
 
-// Thresholds mirrored from the practice dashboard (scenarios.tsx): advancing a
-// level and becoming exam-eligible both require REQUIRED_QUALIFYING sessions that
-// EACH score QUALIFYING_SCORE or higher at the relevant level. Kept here as the
-// single source of truth so the academy path and the scenarios banner cannot
-// drift apart on the numbers they show.
-export const REQUIRED_QUALIFYING = 5;
-export const QUALIFYING_SCORE = 85;
+// Advancing a level and becoming exam-eligible both require REQUIRED_QUALIFYING
+// sessions that EACH score QUALIFYING_SCORE or higher at the relevant level.
+// These come from @shared/advancement — the single source of truth shared with
+// the server — and are re-exported under the local names this module already
+// uses so importers (and the academy path copy) stay unchanged.
+import {
+  ADVANCE_THRESHOLD,
+  REQUIRED_QUALIFYING_SESSIONS,
+} from "@shared/advancement";
+
+export const REQUIRED_QUALIFYING = REQUIRED_QUALIFYING_SESSIONS;
+export const QUALIFYING_SCORE = ADVANCE_THRESHOLD;
 
 export type StageKey = "beginner" | "intermediate" | "advanced" | "certified";
 export type StageState = "complete" | "current" | "locked";

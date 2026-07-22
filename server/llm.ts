@@ -1016,13 +1016,12 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
 // the ceiling — there is no auto-advance beyond it.
 export const LEVEL_ORDER = ["beginner", "intermediate", "advanced"] as const;
 export type Level = (typeof LEVEL_ORDER)[number];
-// A session "qualifies" at a level only if it INDIVIDUALLY scores at or above
-// this bar. This is not an average — one great session cannot carry a weak one.
-export const ADVANCE_THRESHOLD = 85;
-// A level (and, at Advanced, exam eligibility) is gated behind this many
-// individually-qualifying sessions at that level. Identical at every level and
-// on both tracks.
-export const REQUIRED_QUALIFYING_SESSIONS = 5;
+// The qualifying-score bar and the number of individually-qualifying sessions
+// needed to advance live in @shared/advancement so the client shows the exact
+// numbers the server enforces. Imported for local use and re-exported to keep
+// existing importers (routes.ts, tests) unchanged.
+import { ADVANCE_THRESHOLD, REQUIRED_QUALIFYING_SESSIONS } from "@shared/advancement";
+export { ADVANCE_THRESHOLD, REQUIRED_QUALIFYING_SESSIONS };
 
 // Counts how many of the given completed scores individually clear the
 // qualifying bar (>= ADVANCE_THRESHOLD). A sub-85 session simply doesn't count
