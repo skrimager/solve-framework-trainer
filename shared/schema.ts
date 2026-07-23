@@ -368,6 +368,10 @@ export const contacts = pgTable("contacts", {
   owner: text("owner"), // team member handling it (nullable; one admin today, designed for many)
   followUpDate: text("follow_up_date"), // ISO timestamp of the next scheduled follow-up (nullable)
   createdAt: text("created_at").notNull(),
+  // Set to an ISO timestamp when a contact is archived (soft, reversible); null
+  // means active. Archived contacts are hidden from the default list but keep
+  // their full history. Stored as text to match every other timestamp column here.
+  archivedAt: text("archived_at"),
 });
 
 export const insertContactSchema = createInsertSchema(contacts).omit({

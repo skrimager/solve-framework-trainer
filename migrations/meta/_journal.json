@@ -176,6 +176,13 @@
       "when": 1783106664500,
       "tag": "0024_monthly_lifecycle_and_suppression",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1783106665000,
+      "tag": "0025_contacts_archive",
+      "breakpoints": true
     }
   ]
 }

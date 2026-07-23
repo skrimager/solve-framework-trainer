@@ -1,6 +1,17 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+  AlertDialogCancel,
+} from "@/components/ui/alert-dialog";
 import {
   Table,
   TableHeader,
@@ -18,7 +29,7 @@ import {
   type ProspectBatchDetail,
   type ProspectActivityRow,
 } from "@/lib/adminApi";
-import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target, Menu } from "lucide-react";
+import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target, Menu, Trash2, Archive, ArchiveRestore } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAVY = "#0A1A30";
@@ -296,6 +307,15 @@ function Tag({ label }: { label: string }) {
   );
 }
 
+type ContactView = "active" | "archived";
+
+// A pending confirmation. Delete is irreversible so its copy says so plainly.
+type PendingConfirm =
+  | { kind: "archive"; id: number; name: string }
+  | { kind: "unarchive"; id: number; name: string }
+  | { kind: "delete"; id: number; name: string }
+  | { kind: "bulkDelete"; ids: number[] };
+
 function ContactsSection() {
   const [rows, setRows] = useState<AdminContact[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -305,20 +325,26 @@ function ContactsSection() {
     priority: "",
     status: "",
   });
+  const [view, setView] = useState<ContactView>("active");
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
+  const [busy, setBusy] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await adminApi.listContacts({ ...filters, sort: "followUp" });
+      const res = await adminApi.listContacts({ ...filters, archived: view, sort: "followUp" });
       setRows(res.rows);
+      // Drop any selections that are no longer present in the current view.
+      setSelectedIds((prev) => prev.filter((id) => res.rows.some((r) => r.id === id)));
     } catch {
       setError("Failed to load data.");
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, view]);
 
   useEffect(() => {
     load();
@@ -332,7 +358,35 @@ function ContactsSection() {
     [load],
   );
 
+  function toggleRow(id: number) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function toggleAll() {
+    if (!rows) return;
+    setSelectedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => r.id)));
+  }
+
+  async function runConfirm() {
+    if (!confirm) return;
+    setBusy(true);
+    try {
+      if (confirm.kind === "archive") await adminApi.archiveContact(confirm.id);
+      else if (confirm.kind === "unarchive") await adminApi.unarchiveContact(confirm.id);
+      else if (confirm.kind === "delete") await adminApi.deleteContact(confirm.id);
+      else if (confirm.kind === "bulkDelete") await adminApi.bulkDeleteContacts(confirm.ids);
+      setConfirm(null);
+      if (selectedId && (confirm.kind === "delete" || confirm.kind === "bulkDelete")) setSelectedId(null);
+      await load();
+    } catch {
+      setError("Action failed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selected = rows?.find((r) => r.id === selectedId) ?? null;
+  const allChecked = !!rows && rows.length > 0 && selectedIds.length === rows.length;
 
   return (
     <div className="space-y-4">
@@ -341,14 +395,48 @@ function ContactsSection() {
           <h1 className="text-2xl font-bold text-white">Contacts</h1>
           {rows && <p className="text-white/60 text-sm mt-1">{rows.length} contact(s)</p>}
         </div>
-        <Button
-          onClick={() => adminApi.downloadContactsCsv(filters)}
-          style={{ backgroundColor: ORANGE, color: "white" }}
-          data-testid="button-export-contacts"
-        >
-          <Download className="w-4 h-4 mr-2" />
-          Export CSV
-        </Button>
+        <div className="flex items-center gap-2">
+          {selectedIds.length > 0 && (
+            <Button
+              onClick={() => setConfirm({ kind: "bulkDelete", ids: selectedIds })}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              data-testid="button-bulk-delete-contacts"
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              Delete Selected ({selectedIds.length})
+            </Button>
+          )}
+          <Button
+            onClick={() => adminApi.downloadContactsCsv({ ...filters, archived: view })}
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            data-testid="button-export-contacts"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            Export CSV
+          </Button>
+        </div>
+      </div>
+
+      {/* Active / Archived tabs */}
+      <div className="flex items-center gap-2">
+        {(["active", "archived"] as ContactView[]).map((v) => (
+          <button
+            key={v}
+            onClick={() => {
+              setView(v);
+              setSelectedIds([]);
+            }}
+            data-testid={`tab-contacts-${v}`}
+            className="text-sm rounded px-3 py-1 border"
+            style={
+              view === v
+                ? { backgroundColor: ORANGE, color: "white", borderColor: ORANGE }
+                : { backgroundColor: "transparent", color: "rgba(255,255,255,0.7)", borderColor: "rgba(255,255,255,0.2)" }
+            }
+          >
+            {v === "active" ? "Active" : "Archived"}
+          </button>
+        ))}
       </div>
 
       {/* Filters */}
@@ -398,6 +486,14 @@ function ContactsSection() {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent border-white/10">
+                <TableHead className={headCls}>
+                  <Checkbox
+                    checked={allChecked}
+                    onCheckedChange={toggleAll}
+                    aria-label="Select all contacts"
+                    data-testid="checkbox-contacts-select-all"
+                  />
+                </TableHead>
                 <TableHead className={headCls}>Name</TableHead>
                 <TableHead className={headCls}>Email</TableHead>
                 <TableHead className={headCls}>Tags</TableHead>
@@ -406,10 +502,11 @@ function ContactsSection() {
                 <TableHead className={headCls}>Owner</TableHead>
                 <TableHead className={headCls}>Follow-up</TableHead>
                 <TableHead className={headCls}>Status</TableHead>
+                <TableHead className={headCls}>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.length === 0 && <EmptyRow span={8} />}
+              {rows.length === 0 && <EmptyRow span={10} />}
               {rows.map((r) => (
                 <TableRow
                   key={r.id}
@@ -417,6 +514,14 @@ function ContactsSection() {
                   data-testid={`row-contact-${r.id}`}
                   onClick={() => setSelectedId(r.id)}
                 >
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                      checked={selectedIds.includes(r.id)}
+                      onCheckedChange={() => toggleRow(r.id)}
+                      aria-label={`Select ${r.name}`}
+                      data-testid={`checkbox-contact-${r.id}`}
+                    />
+                  </TableCell>
                   <TableCell className={cellCls}>{r.name}</TableCell>
                   <TableCell className={cellCls}>{r.email}</TableCell>
                   <TableCell>
@@ -488,6 +593,37 @@ function ContactsSection() {
                       ))}
                     </select>
                   </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center gap-1">
+                      {r.archivedAt ? (
+                        <button
+                          onClick={() => setConfirm({ kind: "unarchive", id: r.id, name: r.name })}
+                          data-testid={`button-unarchive-contact-${r.id}`}
+                          title="Restore to active"
+                          className="p-1.5 rounded text-white/70 hover:text-white hover:bg-white/10"
+                        >
+                          <ArchiveRestore className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setConfirm({ kind: "archive", id: r.id, name: r.name })}
+                          data-testid={`button-archive-contact-${r.id}`}
+                          title="Archive"
+                          className="p-1.5 rounded text-white/70 hover:text-white hover:bg-white/10"
+                        >
+                          <Archive className="w-4 h-4" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setConfirm({ kind: "delete", id: r.id, name: r.name })}
+                        data-testid={`button-delete-contact-${r.id}`}
+                        title="Delete permanently"
+                        className="p-1.5 rounded text-red-300 hover:text-red-200 hover:bg-red-500/10"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -502,7 +638,88 @@ function ContactsSection() {
           onChanged={load}
         />
       )}
+
+      <ContactConfirmDialog
+        confirm={confirm}
+        busy={busy}
+        onCancel={() => setConfirm(null)}
+        onConfirm={runConfirm}
+      />
     </div>
+  );
+}
+
+// Confirmation for archive / unarchive / delete / bulk delete. Delete copy states
+// plainly that the action is permanent and cannot be undone.
+function ContactConfirmDialog({
+  confirm,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  confirm: PendingConfirm | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const copy = (() => {
+    if (!confirm) return null;
+    if (confirm.kind === "archive")
+      return {
+        title: "Archive this contact?",
+        body: `${confirm.name} will be hidden from the active list but kept under the Archived tab with full history intact. You can restore them at any time.`,
+        action: "Archive",
+        destructive: false,
+      };
+    if (confirm.kind === "unarchive")
+      return {
+        title: "Restore this contact?",
+        body: `${confirm.name} will move back into the active contacts list.`,
+        action: "Restore",
+        destructive: false,
+      };
+    if (confirm.kind === "delete")
+      return {
+        title: "Permanently delete this contact?",
+        body: `This permanently removes ${confirm.name} along with all of their history (events and drip emails). This action is permanent and cannot be undone.`,
+        action: "Delete permanently",
+        destructive: true,
+      };
+    return {
+      title: `Permanently delete ${confirm.ids.length} contact(s)?`,
+      body: `This permanently removes the selected contact(s) and all of their history (events and drip emails). This action is permanent and cannot be undone.`,
+      action: `Delete ${confirm.ids.length} contact(s)`,
+      destructive: true,
+    };
+  })();
+
+  return (
+    <AlertDialog open={!!confirm} onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <AlertDialogContent style={{ backgroundColor: NAVY }} className="border-white/10 text-white">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-white" data-testid="text-confirm-title">
+            {copy?.title}
+          </AlertDialogTitle>
+          <AlertDialogDescription className="text-white/70" data-testid="text-confirm-body">
+            {copy?.body}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy} data-testid="button-confirm-cancel">
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => { e.preventDefault(); onConfirm(); }}
+            disabled={busy}
+            data-testid="button-confirm-action"
+            className={copy?.destructive ? "bg-red-600 hover:bg-red-700 text-white" : ""}
+            style={copy?.destructive ? undefined : { backgroundColor: ORANGE, color: "white" }}
+          >
+            {busy ? "Working..." : copy?.action}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
