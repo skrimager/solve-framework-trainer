@@ -2,8 +2,10 @@ import { users, scenarios, sessions, offices, billingEvents, adminUsers, contact
 import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray, and, desc, lte } from "drizzle-orm";
+import { eq, inArray, and, or, desc, lte } from "drizzle-orm";
 import { filterContacts, sortByFollowUp, runContactCascade, type ContactFilters } from "./contacts";
+import { runUserCascade, checkUserDeletable, userIsPaying, UserDeleteBlockedError, type UserCascade } from "./users";
+import { runOfficeCascade, officeIsPayingCustomer, OfficeDeleteBlockedError } from "./offices";
 
 const { Pool } = pg;
 
@@ -18,6 +20,47 @@ const pool = new Pool({
 
 export const db = drizzle(pool);
 
+// A drizzle transaction handle (same query builder as `db`).
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// Build the FK-safe user-delete cascade ops bound to a transaction. Shared by
+// deleteUser (single user) and deleteOffice (each of a test office's users), so
+// both take the identical dependency-ordered path. real_conversations is keyed
+// on EITHER user column; monthly_lifecycle_emails only removes this user's
+// paying-user rows (never a demo_signup row that shares the id).
+function userCascadeOps(tx: Tx, userId: number): UserCascade {
+  return {
+    deleteCoachingMessages: async () => {
+      await tx.delete(coachingMessages).where(eq(coachingMessages.userId, userId));
+    },
+    deleteCertificationAttempts: async () => {
+      await tx.delete(certificationAttempts).where(eq(certificationAttempts.userId, userId));
+    },
+    deleteIndustryCertifications: async () => {
+      await tx.delete(industryCertifications).where(eq(industryCertifications.userId, userId));
+    },
+    deleteAcademyCredits: async () => {
+      await tx.delete(academyCredits).where(eq(academyCredits.userId, userId));
+    },
+    deleteRealConversations: async () => {
+      await tx
+        .delete(realConversations)
+        .where(or(eq(realConversations.submittedByUserId, userId), eq(realConversations.subjectRepUserId, userId)));
+    },
+    deleteMonthlyLifecycleEmails: async () => {
+      await tx
+        .delete(monthlyLifecycleEmails)
+        .where(and(eq(monthlyLifecycleEmails.recipientType, "paying_user"), eq(monthlyLifecycleEmails.recipientId, userId)));
+    },
+    deleteSessions: async () => {
+      await tx.delete(sessions).where(eq(sessions.userId, userId));
+    },
+    deleteUserRow: async () => {
+      await tx.delete(users).where(eq(users.id, userId));
+    },
+  };
+}
+
 export interface IStorage {
   createOffice(office: InsertOffice): Promise<Office>;
   getOffice(id: number): Promise<Office | undefined>;
@@ -25,8 +68,22 @@ export interface IStorage {
   getOfficeByStripeCustomerId(customerId: string): Promise<Office | undefined>;
   getOfficeByStripeSubscriptionId(subscriptionId: string): Promise<Office | undefined>;
   updateOffice(id: number, patch: Partial<Office>): Promise<Office | undefined>;
+  // Soft archive / restore (reversible), mirroring archiveContact. Neither
+  // touches Stripe or any dependent rows.
+  archiveOffice(id: number): Promise<Office | undefined>;
+  unarchiveOffice(id: number): Promise<Office | undefined>;
+  // Hard, permanent delete of a NON-paying (test/trial) office and its dependent
+  // rows in FK-safe order, in one transaction. Throws OfficeDeleteBlockedError if
+  // the office is a real paying customer (archive-only). Returns false if the
+  // office did not exist.
+  deleteOffice(id: number): Promise<boolean>;
 
   getUser(id: number): Promise<User | undefined>;
+  // Hard, permanent delete of a NON-paying user and its dependent rows in FK-safe
+  // order, in one transaction. Throws UserDeleteBlockedError if the user has an
+  // active paid seat or is the last manager of their office. Returns false if the
+  // user did not exist.
+  deleteUser(id: number): Promise<boolean>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: number, patch: Partial<InsertUser>): Promise<User | undefined>;
@@ -82,6 +139,11 @@ export interface IStorage {
 
   createVisitorPageView(view: InsertVisitorPageView): Promise<VisitorPageView>;
   listVisitorPageViews(limit?: number): Promise<VisitorPageView[]>;
+  // Standalone analytics rows: no cascade needed (nothing references them).
+  // Bulk delete by id and "clear all" both return the number of rows removed.
+  deleteVisitorPageViews(ids: number[]): Promise<number>;
+  deleteAllVisitorPageViews(): Promise<number>;
+  countVisitorPageViews(): Promise<number>;
 
   listOffices(): Promise<Office[]>;
 
@@ -232,9 +294,84 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
+  async archiveOffice(id: number): Promise<Office | undefined> {
+    const rows = await db
+      .update(offices)
+      .set({ archivedAt: new Date().toISOString() })
+      .where(eq(offices.id, id))
+      .returning();
+    return rows[0];
+  }
+
+  async unarchiveOffice(id: number): Promise<Office | undefined> {
+    const rows = await db.update(offices).set({ archivedAt: null }).where(eq(offices.id, id)).returning();
+    return rows[0];
+  }
+
+  async deleteOffice(id: number): Promise<boolean> {
+    const office = await this.getOffice(id);
+    if (!office) return false;
+    const officeUsers = await this.listUsersByOffice(id);
+    // Guard: real paying customers (live Stripe subscription or any paid-seat
+    // user) are archive-only and must never be hard-deleted.
+    if (officeIsPayingCustomer(office, officeUsers)) {
+      throw new OfficeDeleteBlockedError(
+        "This office has an active subscription or paying users and cannot be deleted. Archive it instead.",
+      );
+    }
+    // Defensive: never delete a user that individually shows as a real paid seat.
+    // (Unreachable while the office-level guard holds, but abort clearly if the
+    // underlying data is ever inconsistent rather than deleting a paid seat.)
+    if (officeUsers.some(userIsPaying)) {
+      throw new OfficeDeleteBlockedError(
+        "This office has a seat-active paying user and cannot be deleted. Archive it instead.",
+      );
+    }
+    await db.transaction(async (tx) => {
+      await runOfficeCascade(id, {
+        deleteUsers: async () => {
+          for (const u of officeUsers) {
+            await runUserCascade(u.id, userCascadeOps(tx, u.id));
+          }
+        },
+        deleteAcademyCredits: async () => {
+          await tx.delete(academyCredits).where(eq(academyCredits.officeId, id));
+        },
+        deleteRealConversations: async () => {
+          await tx.delete(realConversations).where(eq(realConversations.officeId, id));
+        },
+        detachPaidOfficeSignups: async () => {
+          await tx.update(paidOfficeSignups).set({ officeId: null }).where(eq(paidOfficeSignups.officeId, id));
+        },
+        detachBillingEvents: async () => {
+          await tx.update(billingEvents).set({ officeId: null }).where(eq(billingEvents.officeId, id));
+        },
+        deleteOfficeRow: async () => {
+          await tx.delete(offices).where(eq(offices.id, id));
+        },
+      });
+    });
+    return true;
+  }
+
   async getUser(id: number): Promise<User | undefined> {
     const rows = await db.select().from(users).where(eq(users.id, id));
     return rows[0];
+  }
+
+  async deleteUser(id: number): Promise<boolean> {
+    const user = await this.getUser(id);
+    if (!user) return false;
+    // Guard: paying users and the last remaining manager of an office are never
+    // deletable. otherManagerCount = managers in the same office excluding self.
+    const officeUsers = await this.listUsersByOffice(user.officeId);
+    const otherManagerCount = officeUsers.filter((u) => u.role === "manager" && u.id !== id).length;
+    const check = checkUserDeletable(user, { otherManagerCount });
+    if (!check.ok) throw new UserDeleteBlockedError(check.reason);
+    await db.transaction(async (tx) => {
+      await runUserCascade(id, userCascadeOps(tx, id));
+    });
+    return true;
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
@@ -460,6 +597,25 @@ export class DatabaseStorage implements IStorage {
 
   async listVisitorPageViews(limit = 1000): Promise<VisitorPageView[]> {
     return db.select().from(visitorPageViews).orderBy(desc(visitorPageViews.id)).limit(limit);
+  }
+
+  async deleteVisitorPageViews(ids: number[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const rows = await db
+      .delete(visitorPageViews)
+      .where(inArray(visitorPageViews.id, ids))
+      .returning({ id: visitorPageViews.id });
+    return rows.length;
+  }
+
+  async deleteAllVisitorPageViews(): Promise<number> {
+    const rows = await db.delete(visitorPageViews).returning({ id: visitorPageViews.id });
+    return rows.length;
+  }
+
+  async countVisitorPageViews(): Promise<number> {
+    const rows = await db.select({ id: visitorPageViews.id }).from(visitorPageViews);
+    return rows.length;
   }
 
   async listOffices(): Promise<Office[]> {

@@ -21,6 +21,10 @@ export const offices = pgTable("offices", {
   managerItemId: text("manager_item_id"), // subscription item id for the flat annual Manager Dashboard line
   seatItemId: text("seat_item_id"), // subscription item id for the tiered monthly Consultant Seat line (added lazily on first seat)
   activeSeatCount: integer("active_seat_count").notNull().default(0), // number of paid seats currently reflected in Stripe quantity
+  // Soft-archive timestamp (nullable ISO string), mirroring contacts.archivedAt.
+  // Null = active; a value = archived (hidden from the default Sales list but
+  // reversible via unarchive). Never touches Stripe or dependent rows.
+  archivedAt: text("archived_at"),
 });
 
 export const insertOfficeSchema = createInsertSchema(offices).omit({

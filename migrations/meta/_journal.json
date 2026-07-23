@@ -183,6 +183,13 @@
       "when": 1783106665000,
       "tag": "0025_contacts_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1783106665500,
+      "tag": "0026_offices_archive",
+      "breakpoints": true
     }
   ]
 }

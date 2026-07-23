@@ -28,6 +28,8 @@ import {
   type ProspectSearchRow,
   type ProspectBatchDetail,
   type ProspectActivityRow,
+  type SalesView,
+  type SalesResponse,
 } from "@/lib/adminApi";
 import { Download, LogOut, Users, FileText, Eye, DollarSign, X, Mic, Target, Menu, Trash2, Archive, ArchiveRestore } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -189,6 +191,9 @@ function SectionView({ section }: { section: AdminSection }) {
   if (section === "opportunities") {
     return <OpportunitiesSection />;
   }
+  if (section === "sales") {
+    return <SalesSection />;
+  }
   return <GenericSectionView section={section} />;
 }
 
@@ -221,13 +226,7 @@ function GenericSectionView({ section }: { section: AdminSection }) {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">{title}</h1>
-          {section === "sales" && data && (
-            <p className="text-white/60 text-sm mt-1" data-testid="text-sales-summary">
-              {data.activeOffices} active office(s) · Total MRR ${data.totalMrr}
-              {data.totalAcademyCreditDisplay ? ` · Academy Credits ${data.totalAcademyCreditDisplay}` : ""}
-            </p>
-          )}
-          {section !== "sales" && data?.rows && (
+          {data?.rows && (
             <p className="text-white/60 text-sm mt-1">{data.rows.length} row(s)</p>
           )}
         </div>
@@ -246,9 +245,8 @@ function GenericSectionView({ section }: { section: AdminSection }) {
         {error && <p className="p-6 text-red-300" data-testid="text-section-error">{error}</p>}
         {!loading && !error && data && (
           <>
-            {section === "visitors" && <VisitorsTable rows={data.rows} />}
-            {section === "users" && <UsersTable rows={data.rows} />}
-            {section === "sales" && <SalesTable rows={data.rows} onChanged={load} />}
+            {section === "visitors" && <VisitorsTable rows={data.rows} onChanged={load} />}
+            {section === "users" && <UsersTable rows={data.rows} onChanged={load} />}
             {section === "paid-signups" && <PaidSignupsTable rows={data.rows} />}
             {section === "demo" && <DemoTable rows={data.rows} analytics={data.analytics} />}
           </>
@@ -271,29 +269,131 @@ function EmptyRow({ span }: { span: number }) {
   );
 }
 
-function VisitorsTable({ rows }: { rows: any[] }) {
+// Visitor rows are standalone anonymous analytics with no dependent rows, so
+// deletes are plain (no cascade). Supports multi-select bulk delete plus a
+// prominent "Clear All" convenience for wiping large volumes of no-data rows.
+type VisitorConfirm =
+  | { kind: "bulkDelete"; ids: number[] }
+  | { kind: "clearAll"; count: number };
+
+function VisitorsTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }) {
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [confirm, setConfirm] = useState<VisitorConfirm | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggleRow(id: number) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function toggleAll() {
+    setSelectedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => r.id)));
+  }
+
+  async function runConfirm() {
+    if (!confirm) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (confirm.kind === "bulkDelete") await adminApi.bulkDeleteVisitors(confirm.ids);
+      else await adminApi.clearAllVisitors();
+      setConfirm(null);
+      setSelectedIds([]);
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Action failed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const allChecked = rows.length > 0 && selectedIds.length === rows.length;
+  const confirmCopy =
+    confirm?.kind === "bulkDelete"
+      ? {
+          title: `Permanently delete ${confirm.ids.length} visitor row(s)?`,
+          body: "This permanently removes the selected page-view records. This action is permanent and cannot be undone.",
+          action: `Delete ${confirm.ids.length} row(s)`,
+        }
+      : confirm?.kind === "clearAll"
+        ? {
+            title: `Clear all ${confirm.count} visitor row(s)?`,
+            body: "This permanently removes every visitor page-view record. This action is permanent and cannot be undone.",
+            action: "Clear all visitors",
+          }
+        : { title: "", body: "", action: "" };
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow className="hover:bg-transparent border-white/10">
-          <TableHead className={headCls}>Path</TableHead>
-          <TableHead className={headCls}>Referrer</TableHead>
-          <TableHead className={headCls}>Token</TableHead>
-          <TableHead className={headCls}>Timestamp</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 && <EmptyRow span={4} />}
-        {rows.map((r) => (
-          <TableRow key={r.id} className="border-white/10" data-testid={`row-visitor-${r.id}`}>
-            <TableCell className={cellCls}>{r.path}</TableCell>
-            <TableCell className={cellCls}>{r.referrer || "-"}</TableCell>
-            <TableCell className="text-white/50 font-mono text-xs">{(r.visitorToken || "").slice(0, 12)}</TableCell>
-            <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
+    <>
+      <div className="flex items-center justify-end gap-2 p-3 border-b border-white/10">
+        {selectedIds.length > 0 && (
+          <Button
+            onClick={() => { setError(null); setConfirm({ kind: "bulkDelete", ids: selectedIds }); }}
+            className="bg-red-600 hover:bg-red-700 text-white"
+            data-testid="button-bulk-delete-visitors"
+          >
+            <Trash2 className="w-4 h-4 mr-2" />
+            Delete Selected ({selectedIds.length})
+          </Button>
+        )}
+        <Button
+          onClick={() => { setError(null); setConfirm({ kind: "clearAll", count: rows.length }); }}
+          disabled={rows.length === 0}
+          className="bg-red-600 hover:bg-red-700 text-white"
+          data-testid="button-clear-all-visitors"
+        >
+          <Trash2 className="w-4 h-4 mr-2" />
+          Clear All Visitors
+        </Button>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent border-white/10">
+            <TableHead className={headCls}>
+              <Checkbox
+                checked={allChecked}
+                onCheckedChange={toggleAll}
+                aria-label="Select all visitors"
+                data-testid="checkbox-visitors-select-all"
+              />
+            </TableHead>
+            <TableHead className={headCls}>Path</TableHead>
+            <TableHead className={headCls}>Referrer</TableHead>
+            <TableHead className={headCls}>Token</TableHead>
+            <TableHead className={headCls}>Timestamp</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {rows.length === 0 && <EmptyRow span={5} />}
+          {rows.map((r) => (
+            <TableRow key={r.id} className="border-white/10" data-testid={`row-visitor-${r.id}`}>
+              <TableCell>
+                <Checkbox
+                  checked={selectedIds.includes(r.id)}
+                  onCheckedChange={() => toggleRow(r.id)}
+                  aria-label={`Select visitor ${r.id}`}
+                  data-testid={`checkbox-visitor-${r.id}`}
+                />
+              </TableCell>
+              <TableCell className={cellCls}>{r.path}</TableCell>
+              <TableCell className={cellCls}>{r.referrer || "-"}</TableCell>
+              <TableCell className="text-white/50 font-mono text-xs">{(r.visitorToken || "").slice(0, 12)}</TableCell>
+              <TableCell className="text-white/60 text-xs">{r.createdAt}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirmCopy.title}
+        body={confirmCopy.body}
+        action={confirmCopy.action}
+        destructive
+        busy={busy}
+        error={error}
+        onCancel={() => { setConfirm(null); setError(null); }}
+        onConfirm={runConfirm}
+      />
+    </>
   );
 }
 
@@ -723,6 +823,66 @@ function ContactConfirmDialog({
   );
 }
 
+// Reusable confirm dialog for the Visitors / Sales / Users delete + archive
+// actions. `error` renders the server's blocked-reason (e.g. a paying office or
+// last-manager block) inline, keeping the dialog open so the admin sees exactly
+// why the action was refused.
+function ConfirmDialog({
+  open,
+  title,
+  body,
+  action,
+  destructive,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  body: string;
+  action: string;
+  destructive?: boolean;
+  busy: boolean;
+  error?: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(o) => { if (!o) onCancel(); }}>
+      <AlertDialogContent style={{ backgroundColor: NAVY }} className="border-white/10 text-white">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-white" data-testid="text-confirm-title">
+            {title}
+          </AlertDialogTitle>
+          <AlertDialogDescription className="text-white/70" data-testid="text-confirm-body">
+            {body}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {error && (
+          <p className="text-sm text-red-300" data-testid="text-confirm-error">
+            {error}
+          </p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy} data-testid="button-confirm-cancel">
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => { e.preventDefault(); onConfirm(); }}
+            disabled={busy}
+            data-testid="button-confirm-action"
+            className={destructive ? "bg-red-600 hover:bg-red-700 text-white" : ""}
+            style={destructive ? undefined : { backgroundColor: ORANGE, color: "white" }}
+          >
+            {busy ? "Working..." : action}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 function ContactDetail({
   contact,
   onClose,
@@ -840,35 +1000,81 @@ function ContactDetail({
   );
 }
 
-function UsersTable({ rows }: { rows: any[] }) {
+// A user hard-delete is guarded server-side: a real paid seat (seatActive and
+// not a demo/QA account) or the last manager of an office is blocked with a 409,
+// whose reason is surfaced verbatim inside the confirm dialog.
+function UsersTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }) {
+  const [confirm, setConfirm] = useState<{ id: number; name: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function runConfirm() {
+    if (!confirm) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await adminApi.deleteUser(confirm.id);
+      setConfirm(null);
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow className="hover:bg-transparent border-white/10">
-          <TableHead className={headCls}>Username</TableHead>
-          <TableHead className={headCls}>Name</TableHead>
-          <TableHead className={headCls}>Office</TableHead>
-          <TableHead className={headCls}>Role</TableHead>
-          <TableHead className={headCls}>Level</TableHead>
-          <TableHead className={headCls}>Seat</TableHead>
-          <TableHead className={headCls}>Office Subscription</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 && <EmptyRow span={7} />}
-        {rows.map((r) => (
-          <TableRow key={r.id} className="border-white/10" data-testid={`row-user-${r.id}`}>
-            <TableCell className={cellCls}>{r.username}</TableCell>
-            <TableCell className={cellCls}>{r.displayName}</TableCell>
-            <TableCell className={cellCls}>{r.office}</TableCell>
-            <TableCell className={cellCls}>{r.role}</TableCell>
-            <TableCell className={cellCls}>{r.currentLevel}</TableCell>
-            <TableCell className={cellCls}>{r.seatActive}{r.isDemoAccount === "yes" ? " (demo)" : ""}</TableCell>
-            <TableCell className={cellCls}>{r.subscriptionStatus}</TableCell>
+    <>
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent border-white/10">
+            <TableHead className={headCls}>Username</TableHead>
+            <TableHead className={headCls}>Name</TableHead>
+            <TableHead className={headCls}>Office</TableHead>
+            <TableHead className={headCls}>Role</TableHead>
+            <TableHead className={headCls}>Level</TableHead>
+            <TableHead className={headCls}>Seat</TableHead>
+            <TableHead className={headCls}>Office Subscription</TableHead>
+            <TableHead className={headCls}>Actions</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {rows.length === 0 && <EmptyRow span={8} />}
+          {rows.map((r) => (
+            <TableRow key={r.id} className="border-white/10" data-testid={`row-user-${r.id}`}>
+              <TableCell className={cellCls}>{r.username}</TableCell>
+              <TableCell className={cellCls}>{r.displayName}</TableCell>
+              <TableCell className={cellCls}>{r.office}</TableCell>
+              <TableCell className={cellCls}>{r.role}</TableCell>
+              <TableCell className={cellCls}>{r.currentLevel}</TableCell>
+              <TableCell className={cellCls}>{r.seatActive}{r.isDemoAccount === "yes" ? " (demo)" : ""}</TableCell>
+              <TableCell className={cellCls}>{r.subscriptionStatus}</TableCell>
+              <TableCell>
+                <button
+                  onClick={() => { setError(null); setConfirm({ id: r.id, name: r.displayName || r.username }); }}
+                  data-testid={`button-delete-user-${r.id}`}
+                  title="Delete permanently"
+                  className="p-1.5 rounded text-red-300 hover:text-red-200 hover:bg-red-500/10"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <ConfirmDialog
+        open={!!confirm}
+        title="Permanently delete this user?"
+        body={`This permanently removes ${confirm?.name ?? "this user"} along with all of their coaching, certification, credit, conversation, email and session history. This action is permanent and cannot be undone. Real paid seats cannot be deleted.`}
+        action="Delete permanently"
+        destructive
+        busy={busy}
+        error={error}
+        onCancel={() => { setConfirm(null); setError(null); }}
+        onConfirm={runConfirm}
+      />
+    </>
   );
 }
 
@@ -1315,7 +1521,163 @@ function BatchDetail({
   );
 }
 
-function SalesTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }) {
+// Sales rollup over the `offices` table. A real paying customer can only be
+// archived (delete is blocked server-side with a 409); test/non-paying offices
+// can be hard-deleted, cascading through their non-paying test users. Active /
+// Archived tabs drive the server-side ?archived= filter.
+type SalesConfirm =
+  | { kind: "archive"; id: number; name: string }
+  | { kind: "unarchive"; id: number; name: string }
+  | { kind: "delete"; id: number; name: string };
+
+function SalesSection() {
+  const [data, setData] = useState<SalesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<SalesView>("active");
+  const [confirm, setConfirm] = useState<SalesConfirm | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await adminApi.listSales(view));
+    } catch {
+      setError("Failed to load data.");
+    } finally {
+      setLoading(false);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function runConfirm() {
+    if (!confirm) return;
+    setBusy(true);
+    setConfirmError(null);
+    try {
+      if (confirm.kind === "archive") await adminApi.archiveOffice(confirm.id);
+      else if (confirm.kind === "unarchive") await adminApi.unarchiveOffice(confirm.id);
+      else await adminApi.deleteOffice(confirm.id);
+      setConfirm(null);
+      await load();
+    } catch (e) {
+      setConfirmError(e instanceof Error ? e.message : "Action failed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const copy = (() => {
+    if (!confirm) return { title: "", body: "", action: "", destructive: false };
+    if (confirm.kind === "archive")
+      return {
+        title: "Archive this office?",
+        body: `${confirm.name} will be hidden from the active Sales list but kept under the Archived tab with all data intact. You can restore it at any time.`,
+        action: "Archive",
+        destructive: false,
+      };
+    if (confirm.kind === "unarchive")
+      return {
+        title: "Restore this office?",
+        body: `${confirm.name} will move back into the active Sales list.`,
+        action: "Restore",
+        destructive: false,
+      };
+    return {
+      title: "Permanently delete this office?",
+      body: `This permanently removes ${confirm.name} along with its test users and all dependent data. This action is permanent and cannot be undone. A real paying customer cannot be deleted, only archived.`,
+      action: "Delete permanently",
+      destructive: true,
+    };
+  })();
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Sales</h1>
+          {data && (
+            <p className="text-white/60 text-sm mt-1" data-testid="text-sales-summary">
+              {data.activeOffices} active office(s) · Total MRR ${data.totalMrr}
+              {data.totalAcademyCreditDisplay ? ` · Academy Credits ${data.totalAcademyCreditDisplay}` : ""}
+            </p>
+          )}
+        </div>
+        <Button
+          onClick={() => adminApi.downloadCsv("sales")}
+          style={{ backgroundColor: ORANGE, color: "white" }}
+          data-testid="button-export-sales"
+        >
+          <Download className="w-4 h-4 mr-2" />
+          Export CSV
+        </Button>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {(["active", "archived"] as SalesView[]).map((v) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            data-testid={`tab-sales-${v}`}
+            className="text-sm rounded px-3 py-1 border"
+            style={
+              view === v
+                ? { backgroundColor: ORANGE, color: "white", borderColor: ORANGE }
+                : { backgroundColor: "transparent", color: "rgba(255,255,255,0.7)", borderColor: "rgba(255,255,255,0.2)" }
+            }
+          >
+            {v === "active" ? "Active" : "Archived"}
+          </button>
+        ))}
+      </div>
+
+      <div className="rounded-lg border border-white/10 overflow-auto" style={{ backgroundColor: NAVY }}>
+        {loading && <p className="p-6 text-white/50">Loading…</p>}
+        {error && <p className="p-6 text-red-300" data-testid="text-section-error">{error}</p>}
+        {!loading && !error && data && (
+          <SalesTable
+            rows={data.rows}
+            onChanged={load}
+            onArchive={(r) => { setConfirmError(null); setConfirm({ kind: "archive", id: r.officeId, name: r.officeName }); }}
+            onUnarchive={(r) => { setConfirmError(null); setConfirm({ kind: "unarchive", id: r.officeId, name: r.officeName }); }}
+            onDelete={(r) => { setConfirmError(null); setConfirm({ kind: "delete", id: r.officeId, name: r.officeName }); }}
+          />
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={!!confirm}
+        title={copy.title}
+        body={copy.body}
+        action={copy.action}
+        destructive={copy.destructive}
+        busy={busy}
+        error={confirmError}
+        onCancel={() => { setConfirm(null); setConfirmError(null); }}
+        onConfirm={runConfirm}
+      />
+    </div>
+  );
+}
+
+function SalesTable({
+  rows,
+  onChanged,
+  onArchive,
+  onUnarchive,
+  onDelete,
+}: {
+  rows: any[];
+  onChanged?: () => void;
+  onArchive?: (r: any) => void;
+  onUnarchive?: (r: any) => void;
+  onDelete?: (r: any) => void;
+}) {
   const [activatingId, setActivatingId] = useState<number | null>(null);
 
   const activate = async (id: number) => {
@@ -1343,10 +1705,11 @@ function SalesTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }
           <TableHead className={headCls}>Manager MRR</TableHead>
           <TableHead className={headCls}>MRR</TableHead>
           <TableHead className={headCls}>Academy Credits</TableHead>
+          <TableHead className={headCls}>Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.length === 0 && <EmptyRow span={8} />}
+        {rows.length === 0 && <EmptyRow span={9} />}
         {rows.map((r) => (
           <TableRow key={r.officeId} className="border-white/10" data-testid={`row-sales-${r.officeId}`}>
             <TableCell className={cellCls}>{r.officeName}</TableCell>
@@ -1372,6 +1735,37 @@ function SalesTable({ rows, onChanged }: { rows: any[]; onChanged?: () => void }
             <TableCell className="text-white font-semibold">${r.mrr}</TableCell>
             <TableCell className={cellCls} data-testid={`cell-academy-credits-${r.officeId}`}>
               {r.academyCreditDisplay ?? "$0"}
+            </TableCell>
+            <TableCell>
+              <div className="flex items-center gap-1">
+                {r.archivedAt ? (
+                  <button
+                    onClick={() => onUnarchive?.(r)}
+                    data-testid={`button-unarchive-office-${r.officeId}`}
+                    title="Restore to active"
+                    className="p-1.5 rounded text-white/70 hover:text-white hover:bg-white/10"
+                  >
+                    <ArchiveRestore className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => onArchive?.(r)}
+                    data-testid={`button-archive-office-${r.officeId}`}
+                    title="Archive"
+                    className="p-1.5 rounded text-white/70 hover:text-white hover:bg-white/10"
+                  >
+                    <Archive className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  onClick={() => onDelete?.(r)}
+                  data-testid={`button-delete-office-${r.officeId}`}
+                  title="Delete permanently"
+                  className="p-1.5 rounded text-red-300 hover:text-red-200 hover:bg-red-500/10"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             </TableCell>
           </TableRow>
         ))}

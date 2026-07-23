@@ -137,6 +137,7 @@ export type SalesRow = {
   mrr: number;
   isEnterprise: boolean;
   hasStripeCustomer: boolean;
+  archivedAt: string | null;
 };
 
 export function computeSalesRow(office: Office): SalesRow {
@@ -159,6 +160,7 @@ export function computeSalesRow(office: Office): SalesRow {
     mrr,
     isEnterprise,
     hasStripeCustomer: Boolean(office.stripeCustomerId),
+    archivedAt: office.archivedAt ?? null,
   };
 }
 
