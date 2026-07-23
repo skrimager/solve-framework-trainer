@@ -91,6 +91,7 @@ export type AdminContact = {
   followUpDate: string;
   followUpDue: boolean;
   createdAt: string;
+  archivedAt: string;
 };
 
 export type ContactEvent = {
@@ -102,12 +103,15 @@ export type ContactEvent = {
   createdAt: string;
 };
 
+export type ContactArchiveView = "active" | "archived" | "all";
+
 export type ContactFilters = {
   type?: string;
   priority?: string;
   status?: string;
   owner?: string;
   sort?: "followUp";
+  archived?: ContactArchiveView;
 };
 
 export type ContactPatch = {
@@ -174,6 +178,27 @@ export const adminApi = {
   async updateContact(id: number, patch: ContactPatch): Promise<void> {
     const res = await request("PATCH", `/api/admin/contacts/${id}`, patch);
     if (!res.ok) throw new Error("update failed");
+  },
+
+  async archiveContact(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/contacts/${id}/archive`);
+    if (!res.ok) throw new Error("archive failed");
+  },
+
+  async unarchiveContact(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/contacts/${id}/unarchive`);
+    if (!res.ok) throw new Error("unarchive failed");
+  },
+
+  async deleteContact(id: number): Promise<void> {
+    const res = await request("DELETE", `/api/admin/contacts/${id}`);
+    if (!res.ok) throw new Error("delete failed");
+  },
+
+  async bulkDeleteContacts(ids: number[]): Promise<{ deletedCount: number }> {
+    const res = await request("POST", "/api/admin/contacts/bulk-delete", { ids });
+    if (!res.ok) throw new Error("bulk delete failed");
+    return res.json();
   },
 
   // Fetch CSV as a blob and trigger a browser download.

@@ -3,7 +3,7 @@ import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, desc, lte } from "drizzle-orm";
-import { filterContacts, sortByFollowUp, type ContactFilters } from "./contacts";
+import { filterContacts, sortByFollowUp, runContactCascade, type ContactFilters } from "./contacts";
 
 const { Pool } = pg;
 
@@ -63,6 +63,16 @@ export interface IStorage {
   listContacts(filters?: ContactFilters, sort?: "followUp"): Promise<Contact[]>;
   getContact(id: number): Promise<Contact | undefined>;
   updateContact(id: number, patch: Partial<Contact>): Promise<Contact | undefined>;
+  // Soft archive / restore (reversible). archiveContact stamps archivedAt;
+  // unarchiveContact clears it. Neither touches dependent history rows.
+  archiveContact(id: number): Promise<Contact | undefined>;
+  unarchiveContact(id: number): Promise<Contact | undefined>;
+  // Hard, permanent delete of a contact and its dependent rows in FK-safe order,
+  // wrapped in a single transaction. Returns false if the contact did not exist.
+  deleteContact(id: number): Promise<boolean>;
+  // Delete many contacts, each through the same transactional cascade. Reports
+  // which ids were deleted vs. skipped (not found) so callers can surface it.
+  bulkDeleteContacts(ids: number[]): Promise<{ deleted: number[]; notFound: number[] }>;
   createContactEvent(event: InsertContactEvent): Promise<ContactEvent>;
   listContactEvents(contactId: number): Promise<ContactEvent[]>;
 
@@ -361,6 +371,58 @@ export class DatabaseStorage implements IStorage {
     const { id: _ignore, ...rest } = patch as Partial<Contact> & { id?: number };
     const rows = await db.update(contacts).set(rest).where(eq(contacts.id, id)).returning();
     return rows[0];
+  }
+
+  async archiveContact(id: number): Promise<Contact | undefined> {
+    const rows = await db
+      .update(contacts)
+      .set({ archivedAt: new Date().toISOString() })
+      .where(eq(contacts.id, id))
+      .returning();
+    return rows[0];
+  }
+
+  async unarchiveContact(id: number): Promise<Contact | undefined> {
+    const rows = await db
+      .update(contacts)
+      .set({ archivedAt: null })
+      .where(eq(contacts.id, id))
+      .returning();
+    return rows[0];
+  }
+
+  async deleteContact(id: number): Promise<boolean> {
+    const existing = await this.getContact(id);
+    if (!existing) return false;
+    await db.transaction(async (tx) => {
+      await runContactCascade(id, {
+        deleteLeadDripEmails: async () => {
+          await tx.delete(leadDripEmails).where(eq(leadDripEmails.contactId, id));
+        },
+        deleteContactEvents: async () => {
+          await tx.delete(contactEvents).where(eq(contactEvents.contactId, id));
+        },
+        detachOfficeSetupTokens: async () => {
+          await tx.update(officeSetupTokens).set({ contactId: null }).where(eq(officeSetupTokens.contactId, id));
+        },
+        deleteContactRow: async () => {
+          await tx.delete(contacts).where(eq(contacts.id, id));
+        },
+      });
+    });
+    return true;
+  }
+
+  async bulkDeleteContacts(ids: number[]): Promise<{ deleted: number[]; notFound: number[] }> {
+    const deleted: number[] = [];
+    const notFound: number[] = [];
+    // One transaction per contact so a missing/failed id never leaves a
+    // half-deleted contact behind and the rest still complete.
+    for (const id of ids) {
+      if (await this.deleteContact(id)) deleted.push(id);
+      else notFound.push(id);
+    }
+    return { deleted, notFound };
   }
 
   async createContactEvent(event: InsertContactEvent): Promise<ContactEvent> {

@@ -112,17 +112,26 @@ export function isFollowUpDue(followUpDate: string | null | undefined, now: Date
   return dueDay <= today;
 }
 
+// Which archived state to include in a list. Defaults to "active" so archived
+// contacts are hidden from the normal view but still reachable via "archived".
+export const CONTACT_ARCHIVE_VIEWS = ["active", "archived", "all"] as const;
+export type ContactArchiveView = (typeof CONTACT_ARCHIVE_VIEWS)[number];
+
 export type ContactFilters = {
   type?: string;
   priority?: string;
   status?: string;
   owner?: string;
+  archived?: ContactArchiveView;
 };
 
-// Apply the admin list filters in memory. Case-insensitive exact match per
-// provided field; unknown/blank filter values are ignored.
+// Apply the admin list filters in memory. Exact match per provided field;
+// unknown/blank filter values are ignored. Archived state defaults to "active".
 export function filterContacts(contacts: Contact[], filters: ContactFilters): Contact[] {
+  const view: ContactArchiveView = filters.archived ?? "active";
   return contacts.filter((c) => {
+    if (view === "active" && c.archivedAt) return false;
+    if (view === "archived" && !c.archivedAt) return false;
     if (filters.type && c.type !== filters.type) return false;
     if (filters.priority && c.priority !== filters.priority) return false;
     if (filters.status && c.status !== filters.status) return false;
@@ -130,6 +139,42 @@ export function filterContacts(contacts: Contact[], filters: ContactFilters): Co
     return true;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Hard-delete cascade. Permanently removing a contact must clear the rows that
+// reference it, in a foreign-key-safe order, inside one transaction. The order
+// and the "detach (null out) rather than delete" rule for office_setup_tokens
+// are the important, testable part; the concrete DB writes are injected by
+// storage.deleteContact so this stays dependency-free and unit-testable.
+// ---------------------------------------------------------------------------
+export interface ContactCascade {
+  // 1. lead_drip_emails.contact_id is NOT NULL -> delete those rows first.
+  deleteLeadDripEmails(contactId: number): Promise<void>;
+  // 2. contact_events.contact_id is NOT NULL -> delete those rows next.
+  deleteContactEvents(contactId: number): Promise<void>;
+  // 3. office_setup_tokens.contact_id is nullable -> null it out, keep the token
+  //    row as an audit record (do NOT delete it).
+  detachOfficeSetupTokens(contactId: number): Promise<void>;
+  // 4. finally the contact row itself.
+  deleteContactRow(contactId: number): Promise<void>;
+}
+
+export async function runContactCascade(contactId: number, ops: ContactCascade): Promise<void> {
+  await ops.deleteLeadDripEmails(contactId);
+  await ops.deleteContactEvents(contactId);
+  await ops.detachOfficeSetupTokens(contactId);
+  await ops.deleteContactRow(contactId);
+}
+
+// Body accepted by POST /api/admin/contacts/bulk-delete: a non-empty list of
+// unique positive integer contact ids.
+export const bulkDeleteContactsSchema = z
+  .object({
+    ids: z.array(z.number().int().positive()).min(1).max(500),
+  })
+  .strict();
+
+export type BulkDeleteContacts = z.infer<typeof bulkDeleteContactsSchema>;
 
 // Sort by followUpDate. Contacts with no follow-up sort last (they are not
 // pending action). Ascending = soonest/most-overdue first.

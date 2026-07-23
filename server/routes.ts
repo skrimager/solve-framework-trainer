@@ -99,9 +99,12 @@ import {
   normalizeContactPatch,
   buildContactUpdateEvents,
   isFollowUpDue,
+  bulkDeleteContactsSchema,
+  CONTACT_ARCHIVE_VIEWS,
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
+  type ContactArchiveView,
   type ContactFilters,
 } from "./contacts";
 import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores } from "@shared/schema";
@@ -2387,6 +2390,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       followUpDate: c.followUpDate ?? "",
       followUpDue: isFollowUpDue(c.followUpDate),
       createdAt: c.createdAt,
+      archivedAt: c.archivedAt ?? "",
     };
   }
 
@@ -2394,11 +2398,16 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   // optional sort=followUp (soonest/most-overdue first). Supports ?format=csv.
   app.get("/api/admin/contacts", requireAdmin, async (req, res) => {
     const q = req.query;
+    const archived: ContactArchiveView =
+      typeof q.archived === "string" && (CONTACT_ARCHIVE_VIEWS as readonly string[]).includes(q.archived)
+        ? (q.archived as ContactArchiveView)
+        : "active";
     const filters: ContactFilters = {
       type: typeof q.type === "string" && q.type ? q.type : undefined,
       priority: typeof q.priority === "string" && q.priority ? q.priority : undefined,
       status: typeof q.status === "string" && q.status ? q.status : undefined,
       owner: typeof q.owner === "string" && q.owner ? q.owner : undefined,
+      archived,
     };
     const sort = q.sort === "followUp" ? "followUp" : undefined;
     const list = await storage.listContacts(filters, sort);
@@ -2417,6 +2426,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       { key: "message", header: "Message" },
       { key: "referredBy", header: "Referred By" },
       { key: "createdAt", header: "Created" },
+      { key: "archivedAt", header: "Archived" },
     ], rows);
   });
 
@@ -2457,6 +2467,47 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     }
 
     res.json({ contact: serializeContact(updated), events });
+  });
+
+  // Soft-archive a contact (reversible). Hides it from the default list but keeps
+  // all history. No dependent rows are touched.
+  app.post("/api/admin/contacts/:id/archive", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const updated = await storage.archiveContact(id);
+    if (!updated) return res.status(404).json({ message: "Contact not found" });
+    res.json({ contact: serializeContact(updated) });
+  });
+
+  // Restore an archived contact (clears archivedAt).
+  app.post("/api/admin/contacts/:id/unarchive", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const updated = await storage.unarchiveContact(id);
+    if (!updated) return res.status(404).json({ message: "Contact not found" });
+    res.json({ contact: serializeContact(updated) });
+  });
+
+  // Bulk hard-delete. Registered before the single :id delete so the literal
+  // "bulk-delete" path is never captured as an id. Each contact goes through the
+  // same transactional FK-safe cascade as the single delete.
+  app.post("/api/admin/contacts/bulk-delete", requireAdmin, async (req, res) => {
+    const parsed = bulkDeleteContactsSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { deleted, notFound } = await storage.bulkDeleteContacts(parsed.data.ids);
+    res.json({ deleted, notFound, deletedCount: deleted.length });
+  });
+
+  // Hard, permanent delete of one contact + its dependent rows (FK-safe,
+  // transactional). Irreversible.
+  app.delete("/api/admin/contacts/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const ok = await storage.deleteContact(id);
+    if (!ok) return res.status(404).json({ message: "Contact not found" });
+    res.json({ ok: true, id });
   });
 
   app.get("/api/admin/users", requireAdmin, async (req, res) => {

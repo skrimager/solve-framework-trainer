@@ -14,6 +14,8 @@ import {
   filterContacts,
   sortByFollowUp,
   normalizeContactPatch,
+  runContactCascade,
+  bulkDeleteContactsSchema,
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
@@ -39,6 +41,7 @@ function contact(overrides: Partial<Contact> = {}): Contact {
     owner: null,
     followUpDate: null,
     createdAt: "2026-07-01T00:00:00.000Z",
+    archivedAt: null,
     ...overrides,
   };
 }
@@ -141,6 +144,84 @@ describe("filterContacts", () => {
   });
 });
 
+describe("filterContacts archived views", () => {
+  const rows = [
+    contact({ id: 1, archivedAt: null }),
+    contact({ id: 2, archivedAt: "2026-07-10T00:00:00.000Z" }),
+    contact({ id: 3, archivedAt: null }),
+  ];
+  test("defaults to active only (archived hidden)", () => {
+    assert.deepEqual(filterContacts(rows, {}).map((c) => c.id), [1, 3]);
+  });
+  test("archived view returns only archived", () => {
+    assert.deepEqual(filterContacts(rows, { archived: "archived" }).map((c) => c.id), [2]);
+  });
+  test("all view returns everything", () => {
+    assert.deepEqual(filterContacts(rows, { archived: "all" }).map((c) => c.id), [1, 2, 3]);
+  });
+  test("archived view still respects other filters", () => {
+    const mixed = [
+      contact({ id: 1, archivedAt: "2026-07-10T00:00:00.000Z", type: "speaking" }),
+      contact({ id: 2, archivedAt: "2026-07-10T00:00:00.000Z", type: "consulting" }),
+    ];
+    assert.deepEqual(filterContacts(mixed, { archived: "archived", type: "speaking" }).map((c) => c.id), [1]);
+  });
+});
+
+describe("runContactCascade", () => {
+  test("runs the FK-safe steps in order", async () => {
+    const order: string[] = [];
+    await runContactCascade(7, {
+      deleteLeadDripEmails: async () => { order.push("drip"); },
+      deleteContactEvents: async () => { order.push("events"); },
+      detachOfficeSetupTokens: async () => { order.push("tokens"); },
+      deleteContactRow: async () => { order.push("contact"); },
+    });
+    assert.deepEqual(order, ["drip", "events", "tokens", "contact"]);
+  });
+
+  test("nulls office_setup_tokens.contact_id rather than deleting the token rows", async () => {
+    // Simulate the four tables so we can assert the cascade's net effect.
+    let drip = [{ id: 1, contactId: 7 }, { id: 2, contactId: 8 }];
+    let events = [{ id: 1, contactId: 7 }];
+    let tokens = [{ id: 1, contactId: 7 as number | null }, { id: 2, contactId: null }];
+    let contacts = [{ id: 7 }, { id: 8 }];
+    const target = 7;
+
+    await runContactCascade(target, {
+      deleteLeadDripEmails: async () => { drip = drip.filter((r) => r.contactId !== target); },
+      deleteContactEvents: async () => { events = events.filter((r) => r.contactId !== target); },
+      detachOfficeSetupTokens: async () => {
+        tokens = tokens.map((t) => (t.contactId === target ? { ...t, contactId: null } : t));
+      },
+      deleteContactRow: async () => { contacts = contacts.filter((r) => r.id !== target); },
+    });
+
+    // Dependent NOT NULL rows for the target are gone; the other contact's row stays.
+    assert.deepEqual(drip.map((r) => r.id), [2]);
+    assert.deepEqual(events.map((r) => r.id), []);
+    // Token rows are preserved (still 2), and the one pointing at the target is detached.
+    assert.equal(tokens.length, 2);
+    assert.equal(tokens.find((t) => t.id === 1)!.contactId, null);
+    // Contact row itself removed.
+    assert.deepEqual(contacts.map((r) => r.id), [8]);
+  });
+});
+
+describe("bulkDeleteContactsSchema", () => {
+  test("accepts a non-empty list of positive ids", () => {
+    assert.equal(bulkDeleteContactsSchema.safeParse({ ids: [1, 2, 3] }).success, true);
+  });
+  test("rejects an empty list", () => {
+    assert.equal(bulkDeleteContactsSchema.safeParse({ ids: [] }).success, false);
+  });
+  test("rejects non-positive or non-integer ids", () => {
+    assert.equal(bulkDeleteContactsSchema.safeParse({ ids: [0] }).success, false);
+    assert.equal(bulkDeleteContactsSchema.safeParse({ ids: [1.5] }).success, false);
+    assert.equal(bulkDeleteContactsSchema.safeParse({ ids: [-2] }).success, false);
+  });
+});
+
 describe("sortByFollowUp", () => {
   test("soonest first, nulls last", () => {
     const rows = [
@@ -165,6 +246,19 @@ describe("migration 0007", () => {
   test("creates the contact_events table and seeds one created event per row", () => {
     assert.match(sql, /CREATE TABLE IF NOT EXISTS "contact_events"/);
     assert.match(sql, /INSERT INTO "contact_events"[\s\S]*SELECT "id", 'created'[\s\S]*FROM "contacts"/);
+  });
+});
+
+describe("migration 0025", () => {
+  const sql = readFileSync(path.resolve(process.cwd(), "migrations/0025_contacts_archive.sql"), "utf8");
+  test("adds a nullable archived_at column to contacts", () => {
+    assert.match(sql, /ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "archived_at" text/);
+    // Nullable: no NOT NULL constraint on the new column.
+    assert.doesNotMatch(sql, /"archived_at" text NOT NULL/);
+  });
+  test("is recorded in the drizzle journal", () => {
+    const journal = readFileSync(path.resolve(process.cwd(), "migrations/meta/_journal.json"), "utf8");
+    assert.match(journal, /"tag": "0025_contacts_archive"/);
   });
 });
 
@@ -240,6 +334,35 @@ describe("admin contacts HTTP routes", () => {
     };
     (storage as any).listContactEvents = async (contactId: number) =>
       events.filter((e) => e.contactId === contactId).slice().reverse();
+    (storage as any).archiveContact = async (id: number) => {
+      const c = contacts.find((x) => x.id === id);
+      if (!c) return undefined;
+      c.archivedAt = "2026-07-23T00:00:00.000Z";
+      return c;
+    };
+    (storage as any).unarchiveContact = async (id: number) => {
+      const c = contacts.find((x) => x.id === id);
+      if (!c) return undefined;
+      c.archivedAt = null;
+      return c;
+    };
+    (storage as any).deleteContact = async (id: number) => {
+      const idx = contacts.findIndex((x) => x.id === id);
+      if (idx === -1) return false;
+      contacts.splice(idx, 1);
+      // Deleting a contact also removes its dependent events (mirrors the cascade).
+      events = events.filter((e) => e.contactId !== id);
+      return true;
+    };
+    (storage as any).bulkDeleteContacts = async (ids: number[]) => {
+      const deleted: number[] = [];
+      const notFound: number[] = [];
+      for (const id of ids) {
+        if (await (storage as any).deleteContact(id)) deleted.push(id);
+        else notFound.push(id);
+      }
+      return { deleted, notFound };
+    };
   });
 
   let ipCounter = 0;
@@ -386,6 +509,99 @@ describe("admin contacts HTTP routes", () => {
     const header = text.split("\n")[0];
     for (const col of ["Type", "Source", "Priority", "Owner", "Follow-up", "Referred By"]) {
       assert.ok(header.includes(col), `header should include ${col}`);
+    }
+  });
+
+  // --- Archive / unarchive ---
+
+  test("POST /api/admin/contacts/:id/archive stamps archivedAt and hides from default list", async () => {
+    contacts.push(contact({ id: 1 }));
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/1/archive`, { method: "POST", headers: { cookie } });
+    assert.equal(res.status, 200);
+    assert.ok(contacts[0].archivedAt);
+    // Default (active) list no longer shows it.
+    const active = await (await fetch(`${baseUrl}/api/admin/contacts`, { headers: { cookie } })).json();
+    assert.equal(active.rows.length, 0);
+    // Archived view shows it.
+    const archived = await (await fetch(`${baseUrl}/api/admin/contacts?archived=archived`, { headers: { cookie } })).json();
+    assert.equal(archived.rows.length, 1);
+    assert.equal(archived.rows[0].id, 1);
+  });
+
+  test("POST /api/admin/contacts/:id/unarchive clears archivedAt", async () => {
+    contacts.push(contact({ id: 1, archivedAt: "2026-07-10T00:00:00.000Z" }));
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/1/unarchive`, { method: "POST", headers: { cookie } });
+    assert.equal(res.status, 200);
+    assert.equal(contacts[0].archivedAt, null);
+    const active = await (await fetch(`${baseUrl}/api/admin/contacts`, { headers: { cookie } })).json();
+    assert.equal(active.rows.length, 1);
+  });
+
+  test("archive/unarchive on a missing contact is 404", async () => {
+    const cookie = await login();
+    for (const action of ["archive", "unarchive"]) {
+      const res = await fetch(`${baseUrl}/api/admin/contacts/999/${action}`, { method: "POST", headers: { cookie } });
+      assert.equal(res.status, 404, `${action} should be 404`);
+    }
+  });
+
+  // --- Delete ---
+
+  test("DELETE /api/admin/contacts/:id removes the contact", async () => {
+    contacts.push(contact({ id: 1 }), contact({ id: 2 }));
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/1`, { method: "DELETE", headers: { cookie } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(contacts.find((c) => c.id === 1), undefined);
+    assert.ok(contacts.find((c) => c.id === 2));
+  });
+
+  test("DELETE on a missing contact is 404", async () => {
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/999`, { method: "DELETE", headers: { cookie } });
+    assert.equal(res.status, 404);
+  });
+
+  test("POST /api/admin/contacts/bulk-delete removes many and reports counts", async () => {
+    contacts.push(contact({ id: 1 }), contact({ id: 2 }), contact({ id: 3 }));
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/bulk-delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ ids: [1, 3, 999] }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.deletedCount, 2);
+    assert.deepEqual(body.deleted, [1, 3]);
+    assert.deepEqual(body.notFound, [999]);
+    assert.deepEqual(contacts.map((c) => c.id), [2]);
+  });
+
+  test("bulk-delete rejects an empty id list with 400", async () => {
+    const cookie = await login();
+    const res = await fetch(`${baseUrl}/api/admin/contacts/bulk-delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ ids: [] }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test("archive, unarchive, delete and bulk-delete all reject unauthenticated requests", async () => {
+    const cases: [string, string][] = [
+      ["POST", "/api/admin/contacts/1/archive"],
+      ["POST", "/api/admin/contacts/1/unarchive"],
+      ["DELETE", "/api/admin/contacts/1"],
+      ["POST", "/api/admin/contacts/bulk-delete"],
+    ];
+    for (const [method, path] of cases) {
+      const res = await fetch(`${baseUrl}${path}`, { method });
+      assert.equal(res.status, 401, `${method} ${path} should be 401 without a session`);
     }
   });
 });
