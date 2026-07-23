@@ -107,6 +107,14 @@ import {
   type ContactArchiveView,
   type ContactFilters,
 } from "./contacts";
+import { bulkDeleteVisitorsSchema } from "./visitors";
+import {
+  OFFICE_ARCHIVE_VIEWS,
+  filterOfficesByArchive,
+  OfficeDeleteBlockedError,
+  type OfficeArchiveView,
+} from "./offices";
+import { UserDeleteBlockedError } from "./users";
 import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET, APP_URL } from "./stripe";
@@ -2333,6 +2341,24 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     ], rows);
   });
 
+  // Bulk-delete selected visitor rows by id. Registered before the "all" route.
+  // Standalone analytics rows, no cascade.
+  app.post("/api/admin/visitors/bulk-delete", requireAdmin, async (req, res) => {
+    const parsed = bulkDeleteVisitorsSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const deletedCount = await storage.deleteVisitorPageViews(parsed.data.ids);
+    res.json({ deletedCount });
+  });
+
+  // Clear ALL visitor rows in one shot (the bulk-noise-cleanup use case). Returns
+  // the number of rows removed so the UI can confirm.
+  app.delete("/api/admin/visitors/all", requireAdmin, async (_req, res) => {
+    const deletedCount = await storage.deleteAllVisitorPageViews();
+    res.json({ deletedCount });
+  });
+
   app.get("/api/admin/leads", requireAdmin, async (req, res) => {
     const leads = await storage.listLeads();
     const rows = leads.map((l) => ({
@@ -2542,10 +2568,16 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   });
 
   app.get("/api/admin/sales", requireAdmin, async (req, res) => {
-    const [allOffices, allCredits] = await Promise.all([
+    const [allOfficesUnfiltered, allCredits] = await Promise.all([
       storage.listOffices(),
       storage.listAllAcademyCredits(),
     ]);
+    const view: OfficeArchiveView =
+      typeof req.query.archived === "string" &&
+      (OFFICE_ARCHIVE_VIEWS as readonly string[]).includes(req.query.archived)
+        ? (req.query.archived as OfficeArchiveView)
+        : "active";
+    const allOffices = filterOfficesByArchive(allOfficesUnfiltered, view);
     const { rows: baseRows, totalMrr, activeOffices } = summarizeSales(allOffices);
     const creditCentsByOffice = new Map<number, number>();
     for (const c of allCredits) {
@@ -2555,7 +2587,12 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // credit (sum of academy_credits.amountCents). Read-only; touches no billing.
     const rows = baseRows.map((r) => {
       const academyCreditCents = creditCentsByOffice.get(r.officeId) ?? 0;
-      return { ...r, academyCreditCents, academyCreditDisplay: formatCents(academyCreditCents) };
+      return {
+        ...r,
+        academyCreditCents,
+        academyCreditDisplay: formatCents(academyCreditCents),
+        archivedAt: r.archivedAt ?? "",
+      };
     });
     const totalAcademyCreditCents = Array.from(creditCentsByOffice.values()).reduce((sum, c) => sum + c, 0);
     const csvRows = rows.map((r) => ({
@@ -2639,6 +2676,62 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     if (!office.stripeSubscriptionId) patch.subscriptionStatus = "active";
     const updatedOffice = await storage.updateOffice(id, patch);
     res.json({ office: updatedOffice });
+  });
+
+  // Soft-archive an office (reversible). Hides it from the default Sales view but
+  // keeps the office and every dependent row intact. This is the ONLY way to
+  // remove a real paying customer from the active list; no data is destroyed.
+  app.post("/api/admin/offices/:id/archive", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const updated = await storage.archiveOffice(id);
+    if (!updated) return res.status(404).json({ message: "Office not found" });
+    res.json({ office: updated });
+  });
+
+  // Restore an archived office (clears archivedAt).
+  app.post("/api/admin/offices/:id/unarchive", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    const updated = await storage.unarchiveOffice(id);
+    if (!updated) return res.status(404).json({ message: "Office not found" });
+    res.json({ office: updated });
+  });
+
+  // Hard, permanent delete of one office + its dependent rows (FK-safe,
+  // transactional, cascading through its non-paying test users). BLOCKED with a
+  // 409 for a real paying customer; those can only be archived.
+  app.delete("/api/admin/offices/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    try {
+      const ok = await storage.deleteOffice(id);
+      if (!ok) return res.status(404).json({ message: "Office not found" });
+      res.json({ ok: true, id });
+    } catch (err) {
+      if (err instanceof OfficeDeleteBlockedError) {
+        return res.status(409).json({ message: err.reason });
+      }
+      throw err;
+    }
+  });
+
+  // Hard, permanent delete of one user + its dependent rows (FK-safe,
+  // transactional). BLOCKED with a 409 for a real paid seat or the last manager
+  // of an office.
+  app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid id" });
+    try {
+      const ok = await storage.deleteUser(id);
+      if (!ok) return res.status(404).json({ message: "User not found" });
+      res.json({ ok: true, id });
+    } catch (err) {
+      if (err instanceof UserDeleteBlockedError) {
+        return res.status(409).json({ message: err.reason });
+      }
+      throw err;
+    }
   });
 
   // Persistent list of completed paid self-serve signups for the Vault (item 7).

@@ -14,6 +14,20 @@ async function request(method: string, url: string, body?: unknown): Promise<Res
   return res;
 }
 
+// Throw an Error carrying the server's `message` (e.g. the 409 blocked-reason for
+// a paying office/user), falling back to the status code. Used by the guarded
+// delete/archive actions so the UI can show the exact reason to the admin.
+async function throwWithReason(res: Response): Promise<never> {
+  let message = `${res.status}`;
+  try {
+    const data = await res.json();
+    if (data && typeof data.message === "string" && data.message) message = data.message;
+  } catch {
+    // Non-JSON body: keep the status-code fallback.
+  }
+  throw new Error(message);
+}
+
 export type AdminSection = "visitors" | "leads" | "users" | "sales" | "demo" | "opportunities" | "paid-signups";
 
 // --- Opportunity Intelligence ---
@@ -122,6 +136,33 @@ export type ContactPatch = {
   note?: string;
 };
 
+export type SalesView = "active" | "archived";
+
+export type AdminSalesRow = {
+  officeId: number;
+  officeName: string;
+  subscriptionStatus: string;
+  status: string;
+  active: boolean;
+  seatCount: number;
+  seatsMrr: number;
+  managerMrr: number;
+  mrr: number;
+  isEnterprise: boolean;
+  hasStripeCustomer: boolean;
+  archivedAt: string;
+  academyCreditCents: number;
+  academyCreditDisplay: string;
+};
+
+export type SalesResponse = {
+  rows: AdminSalesRow[];
+  totalMrr: number;
+  activeOffices: number;
+  totalAcademyCreditCents: number;
+  totalAcademyCreditDisplay: string;
+};
+
 export type PaidSignupRow = {
   id: number;
   officeName: string;
@@ -199,6 +240,48 @@ export const adminApi = {
     const res = await request("POST", "/api/admin/contacts/bulk-delete", { ids });
     if (!res.ok) throw new Error("bulk delete failed");
     return res.json();
+  },
+
+  // --- Visitors: safe bulk delete + clear-all (standalone analytics, no cascade) ---
+  async bulkDeleteVisitors(ids: number[]): Promise<{ deletedCount: number }> {
+    const res = await request("POST", "/api/admin/visitors/bulk-delete", { ids });
+    if (!res.ok) await throwWithReason(res);
+    return res.json();
+  },
+
+  async clearAllVisitors(): Promise<{ deletedCount: number }> {
+    const res = await request("DELETE", "/api/admin/visitors/all");
+    if (!res.ok) await throwWithReason(res);
+    return res.json();
+  },
+
+  // --- Sales (offices): archive-aware list + guarded archive/unarchive/delete ---
+  async listSales(view: SalesView = "active"): Promise<SalesResponse> {
+    const res = await request("GET", `/api/admin/sales?archived=${view}`);
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
+  },
+
+  async archiveOffice(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/offices/${id}/archive`);
+    if (!res.ok) await throwWithReason(res);
+  },
+
+  async unarchiveOffice(id: number): Promise<void> {
+    const res = await request("POST", `/api/admin/offices/${id}/unarchive`);
+    if (!res.ok) await throwWithReason(res);
+  },
+
+  // Hard delete. Throws with the server's blocked-reason (409) for a paying office.
+  async deleteOffice(id: number): Promise<void> {
+    const res = await request("DELETE", `/api/admin/offices/${id}`);
+    if (!res.ok) await throwWithReason(res);
+  },
+
+  // --- Users: guarded hard delete (blocked for a paid seat / last manager) ---
+  async deleteUser(id: number): Promise<void> {
+    const res = await request("DELETE", `/api/admin/users/${id}`);
+    if (!res.ok) await throwWithReason(res);
   },
 
   // Fetch CSV as a blob and trigger a browser download.
