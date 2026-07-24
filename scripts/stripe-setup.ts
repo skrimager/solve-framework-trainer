@@ -14,6 +14,9 @@
 //     Company (21–35) $41/seat
 //   Manager Dashboard (monthly flat, optional, one price per tier):
 //     Team $249/mo   Office $389/mo   Company $529/mo
+//   Annual-prepay Dashboard coupon (optional): 20% off the dashboard only, for 12
+//     months. Percent-off (not a yearly price) so it tracks the current dashboard
+//     rate and never touches seats.
 //
 // Run against TEST mode first:
 //   STRIPE_SECRET_KEY=sk_test_... npx tsx scripts/stripe-setup.ts
@@ -79,6 +82,22 @@ async function main() {
     dashboardPriceIds[t.tier] = price.id;
   }
 
+  // Annual-prepay dashboard discount. A percent-off coupon (not a yearly Price) so
+  // it (a) tracks whatever the current dashboard rate is — launch rate before Aug 1,
+  // standard after — without needing new price objects, and (b) leaves seats on the
+  // monthly plan (no mixed-interval subscription). Scoped to the Manager Dashboard
+  // product via applies_to.products so it can ONLY ever reduce the dashboard line,
+  // never a consultant seat. duration_in_months: 12 = one prepaid year, then it lapses
+  // back to the undiscounted monthly dashboard rate.
+  console.log("Creating annual-prepay Manager Dashboard coupon (20% off dashboard, 12 months)…");
+  const annualCoupon = await stripe.coupons.create({
+    percent_off: 20,
+    duration: "repeating",
+    duration_in_months: 12,
+    applies_to: { products: [dashboardProduct.id] },
+    name: "Annual Prepay — Manager Dashboard 20% off (12 months)",
+  });
+
   console.log("\n✅ Stripe products/prices created. Add these to your environment:\n");
   console.log(`STRIPE_SEAT_TEAM_PRICE_ID=${seatPriceIds.TEAM}`);
   console.log(`STRIPE_SEAT_OFFICE_PRICE_ID=${seatPriceIds.OFFICE}`);
@@ -86,7 +105,9 @@ async function main() {
   console.log(`STRIPE_DASHBOARD_TEAM_PRICE_ID=${dashboardPriceIds.TEAM}`);
   console.log(`STRIPE_DASHBOARD_OFFICE_PRICE_ID=${dashboardPriceIds.OFFICE}`);
   console.log(`STRIPE_DASHBOARD_COMPANY_PRICE_ID=${dashboardPriceIds.COMPANY}`);
+  console.log(`STRIPE_DASHBOARD_ANNUAL_COUPON_ID=${annualCoupon.id}`);
   console.log("\nEnterprise (36+) is a custom quote — no self-serve price object is created.");
+  console.log("Leave STRIPE_DASHBOARD_ANNUAL_COUPON_ID unset to hide the annual option entirely.");
   console.log("Also set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and APP_URL.");
   process.exit(0);
 }

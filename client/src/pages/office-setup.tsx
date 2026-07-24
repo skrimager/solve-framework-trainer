@@ -12,6 +12,8 @@ import {
   PLAN_TIERS,
   ENTERPRISE_MIN_SEATS,
   ENTERPRISE_CONTACT_EMAIL,
+  ANNUAL_DASHBOARD_DISCOUNT_PERCENT,
+  annualDashboardMonthlyEquivalent,
   isEnterpriseSeatCount,
   planForSeatCount,
 } from "@shared/pricing";
@@ -21,11 +23,17 @@ const ORANGE = "#E06D00";
 
 // Live tier + price summary for the chosen consultant count. Enterprise (36+) has
 // no self-serve price, so callers render a "contact us" path instead of a total.
-function priceSummary(seatCount: number, includeDashboard: boolean) {
+// Annual prepay discounts the dashboard only (never seats); the figure shown is the
+// monthly-equivalent rate, with Stripe applying the discount as a coupon.
+function priceSummary(seatCount: number, includeDashboard: boolean, annual: boolean) {
   const plan = planForSeatCount(seatCount);
   if (!plan) return null;
   const seats = seatCount * plan.seatRate;
-  const dashboard = includeDashboard ? plan.dashboardRate : 0;
+  const dashboard = includeDashboard
+    ? annual
+      ? annualDashboardMonthlyEquivalent(plan.dashboardRate)
+      : plan.dashboardRate
+    : 0;
   return { plan, seats, dashboard, total: seats + dashboard };
 }
 
@@ -50,6 +58,8 @@ export default function OfficeSetup() {
   // keystroke.
   const [seatCountText, setSeatCountText] = useState("1");
   const [includeDashboard, setIncludeDashboard] = useState(false);
+  const [annual, setAnnual] = useState(false);
+  const [annualAvailable, setAnnualAvailable] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -60,6 +70,7 @@ export default function OfficeSetup() {
         const data = await res.json();
         if (cancelled) return;
         setEmail(data.email ?? "");
+        setAnnualAvailable(!!data.annualDashboardAvailable);
       } catch (err: any) {
         if (cancelled) return;
         setTokenError(humanError(err));
@@ -73,7 +84,14 @@ export default function OfficeSetup() {
   }, [token]);
 
   const enterprise = isEnterpriseSeatCount(seatCount);
-  const summary = useMemo(() => priceSummary(seatCount, includeDashboard), [seatCount, includeDashboard]);
+  // Annual only applies to the dashboard, so it is meaningful only when the
+  // dashboard is included and the discount is actually available.
+  const showAnnual = annualAvailable && includeDashboard;
+  const annualApplied = showAnnual && annual;
+  const summary = useMemo(
+    () => priceSummary(seatCount, includeDashboard, annualApplied),
+    [seatCount, includeDashboard, annualApplied],
+  );
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -85,6 +103,7 @@ export default function OfficeSetup() {
         officeName,
         seatCount,
         includeDashboard,
+        annual: annualApplied,
         email: email || undefined,
       });
       const data = await res.json();
@@ -223,6 +242,33 @@ export default function OfficeSetup() {
                   )}
                 </div>
 
+                {!enterprise && showAnnual && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="annual">Pay the dashboard annually</Label>
+                      <button
+                        type="button"
+                        id="annual"
+                        role="switch"
+                        aria-checked={annual}
+                        onClick={() => setAnnual((v) => !v)}
+                        className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+                        style={{ backgroundColor: annual ? ORANGE : "#cbd5e1" }}
+                        data-testid="toggle-annual"
+                      >
+                        <span
+                          className="inline-block h-5 w-5 transform rounded-full bg-white transition-transform"
+                          style={{ transform: annual ? "translateX(22px)" : "translateX(2px)" }}
+                        />
+                      </button>
+                    </div>
+                    <p className="text-sm text-muted-foreground" data-testid="text-annual-line">
+                      Prepay 12 months of the Manager Dashboard for an extra {ANNUAL_DASHBOARD_DISCOUNT_PERCENT}% off.
+                      Consultant seats stay on the standard monthly rate.
+                    </p>
+                  </div>
+                )}
+
                 {!enterprise && summary && (
                   <div className="rounded-md border p-4 space-y-1" style={{ borderColor: NAVY }} data-testid="price-summary">
                     <div className="flex justify-between text-sm">
@@ -233,7 +279,7 @@ export default function OfficeSetup() {
                     </div>
                     {includeDashboard && (
                       <div className="flex justify-between text-sm">
-                        <span>Manager Dashboard</span>
+                        <span>Manager Dashboard{annualApplied ? " (annual)" : ""}</span>
                         <span>${summary.dashboard}/mo</span>
                       </div>
                     )}

@@ -117,7 +117,7 @@ import {
 import { UserDeleteBlockedError } from "./users";
 import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores } from "@shared/schema";
 import { seed } from "./seed";
-import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET, APP_URL } from "./stripe";
+import { isStripeConfigured, isAnnualDashboardDiscountConfigured, getStripe, STRIPE_WEBHOOK_SECRET, APP_URL } from "./stripe";
 import {
   officeIsActive,
   createManagerCheckoutSession,
@@ -382,6 +382,14 @@ export async function registerRoutes(
     }
   });
 
+  // Public billing config for the self-serve checkout UI: which optional offers are
+  // currently available. The annual-prepay dashboard discount is only surfaced when
+  // its Stripe coupon is wired up, so the UI never promises a discount that would
+  // not actually apply at checkout. No auth.
+  app.get("/api/billing/config", (_req, res) => {
+    res.json({ annualDashboardAvailable: isAnnualDashboardDiscountConfigured() });
+  });
+
   // --- Self-serve manager signup (email-first, verify, office setup, pay) ------
   // Step 1: capture email + company FIRST. Creates (or refreshes) the signup row
   // keyed by email and emails a 6-digit verification code. Every started signup
@@ -502,13 +510,14 @@ export async function registerRoutes(
       password: z.string().min(6, "Please choose a password of at least 6 characters").max(200),
       seatCount: z.coerce.number().int().min(1, "At least one consultant is required"),
       includeDashboard: z.boolean().default(false),
+      annual: z.boolean().default(false),
     });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
     const email = normalizeEmail(parsed.data.email);
-    const { company, managerName, username, password, seatCount, includeDashboard } = parsed.data;
+    const { company, managerName, username, password, seatCount, includeDashboard, annual } = parsed.data;
 
     const signup = await storage.getOfficeSignupByEmail(email);
     if (!signup) {
@@ -542,6 +551,7 @@ export async function registerRoutes(
         officeName: company,
         seatCount,
         includeDashboard,
+        annual,
         email,
         signupId: signup.id,
       });
@@ -563,7 +573,11 @@ export async function registerRoutes(
     if (new Date(token.expiresAt).getTime() < Date.now()) {
       return res.status(410).json({ message: "This setup link has expired. Contact us for a new one." });
     }
-    res.json({ email: token.email, name: token.name ?? null });
+    res.json({
+      email: token.email,
+      name: token.name ?? null,
+      annualDashboardAvailable: isAnnualDashboardDiscountConfigured(),
+    });
   });
 
   // Create a self-serve Checkout Session (item 4). No office exists yet; the office
@@ -575,13 +589,14 @@ export async function registerRoutes(
       officeName: z.string().trim().min(1, "Office name is required"),
       seatCount: z.coerce.number().int().min(1, "At least one consultant is required"),
       includeDashboard: z.boolean().default(false),
+      annual: z.boolean().default(false),
       email: z.string().trim().email().optional(),
     });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
-    const { token, officeName, seatCount, includeDashboard, email } = parsed.data;
+    const { token, officeName, seatCount, includeDashboard, annual, email } = parsed.data;
 
     if (seatCount >= 36) {
       return res.status(400).json({ message: "36+ consultants is Enterprise. Contact us for a custom quote." });
@@ -604,6 +619,7 @@ export async function registerRoutes(
         officeName,
         seatCount,
         includeDashboard,
+        annual,
         email: resolvedEmail,
         setupToken: token,
         contactId,

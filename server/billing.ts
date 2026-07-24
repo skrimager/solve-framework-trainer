@@ -8,6 +8,8 @@ import {
   dashboardPriceIdForTier,
   isSeatPriceId,
   isDashboardPriceId,
+  isAnnualDashboardDiscountConfigured,
+  STRIPE_DASHBOARD_ANNUAL_COUPON_ID,
 } from "./stripe";
 import { generateUniqueInviteCode } from "./invite";
 import { sendPaidWelcomeEmail, sendPaidCheckoutAdminNotification } from "./notifications";
@@ -122,12 +124,13 @@ export interface SelfServeCheckoutInput {
   setupToken?: string; // originating office_setup_token, marked used on provision
   contactId?: number; // originating lead, if any
   signupId?: number; // originating office_signups row; provisioning reads it to create the manager user
+  annual?: boolean; // annual prepay: apply the 20%-off-dashboard coupon (dashboard only)
 }
 
 export async function createSelfServeCheckoutSession(
   input: SelfServeCheckoutInput,
 ): Promise<string> {
-  const { officeName, seatCount, includeDashboard, email, setupToken, contactId, signupId } = input;
+  const { officeName, seatCount, includeDashboard, email, setupToken, contactId, signupId, annual = false } = input;
   if (isEnterpriseSeatCount(seatCount)) {
     throw new EnterpriseQuoteRequiredError(seatCount);
   }
@@ -144,6 +147,14 @@ export async function createSelfServeCheckoutSession(
     lineItems.push({ price: dashboardPriceIdForTier(plan.tier), quantity: 1 });
   }
 
+  // Annual prepay applies an extra 20% off the DASHBOARD ONLY. It is only meaningful
+  // when the dashboard is included, and only when the coupon is configured. The
+  // coupon is scoped in Stripe to the dashboard product (applies_to.products), so
+  // even attached at the session level it can only reduce the dashboard line — the
+  // seat line always bills at its normal per-seat monthly rate, never discounted.
+  const applyAnnualDashboardDiscount =
+    annual && includeDashboard && isAnnualDashboardDiscountConfigured();
+
   // Metadata the webhook reads to provision the office. selfServe flags THIS flow
   // so the webhook does not confuse it with an existing-office manager checkout.
   const provisioning: Record<string, string> = {
@@ -155,6 +166,7 @@ export async function createSelfServeCheckoutSession(
   if (email) provisioning.email = email;
   if (setupToken) provisioning.setupToken = setupToken;
   if (contactId != null) provisioning.contactId = String(contactId);
+  if (applyAnnualDashboardDiscount) provisioning.annual = "true";
   // Only the signup row ID rides on Stripe metadata, never the manager's chosen
   // password. Provisioning reads the row from our DB to create the manager login.
   if (signupId != null) provisioning.signupId = String(signupId);
@@ -163,6 +175,9 @@ export async function createSelfServeCheckoutSession(
     mode: "subscription",
     ...(email ? { customer_email: email } : {}),
     line_items: lineItems,
+    ...(applyAnnualDashboardDiscount
+      ? { discounts: [{ coupon: STRIPE_DASHBOARD_ANNUAL_COUPON_ID }] }
+      : {}),
     metadata: provisioning,
     subscription_data: { metadata: provisioning },
     success_url: `${APP_URL}/#/office-setup/complete?session_id={CHECKOUT_SESSION_ID}`,

@@ -11,6 +11,7 @@ import {
   addDashboard,
   removeDashboard,
   handleStripeEvent,
+  createSelfServeCheckoutSession,
   EnterpriseQuoteRequiredError,
 } from "./billing";
 import type { Office, BillingEvent } from "@shared/schema";
@@ -23,11 +24,18 @@ process.env.STRIPE_SEAT_COMPANY_PRICE_ID ??= "price_seat_company";
 process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID ??= "price_dash_team";
 process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID ??= "price_dash_office";
 process.env.STRIPE_DASHBOARD_COMPANY_PRICE_ID ??= "price_dash_company";
+// The annual-prepay dashboard coupon. Set by the npm test script BEFORE any module
+// loads so stripe.ts captures it and isAnnualDashboardDiscountConfigured() is true;
+// the ??= keeps the const defined for direct runs (assertions below reference it).
+process.env.STRIPE_DASHBOARD_ANNUAL_COUPON_ID ??= "coupon_dash_annual";
 
 const SEAT_TEAM = process.env.STRIPE_SEAT_TEAM_PRICE_ID;
 const SEAT_OFFICE = process.env.STRIPE_SEAT_OFFICE_PRICE_ID;
 const DASH_TEAM = process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID;
 const DASH_OFFICE = process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID;
+const DASH_COMPANY = process.env.STRIPE_DASHBOARD_COMPANY_PRICE_ID;
+const SEAT_COMPANY = process.env.STRIPE_SEAT_COMPANY_PRICE_ID;
+const ANNUAL_COUPON = process.env.STRIPE_DASHBOARD_ANNUAL_COUPON_ID;
 
 // --- In-memory storage patch (no database needed) ---
 let offices: Map<number, Office>;
@@ -272,6 +280,119 @@ describe("optional dashboard add-on", () => {
 
     await removeDashboard(offices.get(1)!);
     assert.equal(dashboardActive(offices.get(1)!), false, "removed -> back to upsell state");
+  });
+});
+
+// A fake Stripe that captures the checkout.sessions.create params so we can assert
+// exactly what line items and discounts a self-serve checkout would send to Stripe.
+function fakeCheckoutStripe(): { params: any } {
+  const captured: { params: any } = { params: null };
+  const fake = {
+    checkout: {
+      sessions: {
+        create: async (params: any) => {
+          captured.params = params;
+          return { url: "https://checkout.stripe.test/session" };
+        },
+      },
+    },
+  };
+  __setStripeForTests(fake);
+  return captured;
+}
+
+// Pull the single seat / dashboard line items out of a captured line_items array by
+// matching against the known per-tier price ids.
+function seatLine(params: any) {
+  return params.line_items.find((li: any) => [SEAT_TEAM, SEAT_OFFICE, SEAT_COMPANY].includes(li.price));
+}
+function dashboardLine(params: any) {
+  return params.line_items.find((li: any) => [DASH_TEAM, DASH_OFFICE, DASH_COMPANY].includes(li.price));
+}
+
+describe("createSelfServeCheckoutSession — annual-prepay dashboard discount", () => {
+  test("annual + dashboard: attaches the dashboard coupon; seat line is unchanged and never discounted", async () => {
+    const captured = fakeCheckoutStripe();
+    await createSelfServeCheckoutSession({
+      officeName: "Acme",
+      seatCount: 3, // Team tier
+      includeDashboard: true,
+      annual: true,
+    });
+    const p = captured.params;
+
+    // The 20%-off-dashboard coupon rides at the session level. It is scoped in Stripe
+    // to the dashboard product, so it can only ever reduce the dashboard line.
+    assert.deepEqual(p.discounts, [{ coupon: ANNUAL_COUPON }]);
+
+    // Seat line: exact per-seat monthly price + quantity, and crucially NO per-item
+    // discount/coupon of any kind — annual prepay must never touch seats.
+    const seat = seatLine(p);
+    assert.equal(seat.price, SEAT_TEAM);
+    assert.equal(seat.quantity, 3);
+    assert.equal(seat.discounts, undefined, "seat line must carry no discount");
+    assert.equal(seat.coupon, undefined, "seat line must carry no coupon");
+
+    // Dashboard line is still billed at the normal monthly tier price (qty 1); the
+    // discount is applied by the coupon, never by swapping the price object.
+    const dash = dashboardLine(p);
+    assert.equal(dash.price, DASH_TEAM);
+    assert.equal(dash.quantity, 1);
+  });
+
+  test("monthly (annual=false) + dashboard: no discount is attached", async () => {
+    const captured = fakeCheckoutStripe();
+    await createSelfServeCheckoutSession({
+      officeName: "Acme",
+      seatCount: 3,
+      includeDashboard: true,
+      annual: false,
+    });
+    const p = captured.params;
+    assert.equal(p.discounts, undefined, "monthly checkout must not attach any discount");
+    assert.equal(seatLine(p).price, SEAT_TEAM);
+    assert.equal(dashboardLine(p).price, DASH_TEAM);
+  });
+
+  test("annual selected WITHOUT the dashboard: no discount (the coupon only makes sense with a dashboard line)", async () => {
+    const captured = fakeCheckoutStripe();
+    await createSelfServeCheckoutSession({
+      officeName: "Acme",
+      seatCount: 4,
+      includeDashboard: false,
+      annual: true,
+    });
+    const p = captured.params;
+    assert.equal(p.discounts, undefined, "no dashboard line → no dashboard discount");
+    assert.equal(dashboardLine(p), undefined, "no dashboard line item at all");
+    assert.equal(seatLine(p).quantity, 4);
+  });
+
+  test("annual applies at any tier: Company (30 seats) discounts the dashboard, seats stay on the Company per-seat rate", async () => {
+    const captured = fakeCheckoutStripe();
+    await createSelfServeCheckoutSession({
+      officeName: "BigCo",
+      seatCount: 30, // Company tier
+      includeDashboard: true,
+      annual: true,
+    });
+    const p = captured.params;
+    assert.deepEqual(p.discounts, [{ coupon: ANNUAL_COUPON }]);
+    const seat = seatLine(p);
+    assert.equal(seat.price, SEAT_COMPANY);
+    assert.equal(seat.quantity, 30);
+    assert.equal(seat.discounts, undefined);
+    assert.equal(dashboardLine(p).price, DASH_COMPANY);
+  });
+
+  test("annual flag defaults off: omitting it behaves exactly like a monthly checkout", async () => {
+    const captured = fakeCheckoutStripe();
+    await createSelfServeCheckoutSession({
+      officeName: "Acme",
+      seatCount: 2,
+      includeDashboard: true,
+    });
+    assert.equal(captured.params.discounts, undefined);
   });
 });
 

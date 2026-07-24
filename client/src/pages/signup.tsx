@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,8 @@ import { ArrowLeft } from "lucide-react";
 import {
   ENTERPRISE_MIN_SEATS,
   ENTERPRISE_CONTACT_EMAIL,
+  ANNUAL_DASHBOARD_DISCOUNT_PERCENT,
+  annualDashboardMonthlyEquivalent,
   isEnterpriseSeatCount,
   planForSeatCount,
 } from "@shared/pricing";
@@ -26,11 +28,17 @@ const ORANGE = "#E06D00";
 
 type Step = "capture" | "verify" | "setup";
 
-function priceSummary(seatCount: number, includeDashboard: boolean) {
+function priceSummary(seatCount: number, includeDashboard: boolean, annual: boolean) {
   const plan = planForSeatCount(seatCount);
   if (!plan) return null;
   const seats = seatCount * plan.seatRate;
-  const dashboard = includeDashboard ? plan.dashboardRate : 0;
+  // Annual prepay discounts the dashboard only (never seats). The figure shown is
+  // the monthly-equivalent rate; Stripe applies the discount as a coupon.
+  const dashboard = includeDashboard
+    ? annual
+      ? annualDashboardMonthlyEquivalent(plan.dashboardRate)
+      : plan.dashboardRate
+    : 0;
   return { plan, seats, dashboard, total: seats + dashboard };
 }
 
@@ -288,10 +296,35 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
   // keystroke.
   const [seatCountText, setSeatCountText] = useState("1");
   const [includeDashboard, setIncludeDashboard] = useState(false);
+  const [annual, setAnnual] = useState(false);
+  const [annualAvailable, setAnnualAvailable] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiRequest("GET", "/api/billing/config");
+        const data = await res.json();
+        if (!cancelled) setAnnualAvailable(!!data.annualDashboardAvailable);
+      } catch {
+        // Config is best-effort: if it fails, the annual option simply stays hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const enterprise = isEnterpriseSeatCount(seatCount);
-  const summary = useMemo(() => priceSummary(seatCount, includeDashboard), [seatCount, includeDashboard]);
+  // Annual only applies to the dashboard, so it is meaningful only when the
+  // dashboard is included and the discount is actually available.
+  const showAnnual = annualAvailable && includeDashboard;
+  const annualApplied = showAnnual && annual;
+  const summary = useMemo(
+    () => priceSummary(seatCount, includeDashboard, annualApplied),
+    [seatCount, includeDashboard, annualApplied],
+  );
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -306,6 +339,7 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
         password,
         seatCount,
         includeDashboard,
+        annual: annualApplied,
       });
       const data = await res.json();
       if (data.url) {
@@ -445,6 +479,33 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
             )}
           </div>
 
+          {!enterprise && showAnnual && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="annual">Pay the dashboard annually</Label>
+                <button
+                  type="button"
+                  id="annual"
+                  role="switch"
+                  aria-checked={annual}
+                  onClick={() => setAnnual((v) => !v)}
+                  className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+                  style={{ backgroundColor: annual ? ORANGE : "#cbd5e1" }}
+                  data-testid="toggle-annual"
+                >
+                  <span
+                    className="inline-block h-5 w-5 transform rounded-full bg-white transition-transform"
+                    style={{ transform: annual ? "translateX(22px)" : "translateX(2px)" }}
+                  />
+                </button>
+              </div>
+              <p className="text-sm text-muted-foreground" data-testid="text-annual-line">
+                Prepay 12 months of the Manager Dashboard for an extra {ANNUAL_DASHBOARD_DISCOUNT_PERCENT}% off. Consultant
+                seats stay on the standard monthly rate.
+              </p>
+            </div>
+          )}
+
           {!enterprise && summary && (
             <div className="rounded-md border p-4 space-y-1" style={{ borderColor: NAVY }} data-testid="price-summary">
               <div className="flex justify-between text-sm">
@@ -455,7 +516,7 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
               </div>
               {includeDashboard && (
                 <div className="flex justify-between text-sm">
-                  <span>Manager Dashboard</span>
+                  <span>Manager Dashboard{annualApplied ? " (annual)" : ""}</span>
                   <span>${summary.dashboard}/mo</span>
                 </div>
               )}

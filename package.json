@@ -10,7 +10,7 @@
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "stripe:setup": "tsx scripts/stripe-setup.ts",
-    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/unused} OPENAI_API_KEY=${OPENAI_API_KEY:-sk-test-dummy} STRIPE_SEAT_TEAM_PRICE_ID=price_seat_team STRIPE_SEAT_OFFICE_PRICE_ID=price_seat_office STRIPE_SEAT_COMPANY_PRICE_ID=price_seat_company STRIPE_DASHBOARD_TEAM_PRICE_ID=price_dash_team STRIPE_DASHBOARD_OFFICE_PRICE_ID=price_dash_office STRIPE_DASHBOARD_COMPANY_PRICE_ID=price_dash_company tsx --test server/*.test.ts client/src/lib/*.test.ts"
+    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/unused} OPENAI_API_KEY=${OPENAI_API_KEY:-sk-test-dummy} STRIPE_SEAT_TEAM_PRICE_ID=price_seat_team STRIPE_SEAT_OFFICE_PRICE_ID=price_seat_office STRIPE_SEAT_COMPANY_PRICE_ID=price_seat_company STRIPE_DASHBOARD_TEAM_PRICE_ID=price_dash_team STRIPE_DASHBOARD_OFFICE_PRICE_ID=price_dash_office STRIPE_DASHBOARD_COMPANY_PRICE_ID=price_dash_company STRIPE_DASHBOARD_ANNUAL_COUPON_ID=coupon_dash_annual tsx --test server/*.test.ts client/src/lib/*.test.ts"
   },
   "dependencies": {
     "@fingerprintjs/fingerprintjs": "^3.4.2",
