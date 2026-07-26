@@ -480,6 +480,12 @@ export const demoSessions = pgTable("demo_sessions", {
   deviceFingerprint: text("device_fingerprint"),
   ipAddress: text("ip_address"),
   sessionNumber: integer("session_number").notNull().default(1),
+  // Which demo flow created this row. NULL means the original flow, so every
+  // pre-existing row stays correct with no backfill; 'v2' marks the
+  // industry-choice flow (see server/demoV2.ts). The v2 no-repeat picker only
+  // excludes scenarios seen in v2 sessions, so this discriminator is what keeps
+  // the two flows' per-email histories from interfering with each other.
+  flow: text("flow"), // null (legacy/v1) | 'v2'
 });
 
 export const insertDemoSessionSchema = createInsertSchema(demoSessions).omit({ id: true });

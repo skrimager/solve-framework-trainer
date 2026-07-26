@@ -1,0 +1,365 @@
+// Demo v2 HTTP surface: /api/demo-v2/*. A parallel flow to /api/demo/*, which is
+// left completely untouched. The difference is the visitor picks an industry
+// before every session and never sees the same scenario twice inside an industry
+// (see pickNextV2Scenario). Everything else is deliberately the same code as the
+// real platform: the same roleplay pipeline, the same scoreTranscript call with
+// the same four arguments, the same rubric, the same 85 standard, the same
+// beginner leniency, the same score cache. Nothing about scoring is re-derived
+// here.
+//
+// Email verification is NOT duplicated. The v2 client calls the existing
+// /api/demo/request-code and /api/demo/verify, which only touch demo_signups and
+// are flow-agnostic; the signed token they mint is accepted here unchanged. Lead
+// capture likewise reuses /api/demo/lead. That keeps one copy of the code-email
+// path and one copy of the per-email session counter.
+import type { Express, Request, Response } from "express";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { storage } from "./storage";
+import {
+  normalizeEmail,
+  verifyDemoToken,
+  isSessionLimitReached,
+  remainingSessions,
+  isUnlimitedDemoEmail,
+  isDeviceLimitReached,
+  isIpLimitReached,
+  countDemoSessionsInIpWindow,
+  isVoiceUnlockedForDemo,
+} from "./demo";
+import {
+  DEMO_V2_INDUSTRIES,
+  DEMO_V2_SLUGS,
+  industryForSlug,
+  isDemoV2Industry,
+  pickNextV2Scenario,
+  type DemoV2ScenarioOption,
+} from "./demoV2";
+import {
+  getCustomerOpening,
+  getCustomerReply,
+  scoreTranscript,
+  scenarioTrack,
+  hasProposedRecommendation,
+} from "./llm";
+import { deriveStalledStep } from "./realConversations";
+import { personaCoreFor, sessionVariantSection } from "./persona";
+import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type TranscriptMessage } from "@shared/schema";
+
+// The pieces of server/routes.ts that v2 needs are module-private there (a
+// RateLimiter instance, the proxy-aware IP reader, the TTS streamer). They are
+// injected rather than copied so v2 shares the exact same rate-limit budget and
+// the exact same audio cache behavior as v1 instead of forking them.
+export type DemoV2Deps = {
+  clientIp: (req: Request) => string;
+  demoLimiter: { check: (key: string) => boolean };
+  streamMessageAudio: (
+    res: Response,
+    opts: {
+      msgId: string;
+      text: string;
+      voice: string;
+      instructions?: string;
+      setStatus: (status: "ready" | "failed") => Promise<void>;
+    },
+  ) => Promise<void>;
+  updateDemoMsgAudioStatus: (sessionId: number, msgId: string, status: "ready" | "failed") => Promise<void>;
+};
+
+export const DEMO_V2_FLOW = "v2";
+
+function publicDemoSession(s: DemoSession) {
+  return {
+    id: s.id,
+    scenarioId: s.scenarioId,
+    status: s.status,
+    transcript: s.transcript,
+    score: s.score,
+    rubricScores: s.rubricScores,
+    feedback: s.feedback,
+  };
+}
+
+// Loads the six v2 scenario rows and shapes them into picker candidates, in the
+// fixed per-industry order declared in demoV2.ts. Missing rows (an unseeded
+// database) are skipped rather than throwing, so one absent scenario degrades to
+// a smaller pool instead of taking the flow down.
+export async function loadDemoV2Pool(): Promise<DemoV2ScenarioOption[]> {
+  const pool: DemoV2ScenarioOption[] = [];
+  for (const slug of [...DEMO_V2_SLUGS.auto, ...DEMO_V2_SLUGS.real_estate]) {
+    const scenario = await storage.getScenarioBySlug(slug);
+    if (!scenario) continue;
+    const industry = industryForSlug(slug);
+    if (!industry) continue;
+    pool.push({ id: scenario.id, slug, industry });
+  }
+  return pool;
+}
+
+export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
+  const { clientIp, demoLimiter, streamMessageAudio, updateDemoMsgAudioStatus } = deps;
+
+  async function requireDemoSignup(req: Request, res: Response): Promise<DemoSignup | null> {
+    const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
+    if (!payload) {
+      res.status(401).json({ message: "Your demo session has expired. Please verify your email again." });
+      return null;
+    }
+    const signup = await storage.getDemoSignupByEmail(normalizeEmail(payload.email));
+    if (!signup || !signup.verified) {
+      res.status(401).json({ message: "Please verify your email to start the demo." });
+      return null;
+    }
+    return signup;
+  }
+
+  // The industry choices, served rather than hardcoded in the client, so the two
+  // never drift apart.
+  app.get("/api/demo-v2/options", (_req, res) => {
+    res.json({ options: DEMO_V2_INDUSTRIES });
+  });
+
+  // Start a session in the chosen industry. Same three caps as v1 (email,
+  // device, IP), same increment-before-create ordering so a refresh cannot buy a
+  // fourth run, and the same shared per-email counter.
+  app.post("/api/demo-v2/session", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const parsed = z
+      .object({ industry: z.string().trim() })
+      .safeParse({ industry: req.body?.industry ?? "" });
+    if (!parsed.success || !isDemoV2Industry(parsed.data.industry)) {
+      return res.status(400).json({ message: "Please choose Auto Sales or Real Estate to begin." });
+    }
+    const industry = parsed.data.industry;
+
+    const signup = await requireDemoSignup(req, res);
+    if (!signup) return;
+
+    const fingerprint =
+      typeof req.body?.fingerprint === "string" && req.body.fingerprint.trim()
+        ? req.body.fingerprint.trim().slice(0, 128)
+        : null;
+    const ip = clientIp(req);
+
+    if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
+      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0, reason: "email" });
+    }
+
+    const deviceCount = fingerprint
+      ? (await storage.listDemoSessionsByFingerprint(fingerprint)).length
+      : 0;
+    if (isDeviceLimitReached(deviceCount, signup.email)) {
+      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "device" });
+    }
+
+    const ipRows = await storage.listDemoSessionsByIp(ip);
+    if (isIpLimitReached(countDemoSessionsInIpWindow(ipRows), signup.email)) {
+      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "ip" });
+    }
+
+    const pool = await loadDemoV2Pool();
+    // Only v2 rows count toward the exclusion set, so a visitor who already ran
+    // the original demo flow still gets all three scenarios here.
+    const priorV2 = (await storage.listDemoSessionsBySignup(signup.id)).filter(
+      (row) => row.flow === DEMO_V2_FLOW,
+    );
+    let choice: DemoV2ScenarioOption;
+    try {
+      choice = pickNextV2Scenario(industry, priorV2, pool);
+    } catch {
+      return res.status(500).json({ message: "Demo is temporarily unavailable." });
+    }
+    const scenario = await storage.getScenario(choice.id);
+    if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
+
+    const updatedSignup = isUnlimitedDemoEmail(signup.email)
+      ? signup
+      : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
+    const sessionNumber = isUnlimitedDemoEmail(signup.email)
+      ? signup.sessionsUsed + 1
+      : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
+    const voiceEnabled = isVoiceUnlockedForDemo(sessionNumber, signup.email);
+
+    let session = await storage.createDemoSession({
+      signupId: signup.id,
+      email: signup.email,
+      scenarioId: scenario.id,
+      status: "in_progress",
+      transcript: "[]",
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      deviceFingerprint: fingerprint,
+      ipAddress: ip,
+      sessionNumber,
+      flow: DEMO_V2_FLOW,
+    });
+
+    try {
+      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
+      const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
+      if (openingText) {
+        const openingMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: openingText,
+          audioStatus: "none",
+          msgId: randomUUID(),
+          timestamp: new Date().toISOString(),
+        });
+        session = (await storage.updateDemoSession(session.id, {
+          transcript: JSON.stringify([openingMsg]),
+        })) ?? session;
+      }
+    } catch (err) {
+      console.error("Demo v2 opening generation failed; starting empty:", err);
+    }
+
+    res.json({
+      session: publicDemoSession(session),
+      remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1, signup.email),
+      voiceEnabled,
+      industry,
+      scenario: {
+        id: scenario.id,
+        slug: scenario.slug,
+        title: scenario.title,
+        briefing: scenario.briefing,
+        track: scenario.track,
+        gender: scenario.gender,
+      },
+    });
+  });
+
+  app.get("/api/demo-v2/session/:id", async (req, res) => {
+    const signup = await requireDemoSignup(req, res);
+    if (!signup) return;
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session || session.signupId !== signup.id) {
+      return res.status(404).json({ message: "Session not found" });
+    }
+    res.json({ session: publicDemoSession(session) });
+  });
+
+  // A conversational turn. Identical to v1: same getCustomerReply, escalation
+  // tier pinned to 0, same voice gating on the third session only.
+  app.post("/api/demo-v2/session/:id/message", async (req, res) => {
+    try {
+      if (!demoLimiter.check(clientIp(req))) {
+        return res.status(429).json({ message: "Too many requests. Please slow down." });
+      }
+      const signup = await requireDemoSignup(req, res);
+      if (!signup) return;
+      const session = await storage.getDemoSession(Number(req.params.id));
+      if (!session || session.signupId !== signup.id) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+      const scenario = await storage.getScenario(session.scenarioId);
+      if (!scenario) return res.status(404).json({ message: "Conversation not found" });
+
+      const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
+      const { content, withAudio } = req.body ?? {};
+      const useAudio = Boolean(withAudio) && voiceUnlocked;
+      const transcript = JSON.parse(session.transcript);
+      transcript.push(
+        transcriptMessageSchema.parse({
+          role: "consultant",
+          content,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+
+      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
+      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
+      const msgId = randomUUID();
+      transcript.push(
+        transcriptMessageSchema.parse({
+          role: "customer",
+          content: customerReplyText,
+          audioStatus: useAudio ? "pending" : "none",
+          audioUrl: useAudio ? `/api/demo-v2/session/${session.id}/audio-stream/${msgId}` : undefined,
+          msgId,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+
+      const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
+      res.json({ session: publicDemoSession(updated!) });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to process message" });
+    }
+  });
+
+  // Not signup-gated for the same reason as v1: the request comes from an
+  // <audio> element that cannot carry the demo token, and the unguessable msgId
+  // is the capability. Voice is re-checked server side so a crafted request
+  // cannot spend TTS budget on a locked session.
+  app.get("/api/demo-v2/session/:id/audio-stream/:msgId", async (req, res) => {
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+      return res.status(403).end();
+    }
+    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+    const msg = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
+    if (!msg) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await streamMessageAudio(res, {
+      msgId: req.params.msgId,
+      text: msg.content,
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      setStatus: (status) => updateDemoMsgAudioStatus(session.id, req.params.msgId, status),
+    });
+  });
+
+  // End and score. The scoreTranscript call is byte-for-byte the v1/real call
+  // with the same four arguments, so the rubric, the 85 standard, the beginner
+  // leniency, and the score cache all apply unchanged. Two additions over v1,
+  // both borrowed from real sessions: the completeness gate, so a two-line
+  // conversation is not scored as a legitimate attempt, and the stalled-step
+  // diagnosis in the payload.
+  app.post("/api/demo-v2/session/:id/complete", async (req, res) => {
+    try {
+      const signup = await requireDemoSignup(req, res);
+      if (!signup) return;
+      const session = await storage.getDemoSession(Number(req.params.id));
+      if (!session || session.signupId !== signup.id) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+      const transcript = JSON.parse(session.transcript);
+
+      if (!req.body?.force) {
+        const proposed = await hasProposedRecommendation(transcript);
+        if (!proposed) {
+          return res.status(409).json({ message: "incomplete", incomplete: true });
+        }
+      }
+
+      const scenario = await storage.getScenario(session.scenarioId);
+      const track = scenarioTrack(scenario?.track);
+      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
+      const updated = await storage.updateDemoSession(session.id, {
+        status: "completed",
+        score: overall,
+        rubricScores: JSON.stringify(rubric),
+        feedback,
+        completedAt: new Date().toISOString(),
+      });
+      res.json({
+        session: publicDemoSession(updated!),
+        // Presentation-only derivation over the unchanged stored rubric.
+        stalledStep: deriveStalledStep(rubric as RubricScores),
+      });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ message: err.message ?? "Failed to score session" });
+    }
+  });
+}

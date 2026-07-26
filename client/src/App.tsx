@@ -19,6 +19,7 @@ import Certification from "@/pages/certification";
 import AdminLogin from "@/pages/admin-login";
 import AdminDashboard from "@/pages/admin-dashboard";
 import Demo from "@/pages/demo";
+import DemoV2 from "@/pages/demo-v2";
 import DemoDashboard from "@/pages/dashboard-demo";
 import OfficeSetup, { OfficeSetupComplete } from "@/pages/office-setup";
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -61,6 +62,11 @@ function AppRouter() {
           signed demo token gate it server-side, so it stays outside RequireAuth
           and never touches the trainee/admin login flows. */}
       <Route path="/demo" component={Demo} />
+      {/* Demo v2: the same public, unauthenticated model as /demo, but the
+          visitor picks an industry before each of their three conversations and
+          never repeats a scenario within one. Registered alongside /demo, which
+          is left exactly as it is until this flow has been reviewed. */}
+      <Route path="/demo-v2" component={DemoV2} />
       {/* Public, read-only demo of the manager dashboard: no auth, seeded
           sample data only. Served by the no-auth GET /api/public/demo-dashboard
           endpoint; intentionally outside RequireAuth and with no path into the
