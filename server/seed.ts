@@ -1146,6 +1146,100 @@ Stay conversational, natural, and realistic — like a real person, not a script
   },
 
   // ─────────────────────────────────────────────────────────────
+  // DEMO V2 (public free demo: industry choice + no-repeat rotation)
+  // ─────────────────────────────────────────────────────────────
+  // Three Auto and three Real Estate scenarios for the /api/demo-v2/* flow (see
+  // server/demoV2.ts). active:false keeps them out of the trainee scenario
+  // picker and the certification pool exactly like the two rows above; the demo
+  // reaches them by slug only. All prose lives in personaVariantSeed, and the
+  // merge loop at the bottom of this file stamps personaCore plus the three
+  // variation pools onto these rows at module load, so a first insertion already
+  // carries the structured fields. customerPersona is the legacy freeform column
+  // (still NOT NULL); it points at the same core string rather than repeating it
+  // so there is only ever one copy of each persona to keep in sync.
+  {
+    slug: "demo-v2-auto-1",
+    gender: "male",
+    title: "Demo: Price-Only Caller Burned by His Last Vehicle",
+    vertical: "auto_sales",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're an auto sales consultant. A caller wants nothing but an out-the-door price on one specific SUV. Practice a warm discovery conversation: find out what he actually uses the vehicle for and what went wrong last time before you talk numbers.",
+    description:
+      "Public demo scenario. A self-employed tradesman opens demanding a best out-the-door price and volunteers one grumble about his last vehicle nickel and diming him. The real driver is five shop visits in fourteen months, a mechanic he stopped trusting, and lost paid days, so what he needs is confidence in reliability rather than the lowest number. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-auto-1"].core,
+  },
+  {
+    slug: "demo-v2-auto-2",
+    gender: "male",
+    title: "Demo: Retired Couple Trading In, Nothing Fancy",
+    vertical: "auto_sales",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're an auto sales consultant. A retired couple wants to trade in a nine-year-old sedan for something newer and says nothing fancy. Practice a warm discovery conversation: understand how they actually use the vehicle and what a comfortable payment looks like before recommending anything.",
+    description:
+      "Public demo scenario. A recently retired customer opens on a plain trade-in request and volunteers, as small talk, a six-hour drive to see the grandkids. The real drivers are a fixed retirement income and long highway trips, so the win is safety, dependability, ride comfort, and a payment that will not squeeze them. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-auto-2"].core,
+  },
+  {
+    slug: "demo-v2-auto-3",
+    gender: "female",
+    title: "Demo: Cheap and Reliable, Nothing Too Fast",
+    vertical: "auto_sales",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're an auto sales consultant. A customer wants something cheap and reliable for her kid. Practice a warm discovery conversation: find out who is actually going to be driving it and what she genuinely needs before you show her the cheapest thing on the lot.",
+    description:
+      "Public demo scenario. A parent opens on price and slips in nothing too fast as though it were another budget line. The car is for a sixteen-year-old who got his license eleven days ago, safety is the only thing she truly cares about, and she will stretch the budget for it if the consultant asks who the car is for. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-auto-3"].core,
+  },
+  {
+    slug: "demo-v2-re-1",
+    gender: "female",
+    title: "Demo: Downsizing Couple Just Looking at Something Smaller",
+    vertical: "real_estate",
+    transactionType: "re_buyer_agent",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're a real estate agent. A couple in their seventies say they're just looking at something smaller, nothing serious yet. Practice a warm discovery conversation: understand why now and what matters most before talking listings.",
+    description:
+      "Public demo scenario. A long-time homeowner opens vaguely and volunteers one offhand grumble about the stairs. The real driver is a health scare and a need for single-level safety rather than money, plus real grief about leaving the family home, all of which only surfaces if the agent asks why now. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-re-1"].core,
+  },
+  {
+    slug: "demo-v2-re-2",
+    gender: "male",
+    title: "Demo: Neighborhood Shopper Hiding a Hard Deadline",
+    vertical: "real_estate",
+    transactionType: "re_buyer_agent",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're a real estate agent. A buyer asks what's on the market in one specific neighborhood. Practice a warm discovery conversation: understand his timeline and who is moving with him before reciting inventory.",
+    description:
+      "Public demo scenario. A father of two opens asking only about inventory in one area and volunteers a tired joke about weeks of circling with his wife. He is deliberately hiding an immovable job start date three weeks out because he expects pressure, and the real decision drivers are the school district and a commute short enough to be home for dinner. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-re-2"].core,
+  },
+  {
+    slug: "demo-v2-re-3",
+    gender: "female",
+    title: "Demo: First-Time Buyer Asking for the Cheapest Thing",
+    vertical: "real_estate",
+    transactionType: "re_buyer_agent",
+    difficulty: "beginner",
+    active: false,
+    briefing:
+      "You're a real estate agent. A first-time buyer asks for the cheapest thing you have. Practice a warm discovery conversation: find out what is behind the focus on price before sending listings.",
+    description:
+      "Public demo scenario. A first-time buyer opens on the lowest price and volunteers that she does not want to get in over her head. She watched her brother lose his house after a layoff, her income is stronger than her question suggests, and what she needs is a payment that feels safe in a bad month rather than a discount. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-re-3"].core,
+  },
+
+  // ─────────────────────────────────────────────────────────────
   // APARTMENT RENTAL
   // ─────────────────────────────────────────────────────────────
   {

@@ -93,6 +93,7 @@ import {
   isVoiceUnlockedForDemo,
   demoAbuseAnalytics,
 } from "./demo";
+import { registerDemoV2Routes } from "./demoV2Routes";
 import {
   contactTypeSchema,
   contactPatchSchema,
@@ -2249,6 +2250,19 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     });
     void sendLeadNotification(lead);
     res.status(201).json({ ok: true, id: lead.id });
+  });
+
+  // The parallel /api/demo-v2/* flow (industry choice + no-repeat rotation). Its
+  // handlers live in server/demoV2Routes.ts and none of the routes above are
+  // altered by this call. clientIp, demoLimiter, streamMessageAudio and
+  // updateDemoMsgAudioStatus are module-private here, so they are passed in
+  // rather than duplicated: v2 shares this exact demoLimiter instance, meaning
+  // one visitor cannot use the second flow to double their rate-limit budget.
+  registerDemoV2Routes(app, {
+    clientIp,
+    demoLimiter,
+    streamMessageAudio,
+    updateDemoMsgAudioStatus,
   });
 
   // ===========================================================================
