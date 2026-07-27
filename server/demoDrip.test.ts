@@ -31,9 +31,9 @@ function assertBrandSafe(text: string) {
 // ===========================================================================
 
 describe("demo drip copy", () => {
-  test("day 0 confirms 3 free sessions + scoring and links the demo, plus footer", () => {
+  test("day 0 confirms the free session + scoring and links the demo, plus footer", () => {
     const body = buildDemoDay0Body("dana@example.com");
-    assert.match(body, /three free practice sessions/i);
+    assert.match(body, /one free practice session/i);
     assert.match(body, /SOLVE Coach/);
     assert.match(body, /https:\/\/www\.solveframework\.com\/demo/);
     assert.match(body, /opt out here: https?:\/\/[^\s]*\/api\/unsubscribe/);
@@ -49,7 +49,7 @@ describe("demo drip copy", () => {
 
   test("day 1 nudges to use free sessions when there is no scored session", () => {
     const body = buildDemoDay1Body("dana@example.com", null);
-    assert.match(body, /three free practice sessions are still sitting there/i);
+    assert.match(body, /free practice session is still sitting there/i);
     assert.doesNotMatch(body, /out of 100/);
     assertBrandSafe(body);
   });

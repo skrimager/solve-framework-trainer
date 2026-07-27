@@ -1,9 +1,10 @@
 // Demo v2 page. Same structural components and styling as the original demo page
-// but a different shape of flow: the visitor picks an industry before each of
-// their three conversations, and the server guarantees a scenario they have not
-// seen in that industry. Copied and adapted from client/src/pages/demo.tsx rather
-// than importing from it, so the original demo cannot be broken by changes here.
+// but a different shape of flow: the visitor picks an industry, runs their one
+// free conversation, and then lands on the membership / pay-per-session fork.
+// Copied and adapted from client/src/pages/demo.tsx rather than importing from
+// it, so the original demo cannot be broken by changes here.
 import { useState, useRef, useEffect } from "react";
+import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,13 @@ import {
 } from "@/lib/demoV2Api";
 import { getDeviceFingerprint } from "@/lib/fingerprint";
 import {
+  MEMBER_OPTION,
+  MEMBER_SIGNUP_PATH,
+  PAID_RETURN_NOTICE,
+  PAY_PER_SESSION_OPTION,
+} from "@/lib/demoPaywall";
+import { hashToSearch } from "@/lib/hashLocation";
+import {
   Volume2,
   Send,
   Loader2,
@@ -33,6 +41,7 @@ import {
   User,
   Phone,
   CheckCircle2,
+  X,
 } from "lucide-react";
 import type {
   RubricScores,
@@ -64,12 +73,35 @@ function isLeadershipRubric(r: Record<string, number>): r is LeadershipRubricSco
 
 type Step = "landing" | "email" | "code" | "industry" | "roleplay" | "results";
 
-const TOTAL_FREE_SESSIONS = 3;
-
 // Brand palette (shared with the rest of the app).
 const ORANGE = "#E06D00";
 
-const REQUEST_ACCESS_URL = "https://www.solveframework.com/#pricing";
+// Stripe Checkout leaves the app entirely, so the verified demo token is parked
+// here for the round trip and read back once. sessionStorage (not localStorage)
+// keeps it to this tab and this visit, so a paying visitor does not have to
+// re-verify their email just to start the session they bought.
+const PAID_ROUND_TRIP_KEY = "solve-demo-paid-round-trip";
+
+function parkDemoTokenForCheckout(token: string, email: string): void {
+  try {
+    window.sessionStorage.setItem(PAID_ROUND_TRIP_KEY, JSON.stringify({ token, email }));
+  } catch {
+    // Storage blocked: the visitor simply verifies their email again on return.
+  }
+}
+
+function takeParkedDemoToken(): { token: string; email: string } | null {
+  try {
+    const raw = window.sessionStorage.getItem(PAID_ROUND_TRIP_KEY);
+    window.sessionStorage.removeItem(PAID_ROUND_TRIP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.token !== "string" || typeof parsed?.email !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 export default function DemoV2() {
   const [step, setStep] = useState<Step>("landing");
@@ -79,15 +111,38 @@ export default function DemoV2() {
   const [industry, setIndustry] = useState<string | null>(null);
   const [finalSession, setFinalSession] = useState<DemoV2Session | null>(null);
   const [stalledStep, setStalledStep] = useState<string | null>(null);
-  // 1-based ordinal of the conversation the visitor is about to run or just ran.
-  const [sessionNumber, setSessionNumber] = useState(1);
+  const [paidReturn, setPaidReturn] = useState(false);
 
-  const finished = sessionNumber >= TOTAL_FREE_SESSIONS;
+  // The return trip from Stripe Checkout. Success confirms the purchase on the
+  // welcome screen and restores the parked token so the visitor can start the
+  // session they bought; a cancelled checkout lands normally and says nothing.
+  // Either way the query (including the Stripe session id) is stripped from the
+  // address bar.
+  useEffect(() => {
+    const paid = new URLSearchParams(hashToSearch(window.location.hash)).get("paid");
+    if (!paid) return;
+    const parked = takeParkedDemoToken();
+    if (paid === "success") {
+      if (parked) {
+        setEmail(parked.email);
+        setToken(parked.token);
+      }
+      setPaidReturn(true);
+    }
+    window.history.replaceState({}, "", "#/demo");
+  }, []);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto w-full max-w-2xl px-4 py-8">
-        {step === "landing" && <Landing onStart={() => setStep("email")} />}
+        {step === "landing" && (
+          <Landing
+            paidReturn={paidReturn}
+            // A visitor returning with a live token has already verified, so they
+            // go straight to the industry choice.
+            onStart={() => setStep(token ? "industry" : "email")}
+          />
+        )}
 
         {step === "email" && (
           <EmailStep
@@ -118,7 +173,6 @@ export default function DemoV2() {
 
         {step === "industry" && (
           <IndustryStep
-            sessionNumber={sessionNumber}
             onChoose={(key) => {
               setIndustry(key);
               setStep("roleplay");
@@ -147,20 +201,8 @@ export default function DemoV2() {
             session={finalSession}
             stalledStep={stalledStep}
             email={email}
+            token={token}
             limitReached={limitReached}
-            sessionNumber={sessionNumber}
-            showClosing={finished || limitReached}
-            onNext={
-              finished || limitReached
-                ? null
-                : () => {
-                    setSessionNumber(sessionNumber + 1);
-                    setFinalSession(null);
-                    setStalledStep(null);
-                    setIndustry(null);
-                    setStep("industry");
-                  }
-            }
           />
         )}
       </div>
@@ -168,30 +210,41 @@ export default function DemoV2() {
   );
 }
 
-function Landing({ onStart }: { onStart: () => void }) {
+function Landing({ onStart, paidReturn }: { onStart: () => void; paidReturn: boolean }) {
   return (
     <div className="space-y-6 text-center">
+      {paidReturn && (
+        <div
+          className="rounded-lg border-2 p-4 text-left"
+          style={{ borderColor: ORANGE }}
+          data-testid="banner-demo-v2-paid-return"
+        >
+          <p className="font-semibold" style={{ color: ORANGE }}>
+            {PAID_RETURN_NOTICE.headline}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">{PAID_RETURN_NOTICE.body}</p>
+        </div>
+      )}
       <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-        <Phone className="h-3.5 w-3.5" /> Free live voice practice
+        <Phone className="h-3.5 w-3.5" /> Free AI practice conversation
       </div>
       <h1 className="text-3xl font-bold tracking-tight" data-testid="text-demo-v2-heading">
-        Three free practice conversations. No credit card.
+        One free practice conversation. No credit card.
       </h1>
       <p className="mx-auto max-w-xl text-muted-foreground">
-        Pick Auto or Real Estate for each one, and every conversation you run will
-        be different, just like real customers. Our AI plays a customer whose real
-        motivation sits underneath what they first ask for. Talk to them like a real
-        call, dig for what they actually need, and get scored on your discovery.
+        Pick Auto or Real Estate, and our AI plays a customer whose real motivation
+        sits underneath what they first ask for. Talk to them like a real call, dig
+        for what they actually need, and get scored on your discovery.
       </p>
 
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          Choose your industry fresh before every conversation.
+          Choose the industry you actually sell in.
         </li>
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          You will never get the same customer twice inside an industry.
+          A customer whose real motivation is not what they open with.
         </li>
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -233,8 +286,8 @@ function EmailStep({
         Where should we send your access code?
       </h2>
       <p className="text-sm text-muted-foreground">
-        Enter your email and we'll send a 6-digit code to start your three free
-        conversations.
+        Enter your email and we'll send a 6-digit code to start your free
+        conversation.
       </p>
       <form
         className="space-y-3"
@@ -383,16 +436,11 @@ function CodeStep({
   );
 }
 
-// The per-session industry picker. Options come from the server so this list and
-// the server's scenario pools cannot drift apart. Repeating an industry is
-// allowed: the server just hands over a customer the visitor has not met yet.
-function IndustryStep({
-  sessionNumber,
-  onChoose,
-}: {
-  sessionNumber: number;
-  onChoose: (key: string) => void;
-}) {
+// The industry picker. Options come from the server so this list and the
+// server's scenario pools cannot drift apart. The server hands over a customer
+// the visitor has not met yet, which still matters for allowlisted emails and
+// for any future paid session.
+function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const { data: options, isLoading, isError } = useQuery<DemoV2Industry[]>({
     queryKey: ["/api/demo/options"],
@@ -417,12 +465,12 @@ function IndustryStep({
   return (
     <div className="space-y-6 text-center">
       <p className="text-sm font-medium text-muted-foreground" data-testid="text-demo-v2-session-counter">
-        Conversation {sessionNumber} of {TOTAL_FREE_SESSIONS}
+        Your free practice conversation
       </p>
-      <h2 className="text-2xl font-semibold">Which industry do you want this time?</h2>
+      <h2 className="text-2xl font-semibold">Which industry do you want?</h2>
       <p className="mx-auto max-w-xl text-sm text-muted-foreground">
-        Pick either one. You can repeat an industry as many times as you like, and
-        you will get a customer you have not talked to yet each time.
+        Pick either one. You will meet a customer whose real motivation sits
+        underneath the request they open with.
       </p>
 
       <div
@@ -673,7 +721,7 @@ function Roleplay({
             </>
           ) : (
             <span className="text-xs text-muted-foreground" data-testid="text-demo-v2-voice-locked">
-              Voice unlocks on your third conversation
+              Voice unlocks on paid sessions
             </span>
           )}
         </div>
@@ -833,22 +881,20 @@ function Roleplay({
   );
 }
 
+// The free session's results, then the fork. There is no next free session to
+// start, so the only forward paths are membership or a purchased session.
 function ResultsAndCta({
   session,
   stalledStep,
   email,
+  token,
   limitReached,
-  sessionNumber,
-  showClosing,
-  onNext,
 }: {
   session: DemoV2Session | null;
   stalledStep: string | null;
   email: string;
+  token: string | null;
   limitReached: boolean;
-  sessionNumber: number;
-  showClosing: boolean;
-  onNext: (() => void) | null;
 }) {
   const rubric: Record<string, number> | null = session?.rubricScores
     ? parseRubric(session.rubricScores)
@@ -861,22 +907,12 @@ function ResultsAndCta({
       {limitReached ? (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">You've used all your free practice conversations</CardTitle>
+            <CardTitle className="text-lg">You've used your free practice conversation</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4 text-sm text-muted-foreground">
+          <CardContent className="text-sm text-muted-foreground">
             <p data-testid="text-demo-v2-limit-reached">
-              Ready for unlimited practice, coaching, and certification? Get full
-              access for you and your whole team below.
+              Ready to keep practicing? Choose one of the options below.
             </p>
-            <Button
-              asChild
-              style={{ backgroundColor: ORANGE, color: "white" }}
-              data-testid="button-demo-v2-request-access"
-            >
-              <a href={REQUEST_ACCESS_URL} target="_blank" rel="noopener noreferrer">
-                Request Access
-              </a>
-            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -929,34 +965,138 @@ function ResultsAndCta({
         )
       )}
 
-      {onNext && (
-        <div className="flex flex-col items-center gap-2">
-          <Button size="lg" onClick={onNext} data-testid="button-demo-v2-next-session">
-            Start conversation {sessionNumber + 1} of {TOTAL_FREE_SESSIONS}
+      <NextStepFork email={email} token={token} />
+
+      <CtaForm email={email} />
+    </div>
+  );
+}
+
+// The post-free-session fork. Two options, membership visually dominant, with
+// no lime green anywhere: emphasis comes from size, border, tint and weight,
+// since lime is reserved for admin/vault.
+function NextStepFork({ email, token }: { email: string; token: string | null }) {
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+
+  // Hands off to Stripe Checkout. The demo token is parked first so the visitor
+  // comes back to a screen that can start the session they just bought without
+  // verifying their email a second time.
+  const checkout = useMutation({
+    mutationFn: () => {
+      setCheckoutError(null);
+      return demoV2Api.createPaidSessionCheckout(token ?? "");
+    },
+    onSuccess: (data) => {
+      if (token) parkDemoTokenForCheckout(token, email);
+      window.location.href = data.url;
+    },
+    onError: (e: Error) => setCheckoutError(e.message || PAY_PER_SESSION_OPTION.errorMessage),
+  });
+
+  return (
+    <div className="grid gap-4 md:grid-cols-5" data-testid="demo-v2-next-step-fork">
+      <Card
+        className="border-2 shadow-lg md:col-span-3"
+        style={{ borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.05)" }}
+        data-testid="demo-v2-fork-member"
+      >
+        <CardHeader className="space-y-2">
+          <span
+            className="w-fit rounded-full px-2.5 py-1 text-xs font-semibold text-white"
+            style={{ backgroundColor: ORANGE }}
+            data-testid="text-demo-v2-fork-member-badge"
+          >
+            {MEMBER_OPTION.badge}
+          </span>
+          <CardTitle className="text-2xl" data-testid="text-demo-v2-fork-member-headline">
+            {MEMBER_OPTION.headline}
+          </CardTitle>
+          <p className="text-sm font-medium text-foreground">{MEMBER_OPTION.subhead}</p>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <ul className="space-y-2 text-sm">
+            {MEMBER_OPTION.features.map((feature) => (
+              <li key={feature} className="flex items-start gap-2.5">
+                <span
+                  className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: ORANGE }}
+                  aria-hidden="true"
+                />
+                {feature}
+              </li>
+            ))}
+          </ul>
+          <Button
+            asChild
+            size="lg"
+            className="w-full text-base"
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            data-testid="button-demo-v2-become-member"
+          >
+            <Link href={MEMBER_SIGNUP_PATH}>{MEMBER_OPTION.buttonLabel}</Link>
           </Button>
-          <p className="text-xs text-muted-foreground">
-            Pick either industry again. It will be a different customer.
+        </CardContent>
+      </Card>
+
+      <Card className="md:col-span-2" data-testid="demo-v2-fork-pay-per-session">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-lg" data-testid="text-demo-v2-fork-pps-headline">
+            {PAY_PER_SESSION_OPTION.headline}
+          </CardTitle>
+          <p className="text-base font-semibold" style={{ color: ORANGE }} data-testid="text-demo-v2-fork-pps-price">
+            {PAY_PER_SESSION_OPTION.priceLine}
           </p>
-        </div>
-      )}
-
-      {showClosing && !limitReached && (
-        <Card>
-          <CardContent className="space-y-2 py-6">
-            <p className="font-medium" data-testid="text-demo-v2-closing">
-              Three conversations. Three different customers, three different
-              motivations.
+          <p className="text-sm text-muted-foreground">{PAY_PER_SESSION_OPTION.subhead}</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.includesLabel}
+              </p>
+              <ul className="space-y-1.5 text-sm">
+                {PAY_PER_SESSION_OPTION.includes.map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: ORANGE }} aria-hidden="true" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.excludesLabel}
+              </p>
+              <ul className="space-y-1.5 text-sm text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.excludes.map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <X className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" aria-hidden="true" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground" data-testid="text-demo-v2-fork-pps-disclaimer">
+            {PAY_PER_SESSION_OPTION.disclaimer}
+          </p>
+          {checkoutError && (
+            <p className="text-sm text-destructive" data-testid="text-demo-v2-pps-error">
+              {checkoutError}
             </p>
-            <p className="text-sm text-muted-foreground">
-              You had to dig for each one, that's the point. The full platform has
-              hundreds of conversations across every industry and difficulty level,
-              and none of them let you coast.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {showClosing && <CtaForm email={email} />}
+          )}
+          <Button
+            variant="outline"
+            className="w-full whitespace-normal"
+            style={{ borderColor: ORANGE, color: ORANGE }}
+            disabled={checkout.isPending}
+            onClick={() => checkout.mutate()}
+            data-testid="button-demo-v2-pay-per-session"
+          >
+            {checkout.isPending ? PAY_PER_SESSION_OPTION.pendingLabel : PAY_PER_SESSION_OPTION.buttonLabel}
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   );
 }

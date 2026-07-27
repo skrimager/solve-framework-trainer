@@ -130,6 +130,14 @@ export const demoV2Api = {
     return data as { session: DemoV2Session; stalledStep: string | null };
   },
 
+  // Buy one individual practice session. Returns the Stripe Checkout URL the
+  // caller redirects to; the credit itself is granted by the payment webhook.
+  async createPaidSessionCheckout(token: string) {
+    const { ok, data } = await post("/api/demo/checkout", { token });
+    if (!ok) throw new Error(data.message ?? "Couldn't start checkout. Please try again.");
+    return data as { url: string };
+  },
+
   // Generic lead capture, nothing demo-flow specific in it.
   async submitLead(lead: { name: string; email: string; company?: string; teamSize?: string; message?: string }) {
     const { ok, data } = await post("/api/demo/lead", lead);

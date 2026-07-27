@@ -126,6 +126,7 @@ import {
   handleStripeEvent,
   addDashboard,
 } from "./billing";
+import { handleDemoPaymentEvent } from "./demoPayments";
 import { generateUniqueInviteCode } from "./invite";
 import {
   evaluatePracticeCap,
@@ -281,7 +282,13 @@ export async function registerRoutes(
       return res.status(400).json({ message: `Webhook signature verification failed` });
     }
     try {
+      // Two independent handlers run for every delivery, one per payment domain:
+      // office subscriptions (billing.ts) and one-time demo practice-session
+      // purchases (demoPayments.ts). Each no-ops on events it does not own and
+      // keeps its own idempotency record, so neither can break or swallow the
+      // other. One endpoint, one STRIPE_WEBHOOK_SECRET.
       await handleStripeEvent(event);
+      await handleDemoPaymentEvent(event);
       res.json({ received: true });
     } catch (err: any) {
       // A processing error should return 5xx so Stripe retries later.

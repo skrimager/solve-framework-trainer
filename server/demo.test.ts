@@ -25,6 +25,7 @@ import {
   isIpLimitReached,
   countDemoSessionsInIpWindow,
   isVoiceUnlockedForDemo,
+  isPaidDemoSession,
   isDisposableEmail,
   demoAbuseAnalytics,
   MAX_DEMO_SESSIONS_PER_DEVICE,
@@ -82,6 +83,13 @@ describe("isCodeValid", () => {
 });
 
 describe("session limit helpers", () => {
+  test("the free allowance is exactly one session", () => {
+    assert.equal(MAX_DEMO_SESSIONS, 1);
+    assert.equal(isSessionLimitReached(0), false, "a first-time visitor may practice");
+    assert.equal(isSessionLimitReached(1), true, "a second attempt is blocked");
+    assert.equal(remainingSessions(0), 1);
+  });
+
   test("limit is reached only at or above MAX", () => {
     assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS - 1), false);
     assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS), true);
@@ -264,15 +272,31 @@ describe("countDemoSessionsInIpWindow (rolling 30-day window)", () => {
   });
 });
 
-describe("isVoiceUnlockedForDemo (cost containment: text default, voice on session 3)", () => {
-  test("sessions 1 and 2 are text-only; session 3 unlocks voice", () => {
-    assert.equal(isVoiceUnlockedForDemo(1), false);
-    assert.equal(isVoiceUnlockedForDemo(2), false);
-    assert.equal(isVoiceUnlockedForDemo(3), true);
+describe("isVoiceUnlockedForDemo (cost containment: voice on paid sessions only)", () => {
+  // The regression this guards: voice used to unlock at
+  // `sessionNumber >= MAX_DEMO_SESSIONS`. Both arguments are now about the
+  // session row itself, not its ordinal, so no amount of replaying can reach
+  // voice without a purchase.
+  test("the free session has no paid credit attached, so it gets no voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(null), false);
+    assert.equal(isVoiceUnlockedForDemo(undefined), false);
+    assert.equal(isVoiceUnlockedForDemo(null, "someoneelse@example.com"), false);
   });
 
-  test("allowlisted founder email always has voice, even on session 1", () => {
-    assert.equal(isVoiceUnlockedForDemo(1, "wadeskrimager@icloud.com"), true);
+  test("a session funded by a purchased credit gets voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(1), true);
+    assert.equal(isVoiceUnlockedForDemo(42, "someoneelse@example.com"), true);
+  });
+
+  test("isPaidDemoSession is exactly 'a credit is linked'", () => {
+    assert.equal(isPaidDemoSession(1), true);
+    assert.equal(isPaidDemoSession(99), true);
+    assert.equal(isPaidDemoSession(null), false);
+    assert.equal(isPaidDemoSession(undefined), false);
+  });
+
+  test("allowlisted founder email always has voice, even with no purchase", () => {
+    assert.equal(isVoiceUnlockedForDemo(null, "wadeskrimager@icloud.com"), true);
   });
 });
 
@@ -452,6 +476,9 @@ describe("public demo endpoints", () => {
       sessions.filter((s) => s.ipAddress === ip);
     (storage as any).listDemoSessionsBySignup = async (signupId: number) =>
       sessions.filter((s) => s.signupId === signupId);
+    // Nobody in this file has bought a session, so the paid path stays closed.
+    // See demoPayments.test.ts for the purchase cases.
+    (storage as any).listDemoPaidSessionsBySignup = async () => [];
     (storage as any).listDemoSignups = async () => signups;
     (storage as any).listDemoSessions = async () => sessions;
   });

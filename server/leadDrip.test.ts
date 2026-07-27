@@ -67,7 +67,7 @@ describe("buildInboundDay3Body", () => {
     const body = buildInboundDay3Body("Dana Smith");
     assert.match(body, /^Hi Dana,/);
     assert.match(body, /A few days ago you signed up to try the SOLVE Framework/);
-    assert.match(body, /three free sessions/);
+    assert.match(body, /free practice session is sitting there/);
     assert.match(body, /SOLVE Coach feedback/);
     assert.match(body, /Wade\nFounder, SOLVE Framework™$/);
   });
