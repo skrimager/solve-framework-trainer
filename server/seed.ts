@@ -2,7 +2,7 @@ import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
 import { personaVariantSeed } from "./personaVariants";
-import type { InsertScenario, Office } from "@shared/schema";
+import type { InsertScenario, Office, Scenario } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
 const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
@@ -45,6 +45,45 @@ async function ensureDemoOffice(): Promise<Office> {
   });
 }
 
+// The six public demo scenarios, listed literally rather than derived from a
+// broader "which rows disagree with the source data" scan. The seed loop below
+// is insert-only, so these rows kept the active:false they were first deployed
+// with even after the source data here flipped to active:true, and the demo
+// resolved nothing. The reconcile is scoped to exactly these slugs so it can
+// never move the active flag on any of the real training scenarios.
+const DEMO_V2_RECONCILE_SLUGS = [
+  "demo-v2-re-1",
+  "demo-v2-re-2",
+  "demo-v2-re-3",
+  "demo-v2-auto-1",
+  "demo-v2-auto-2",
+  "demo-v2-auto-3",
+] as const;
+
+type ScenarioActiveWriter = {
+  updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
+};
+
+// Flips any already-persisted demo scenario back to active:true. Pass the
+// pre-insert snapshot of the table: rows the insert loop creates this boot
+// already carry active:true from source, so they need no second write. Returns
+// the slugs actually updated, which is empty on every boot after the first.
+export async function reconcileDemoV2Active(
+  existingScenarios: Pick<Scenario, "id" | "slug" | "active">[],
+  store: ScenarioActiveWriter,
+): Promise<string[]> {
+  const bySlug = new Map(existingScenarios.map((s) => [s.slug, s]));
+  const reconciled: string[] = [];
+  for (const slug of DEMO_V2_RECONCILE_SLUGS) {
+    const row = bySlug.get(slug);
+    if (!row || row.active === true) continue;
+    await store.updateScenario(row.id, { active: true });
+    console.log(`[seed] reconciled active=true for ${slug}`);
+    reconciled.push(slug);
+  }
+  return reconciled;
+}
+
 // Seeds demo users and the full scenario portfolio across all verticals.
 // Safe to run multiple times — skips if data already exists.
 export async function seed() {
@@ -76,6 +115,8 @@ export async function seed() {
     }
     console.log(`Seeded ${missing.length} new scenario(s) across ${new Set(missing.map((s) => s.vertical)).size} vertical(s).`);
   }
+
+  await reconcileDemoV2Active(existingScenarios, storage);
 
   // Backfill the structured persona fields onto rows seeded before the persona
   // variation rewrite. Keyed off an empty personaCore so it runs once per row and
