@@ -33,6 +33,8 @@ export const MEMBER_OPTION = {
 
 export const PAY_PER_SESSION_OPTION = {
   headline: "Purchase Individual Demo Sessions",
+  // Display copy only. The charged amount is DEMO_SESSION_PRICE_CENTS in
+  // server/demoPayments.ts; change both together.
   priceLine: "$4.99 per session",
   subhead:
     "Individual demo sessions are designed for users who simply want additional AI practice before becoming a member.",
@@ -61,17 +63,15 @@ export const PAY_PER_SESSION_OPTION = {
   disclaimer:
     "Individual demo sessions are intended for practice only. They do not include the SOLVE Academy, certifications, awards, dashboards, or the ability to upload your own conversations for coaching. To unlock the complete SOLVE experience, including member tools, recognition, and advanced coaching features, you'll need a SOLVE membership.",
   buttonLabel: "Continue Practicing - $4.99 per Session",
+  // While the Checkout Session is being created, before the redirect.
+  pendingLabel: "Taking you to checkout...",
+  // The request failed and the button stays clickable.
+  errorMessage: "We couldn't open checkout. Please try again.",
 } as const;
 
-// Shown when the $4.99 button is pressed. Interest capture only; see the click
-// handler in client/src/pages/demo-v2.tsx.
-export const PAY_PER_SESSION_INTEREST = {
-  headline: "Pay-per-session purchasing is launching shortly",
-  body: "Leave your email and we'll notify you the moment it's live.",
-  buttonLabel: "Notify me",
-  successHeadline: "You're on the list.",
-  successBody: "We'll email you as soon as individual sessions are available to buy.",
-  // Recorded on the lead so this interest is distinguishable in the contacts
-  // export from a general "get full access" enquiry.
-  leadMessage: "Interested in purchasing individual demo sessions at $4.99 per session.",
+// Shown on the welcome screen when the visitor comes back from a completed
+// Stripe Checkout. A cancelled checkout is not a failure and says nothing.
+export const PAID_RETURN_NOTICE = {
+  headline: "Payment received.",
+  body: "You have one practice session ready. Start it whenever you like.",
 } as const;

@@ -55,14 +55,16 @@ export function isDashboardPriceId(priceId: string): boolean {
   return priceId !== "" && Object.values(DASHBOARD_PRICE_ID_BY_TIER).includes(priceId);
 }
 
+let _stripe: Stripe | null = null;
+
 // Billing is only wired up when a secret key is present. Everywhere billing is
 // optional, callers check isStripeConfigured() first and degrade gracefully so
 // the app still boots (and demo accounts still work) without Stripe credentials.
+// It is also true once a test has injected a client, so "configured" always
+// means the same thing as "getStripe() will work".
 export function isStripeConfigured(): boolean {
-  return STRIPE_SECRET_KEY.length > 0;
+  return _stripe !== null || STRIPE_SECRET_KEY.length > 0;
 }
-
-let _stripe: Stripe | null = null;
 
 // Returns the shared Stripe client, or throws if billing isn't configured. Guard
 // with isStripeConfigured() at the route/webhook boundary before calling.

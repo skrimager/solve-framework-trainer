@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   MEMBER_OPTION,
   MEMBER_SIGNUP_PATH,
-  PAY_PER_SESSION_INTEREST,
+  PAID_RETURN_NOTICE,
   PAY_PER_SESSION_OPTION,
 } from "./demoPaywall";
 
@@ -58,7 +58,7 @@ describe("post-free-session fork copy", () => {
     const copy = [
       ...Object.values(MEMBER_OPTION).flat(),
       ...Object.values(PAY_PER_SESSION_OPTION).flat(),
-      ...Object.values(PAY_PER_SESSION_INTEREST).flat(),
+      ...Object.values(PAID_RETURN_NOTICE).flat(),
     ].join(" ");
     assert.ok(!copy.includes("—"), "no em dashes in customer-facing copy");
     assert.doesNotMatch(copy, /\btrain(ing|s|ed)?\b/i);
@@ -83,28 +83,54 @@ describe("Become a Member routing", () => {
   });
 });
 
-describe("pay-per-session button is a stub, not a charge", () => {
-  // Comments stripped so the deliberate "Stripe charge deferred" note at the
-  // click handler does not mask a real Stripe reference in the code itself.
+describe("pay-per-session button takes a real one-time charge", () => {
+  // Comments stripped so prose in a comment cannot satisfy an assertion about
+  // the code itself.
   const demoPageCode = demoPageSource.replace(/\/\/.*$/gm, "");
 
-  test("the demo page contains no Stripe or checkout code at all", () => {
-    assert.doesNotMatch(demoPageCode, /stripe/i);
-    assert.doesNotMatch(demoPageCode, /checkout/i);
-    assert.doesNotMatch(demoPageCode, /createSelfServeCheckoutSession/);
-    assert.doesNotMatch(demoPageCode, /payment/i);
+  test("the button opens Stripe Checkout via the demo checkout endpoint", () => {
+    assert.match(demoPageCode, /demoV2Api\.createPaidSessionCheckout\(token \?\? ""\)/);
+    assert.match(demoPageCode, /window\.location\.href = data\.url/);
   });
 
-  test("the click handler only opens interest capture", () => {
-    assert.match(
-      demoPageSource,
-      /Live \$4\.99 one-time Stripe charge intentionally deferred to a follow-up PR per product decision \(see demo_paywall_redesign_spec\.md\)\. This currently captures interest only\./,
+  test("the token is parked before the app hands off to Stripe", () => {
+    assert.match(demoPageCode, /parkDemoTokenForCheckout\(token, email\)/);
+    assert.match(demoPageCode, /window\.sessionStorage\.setItem\(PAID_ROUND_TRIP_KEY/);
+  });
+
+  test("the button shows a pending state and stays clickable after a failure", () => {
+    assert.match(demoPageCode, /disabled=\{checkout\.isPending\}/);
+    assert.match(demoPageCode, /checkout\.isPending \? PAY_PER_SESSION_OPTION\.pendingLabel/);
+    assert.match(demoPageCode, /setCheckoutError\(e\.message \|\| PAY_PER_SESSION_OPTION\.errorMessage\)/);
+    assert.match(PAY_PER_SESSION_OPTION.pendingLabel, /checkout/i);
+    assert.ok(PAY_PER_SESSION_OPTION.errorMessage.length > 0);
+  });
+
+  test("the interest-capture stub is gone, not left orphaned", () => {
+    assert.doesNotMatch(demoPageSource, /PayPerSessionInterestForm/);
+    assert.doesNotMatch(demoPageSource, /showInterest/);
+    assert.doesNotMatch(demoPageSource, /PAY_PER_SESSION_INTEREST/);
+  });
+
+  test("the displayed price is cross-referenced to the charged amount", () => {
+    const paywallSource = readFileSync(
+      fileURLToPath(new URL("./demoPaywall.ts", import.meta.url)),
+      "utf8",
     );
-    assert.match(demoPageSource, /onClick=\{\(\) => setShowInterest\(true\)\}/);
+    assert.match(paywallSource, /DEMO_SESSION_PRICE_CENTS in[\s\S]{0,10}server\/demoPayments\.ts/);
+  });
+});
+
+describe("returning from Stripe Checkout", () => {
+  test("a completed purchase is confirmed on the welcome screen", () => {
+    assert.equal(PAID_RETURN_NOTICE.headline, "Payment received.");
+    assert.match(PAID_RETURN_NOTICE.body, /one practice session ready/);
+    assert.ok(demoPageSource.includes("banner-demo-v2-paid-return"));
+    assert.match(demoPageSource, /get\("paid"\)/);
+    assert.match(demoPageSource, /paid === "success"/);
   });
 
-  test("interest capture reuses the existing demo lead endpoint", () => {
-    assert.match(demoPageSource, /demoV2Api\.submitLead\(\{\s*name: leadEmail/);
-    assert.match(PAY_PER_SESSION_INTEREST.leadMessage, /\$4\.99 per session/);
+  test("the Stripe session id is stripped from the address bar", () => {
+    assert.match(demoPageSource, /window\.history\.replaceState\(\{\}, "", "#\/demo"\)/);
   });
 });

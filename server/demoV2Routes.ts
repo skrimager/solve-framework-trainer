@@ -31,6 +31,12 @@ import {
   isVoiceUnlockedForDemo,
 } from "./demo";
 import {
+  availablePaidSessionCredits,
+  consumeOldestPaidCredit,
+  createDemoSessionCheckout,
+} from "./demoPayments";
+import { isStripeConfigured } from "./stripe";
+import {
   DEMO_V2_INDUSTRIES,
   DEMO_V2_SLUGS,
   industryForSlug,
@@ -158,28 +164,40 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
         : null;
     const ip = clientIp(req);
 
-    if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
-      return res.status(403).json({ message: "You've used your free demo session.", limitReached: true, remaining: 0, reason: "email" });
+    // The free-vs-paid decision comes first, because a visitor who bought a
+    // session must not then be turned away by the device/IP heuristics, which
+    // exist purely to stop free-tier farming.
+    const freeLimitReached = isSessionLimitReached(signup.sessionsUsed, signup.email);
+    const usingPaidCredit = freeLimitReached && (await availablePaidSessionCredits(signup.id)) > 0;
+
+    if (freeLimitReached && !usingPaidCredit) {
+      return res.status(403).json({
+        message: "You've used your free demo session. Purchase an individual session to keep practicing.",
+        limitReached: true,
+        remaining: 0,
+        reason: "email",
+      });
     }
 
-    const deviceCount = fingerprint
-      ? (await storage.listDemoSessionsByFingerprint(fingerprint)).length
-      : 0;
-    if (isDeviceLimitReached(deviceCount, signup.email)) {
-      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "device" });
-    }
+    if (!usingPaidCredit) {
+      const deviceCount = fingerprint
+        ? (await storage.listDemoSessionsByFingerprint(fingerprint)).length
+        : 0;
+      if (isDeviceLimitReached(deviceCount, signup.email)) {
+        return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "device" });
+      }
 
-    const ipRows = await storage.listDemoSessionsByIp(ip);
-    if (isIpLimitReached(countDemoSessionsInIpWindow(ipRows), signup.email)) {
-      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "ip" });
+      const ipRows = await storage.listDemoSessionsByIp(ip);
+      if (isIpLimitReached(countDemoSessionsInIpWindow(ipRows), signup.email)) {
+        return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "ip" });
+      }
     }
 
     const pool = await loadDemoV2Pool();
+    const priorSessions = await storage.listDemoSessionsBySignup(signup.id);
     // Only v2 rows count toward the exclusion set, so a visitor who already ran
     // the original demo flow still gets an unseen scenario here.
-    const priorV2 = (await storage.listDemoSessionsBySignup(signup.id)).filter(
-      (row) => row.flow === DEMO_V2_FLOW,
-    );
+    const priorV2 = priorSessions.filter((row) => row.flow === DEMO_V2_FLOW);
     let choice: DemoV2ScenarioOption;
     try {
       choice = pickNextV2Scenario(industry, priorV2, pool);
@@ -189,13 +207,17 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     const scenario = await storage.getScenario(choice.id);
     if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
 
-    const updatedSignup = isUnlimitedDemoEmail(signup.email)
-      ? signup
-      : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
-    const sessionNumber = isUnlimitedDemoEmail(signup.email)
-      ? signup.sessionsUsed + 1
-      : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
-    const voiceEnabled = isVoiceUnlockedForDemo(sessionNumber, signup.email);
+    // sessionsUsed counts FREE sessions only, so a paid session must leave it
+    // alone: purchases are tracked entirely in demo_paid_sessions.
+    const updatedSignup =
+      usingPaidCredit || isUnlimitedDemoEmail(signup.email)
+        ? signup
+        : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
+    const sessionNumber = usingPaidCredit
+      ? priorSessions.length + 1
+      : isUnlimitedDemoEmail(signup.email)
+        ? signup.sessionsUsed + 1
+        : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
 
     let session = await storage.createDemoSession({
       signupId: signup.id,
@@ -213,6 +235,21 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       sessionNumber,
       flow: DEMO_V2_FLOW,
     });
+
+    // Claim the credit atomically now that the session row exists to link it to.
+    // The earlier count is not trusted: if the claim finds nothing (a race, or a
+    // credit spent by a parallel request) the session runs as an unpaid one, so
+    // voice stays locked, rather than silently handing out a paid session.
+    if (usingPaidCredit) {
+      if (await consumeOldestPaidCredit(signup.id, session.id)) {
+        session = (await storage.getDemoSession(session.id)) ?? session;
+      } else {
+        console.error(
+          `Demo session ${session.id} passed the paid-credit check but no credit could be claimed for signup ${signup.id}`,
+        );
+      }
+    }
+    const voiceEnabled = isVoiceUnlockedForDemo(session.paidSessionId, signup.email);
 
     try {
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
@@ -260,10 +297,11 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
   });
 
   // A conversational turn. Escalation tier is pinned to 0 and voice is gated to
-  // paid sessions only (see isVoiceUnlockedForDemo). In voice mode the reply is streamed exactly as it is
-  // for real trainee sessions: this handler does not block on the LLM, it appends
-  // an empty customer placeholder and hands back an SSE URL that the shared
-  // streamer fills in sentence by sentence (see /turn-stream below).
+  // paid sessions only (see isVoiceUnlockedForDemo). In voice mode the reply is
+  // streamed exactly as it is for real trainee sessions: this handler does not
+  // block on the LLM, it appends an empty customer placeholder and hands back an
+  // SSE URL that the shared streamer fills in sentence by sentence (see
+  // /turn-stream below).
   app.post(`${DEMO_API_BASE}/session/:id/message`, async (req, res) => {
     try {
       if (!demoLimiter.check(clientIp(req))) {
@@ -278,7 +316,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       const scenario = await storage.getScenario(session.scenarioId);
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
-      const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
+      const voiceUnlocked = isVoiceUnlockedForDemo(session.paidSessionId, signup.email);
       const { content, withAudio, stream } = req.body ?? {};
       const useAudio = Boolean(withAudio) && voiceUnlocked;
       const transcript = JSON.parse(session.transcript);
@@ -340,7 +378,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
   app.get(`${DEMO_API_BASE}/session/:id/audio-stream/:msgId`, async (req, res) => {
     const session = await storage.getDemoSession(Number(req.params.id));
     if (!session) return res.status(404).end();
-    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+    if (!isVoiceUnlockedForDemo(session.paidSessionId, session.email)) {
       return res.status(403).end();
     }
     const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
@@ -367,7 +405,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
   app.get(`${DEMO_API_BASE}/session/:id/turn-stream/:msgId`, async (req, res) => {
     const session = await storage.getDemoSession(Number(req.params.id));
     if (!session) return res.status(404).end();
-    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+    if (!isVoiceUnlockedForDemo(session.paidSessionId, session.email)) {
       return res.status(403).end();
     }
     const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
@@ -430,6 +468,29 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to score session" });
+    }
+  });
+
+  // Start the one-time $4.99 purchase of a single practice session. Gated by the
+  // same verified-signup helper as the session routes, so only a visitor who has
+  // already verified their email can buy. Returns { url } for the client to hand
+  // off to Stripe Checkout, matching the office checkout routes in
+  // server/routes.ts. The credit is granted by the webhook, never by the
+  // redirect (see server/demoPayments.ts).
+  app.post(`${DEMO_API_BASE}/checkout`, async (req, res) => {
+    const signup = await requireDemoSignup(req, res);
+    if (!signup) return;
+    // With no Stripe keys the app still boots and the free session still works;
+    // only this endpoint is unavailable.
+    if (!isStripeConfigured()) {
+      return res.status(503).json({ message: "Purchasing is not available right now." });
+    }
+    try {
+      const url = await createDemoSessionCheckout({ signupId: signup.id, email: signup.email });
+      res.json({ url });
+    } catch (err: any) {
+      console.error("Demo paid-session checkout creation failed:", err);
+      res.status(500).json({ message: err.message ?? "Could not start checkout" });
     }
   });
 }

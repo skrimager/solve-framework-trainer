@@ -1,4 +1,4 @@
-import { pgTable, text, integer, boolean, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, boolean, serial, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -486,11 +486,51 @@ export const demoSessions = pgTable("demo_sessions", {
   // excludes scenarios seen in v2 sessions, so this discriminator is what keeps
   // the two flows' per-email histories from interfering with each other.
   flow: text("flow"), // null (legacy/v1) | 'v2'
+  // Which purchased credit funded this session, or NULL for the one free
+  // session. This is what the voice gate reads (see isPaidDemoSession): a
+  // session row self-describes whether it was paid for, so voice access is
+  // never re-derived from the session ordinal.
+  paidSessionId: integer("paid_session_id").references((): AnyPgColumn => demoPaidSessions.id),
 });
 
 export const insertDemoSessionSchema = createInsertSchema(demoSessions).omit({ id: true });
 export type InsertDemoSession = z.infer<typeof insertDemoSessionSchema>;
 export type DemoSession = typeof demoSessions.$inferSelect;
+
+// One row per $4.99 individual practice session purchase (one Stripe Checkout
+// Session in `mode: "payment"`, quantity 1). Deliberately a row per purchase
+// rather than a counter on demo_signups: it gives a full audit trail of what
+// was bought and when, and `stripe_checkout_session_id` is a natural
+// idempotency key for the payment webhook.
+//
+// Entirely separate from office subscription billing (offices/paid_office_signups
+// and server/billing.ts): a demo visitor is anonymous, has no login, no office
+// and no Stripe Customer, so a demo purchase must never touch seat/subscription
+// state.
+//
+// status lifecycle:
+//   'pending'  Checkout Session created; payment not yet confirmed (webhook has
+//              not fired, or the visitor abandoned checkout).
+//   'paid'     webhook confirmed payment; one unconsumed session credit exists.
+//   'consumed' the credited session has been started; consumed_by_demo_session_id
+//              links to the demo_sessions row it funded.
+export const demoPaidSessions = pgTable("demo_paid_sessions", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").notNull().references(() => demoSignups.id),
+  email: text("email").notNull(), // denormalized, matches demoSignups.email at purchase time
+  stripeCheckoutSessionId: text("stripe_checkout_session_id").notNull().unique(),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  amountTotal: integer("amount_total").notNull(), // cents
+  status: text("status").notNull().default("pending"), // 'pending' | 'paid' | 'consumed'
+  createdAt: text("created_at").notNull(),
+  paidAt: text("paid_at"),
+  consumedAt: text("consumed_at"),
+  consumedByDemoSessionId: integer("consumed_by_demo_session_id").references((): AnyPgColumn => demoSessions.id),
+});
+
+export const insertDemoPaidSessionSchema = createInsertSchema(demoPaidSessions).omit({ id: true });
+export type InsertDemoPaidSession = z.infer<typeof insertDemoPaidSessionSchema>;
+export type DemoPaidSession = typeof demoPaidSessions.$inferSelect;
 
 // ===========================================================================
 // Opportunity Intelligence — admin-only lead-generation + email-drip system for

@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, or, desc, lte } from "drizzle-orm";
@@ -182,6 +182,18 @@ export interface IStorage {
   // pure, unit-tested logic (see countDemoSessionsInIpWindow).
   listDemoSessionsByFingerprint(fingerprint: string): Promise<DemoSession[]>;
   listDemoSessionsByIp(ip: string): Promise<DemoSession[]>;
+
+  // $4.99 one-time purchases of an individual demo practice session (see
+  // server/demoPayments.ts). One row per Stripe Checkout Session.
+  createDemoPaidSession(data: InsertDemoPaidSession): Promise<DemoPaidSession>;
+  getDemoPaidSessionByStripeCheckoutSessionId(id: string): Promise<DemoPaidSession | undefined>;
+  updateDemoPaidSession(id: number, patch: Partial<InsertDemoPaidSession>): Promise<DemoPaidSession | undefined>;
+  listDemoPaidSessionsBySignup(signupId: number): Promise<DemoPaidSession[]>;
+  // Claims the signup's oldest unconsumed 'paid' credit for the given demo
+  // session in ONE conditional update, so two concurrent session starts can
+  // never spend the same credit twice. Returns the claimed row, or undefined
+  // when no credit was available.
+  claimOldestPaidDemoSession(signupId: number, demoSessionId: number): Promise<DemoPaidSession | undefined>;
 
   // --- Opportunity Intelligence (admin-only outbound lead-gen + drip) ---
   createProspectSearch(search: InsertProspectSearch): Promise<ProspectSearch>;
@@ -745,6 +757,54 @@ export class DatabaseStorage implements IStorage {
 
   async listDemoSessionsByIp(ip: string): Promise<DemoSession[]> {
     return db.select().from(demoSessions).where(eq(demoSessions.ipAddress, ip));
+  }
+
+  async createDemoPaidSession(data: InsertDemoPaidSession): Promise<DemoPaidSession> {
+    const rows = await db.insert(demoPaidSessions).values(data).returning();
+    return rows[0];
+  }
+
+  async getDemoPaidSessionByStripeCheckoutSessionId(id: string): Promise<DemoPaidSession | undefined> {
+    const rows = await db
+      .select()
+      .from(demoPaidSessions)
+      .where(eq(demoPaidSessions.stripeCheckoutSessionId, id));
+    return rows[0];
+  }
+
+  async updateDemoPaidSession(id: number, patch: Partial<InsertDemoPaidSession>): Promise<DemoPaidSession | undefined> {
+    const rows = await db.update(demoPaidSessions).set(patch).where(eq(demoPaidSessions.id, id)).returning();
+    return rows[0];
+  }
+
+  async listDemoPaidSessionsBySignup(signupId: number): Promise<DemoPaidSession[]> {
+    return db
+      .select()
+      .from(demoPaidSessions)
+      .where(eq(demoPaidSessions.signupId, signupId))
+      .orderBy(demoPaidSessions.id);
+  }
+
+  // The status = 'paid' predicate stays on the UPDATE itself (not just on the
+  // subselect that picks the oldest credit), so if two requests race, the loser
+  // matches no row and gets undefined rather than re-consuming the same credit.
+  async claimOldestPaidDemoSession(signupId: number, demoSessionId: number): Promise<DemoPaidSession | undefined> {
+    const oldestPaid = db
+      .select({ id: demoPaidSessions.id })
+      .from(demoPaidSessions)
+      .where(and(eq(demoPaidSessions.signupId, signupId), eq(demoPaidSessions.status, "paid")))
+      .orderBy(demoPaidSessions.id)
+      .limit(1);
+    const rows = await db
+      .update(demoPaidSessions)
+      .set({
+        status: "consumed",
+        consumedAt: new Date().toISOString(),
+        consumedByDemoSessionId: demoSessionId,
+      })
+      .where(and(eq(demoPaidSessions.status, "paid"), inArray(demoPaidSessions.id, oldestPaid)))
+      .returning();
+    return rows[0];
   }
 
   // --- Opportunity Intelligence ---

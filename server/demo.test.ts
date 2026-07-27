@@ -274,27 +274,29 @@ describe("countDemoSessionsInIpWindow (rolling 30-day window)", () => {
 
 describe("isVoiceUnlockedForDemo (cost containment: voice on paid sessions only)", () => {
   // The regression this guards: voice used to unlock at
-  // `sessionNumber >= MAX_DEMO_SESSIONS`. Dropping the cap to 1 would have
-  // unlocked TTS for every anonymous visitor on their very first turn.
-  test("a first-time anonymous visitor on the free session gets no voice", () => {
-    assert.equal(isVoiceUnlockedForDemo(1), false);
-    assert.equal(isVoiceUnlockedForDemo(1, "someoneelse@example.com"), false);
+  // `sessionNumber >= MAX_DEMO_SESSIONS`. Both arguments are now about the
+  // session row itself, not its ordinal, so no amount of replaying can reach
+  // voice without a purchase.
+  test("the free session has no paid credit attached, so it gets no voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(null), false);
+    assert.equal(isVoiceUnlockedForDemo(undefined), false);
+    assert.equal(isVoiceUnlockedForDemo(null, "someoneelse@example.com"), false);
   });
 
-  test("no session ordinal unlocks voice for a non-allowlisted email", () => {
-    for (const n of [1, 2, 3, 4, 10, MAX_DEMO_SESSIONS]) {
-      assert.equal(isVoiceUnlockedForDemo(n), false, `session ${n}`);
-      assert.equal(isVoiceUnlockedForDemo(n, "someoneelse@example.com"), false, `session ${n}`);
-    }
+  test("a session funded by a purchased credit gets voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(1), true);
+    assert.equal(isVoiceUnlockedForDemo(42, "someoneelse@example.com"), true);
   });
 
-  test("no demo session is paid yet, so the paid path never opens voice", () => {
-    assert.equal(isPaidDemoSession(1), false);
-    assert.equal(isPaidDemoSession(99), false);
+  test("isPaidDemoSession is exactly 'a credit is linked'", () => {
+    assert.equal(isPaidDemoSession(1), true);
+    assert.equal(isPaidDemoSession(99), true);
+    assert.equal(isPaidDemoSession(null), false);
+    assert.equal(isPaidDemoSession(undefined), false);
   });
 
-  test("allowlisted founder email always has voice, even on session 1", () => {
-    assert.equal(isVoiceUnlockedForDemo(1, "wadeskrimager@icloud.com"), true);
+  test("allowlisted founder email always has voice, even with no purchase", () => {
+    assert.equal(isVoiceUnlockedForDemo(null, "wadeskrimager@icloud.com"), true);
   });
 });
 
@@ -474,6 +476,9 @@ describe("public demo endpoints", () => {
       sessions.filter((s) => s.ipAddress === ip);
     (storage as any).listDemoSessionsBySignup = async (signupId: number) =>
       sessions.filter((s) => s.signupId === signupId);
+    // Nobody in this file has bought a session, so the paid path stays closed.
+    // See demoPayments.test.ts for the purchase cases.
+    (storage as any).listDemoPaidSessionsBySignup = async () => [];
     (storage as any).listDemoSignups = async () => signups;
     (storage as any).listDemoSessions = async () => sessions;
   });

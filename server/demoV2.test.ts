@@ -404,6 +404,9 @@ describe("demo v2 endpoints", () => {
     (storage as any).listDemoSessionsByFingerprint = async (fp: string) =>
       sessions.filter((s) => s.deviceFingerprint === fp);
     (storage as any).listDemoSessionsByIp = async (ip: string) => sessions.filter((s) => s.ipAddress === ip);
+    // Nobody in this file has bought a session, so the paid path stays closed.
+    // See demoPayments.test.ts for the purchase cases.
+    (storage as any).listDemoPaidSessionsBySignup = async () => [];
   });
 
   afterEach(() => {

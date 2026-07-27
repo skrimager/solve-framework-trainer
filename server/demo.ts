@@ -298,27 +298,29 @@ export function demoAbuseAnalytics(
   };
 }
 
-// True when the visitor paid for this session, either per-session or through a
-// membership. Always false today: pay-per-session purchasing is stubbed to
-// interest capture only and no purchase is recorded anywhere, so there is
-// nothing to read. It exists as its own function so voice unlock keys off
-// "paid" rather than off a session ordinal.
-// TODO(demo_paywall_redesign_spec.md): return true once a purchased session is
-// persisted, so voice unlocks on paid sessions.
-export function isPaidDemoSession(_sessionNumber: number): boolean {
-  return false;
+// True when this session was funded by a real, webhook-confirmed $4.99 payment
+// rather than by the one free session. Keyed off the demo_sessions row's own
+// paidSessionId link, so a session self-describes how it was funded and nothing
+// is re-derived from ordinal math.
+//
+// The caller (server/demoV2Routes.ts) is responsible for having already claimed
+// a credit via consumeOldestPaidCredit before the session row carries this link.
+export function isPaidDemoSession(paidSessionId: number | null | undefined): boolean {
+  return paidSessionId != null;
 }
 
 // Voice (server-side TTS) is unlocked only on a PAID session for cost
-// containment; the single free session is text mode. Under the previous
-// three-session cap this was `sessionNumber >= MAX_DEMO_SESSIONS`, which with a
-// one-session cap would have unlocked voice for every anonymous visitor on
-// their first turn, so the gate is keyed off payment instead of the ordinal.
-// Allowlisted founder emails always get voice so live sales demos are never
-// text-only. `sessionNumber` is the session's 1-based ordinal for the email.
-export function isVoiceUnlockedForDemo(sessionNumber: number, email?: string): boolean {
+// containment; the single free session is text mode. This was originally keyed
+// off the session ordinal (`sessionNumber >= MAX_DEMO_SESSIONS`), which with a
+// one-session cap would have unlocked TTS for every anonymous visitor on their
+// first turn, so the gate is keyed off payment instead. Allowlisted founder
+// emails always get voice so live sales demos are never text-only.
+export function isVoiceUnlockedForDemo(
+  paidSessionId: number | null | undefined,
+  email?: string,
+): boolean {
   if (email && isUnlimitedDemoEmail(email)) return true;
-  return isPaidDemoSession(sessionNumber);
+  return isPaidDemoSession(paidSessionId);
 }
 
 // Disposable/temporary email domains (mailinator, 10minutemail, guerrillamail,

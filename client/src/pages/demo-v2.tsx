@@ -26,9 +26,10 @@ import { getDeviceFingerprint } from "@/lib/fingerprint";
 import {
   MEMBER_OPTION,
   MEMBER_SIGNUP_PATH,
-  PAY_PER_SESSION_INTEREST,
+  PAID_RETURN_NOTICE,
   PAY_PER_SESSION_OPTION,
 } from "@/lib/demoPaywall";
+import { hashToSearch } from "@/lib/hashLocation";
 import {
   Volume2,
   Send,
@@ -75,6 +76,33 @@ type Step = "landing" | "email" | "code" | "industry" | "roleplay" | "results";
 // Brand palette (shared with the rest of the app).
 const ORANGE = "#E06D00";
 
+// Stripe Checkout leaves the app entirely, so the verified demo token is parked
+// here for the round trip and read back once. sessionStorage (not localStorage)
+// keeps it to this tab and this visit, so a paying visitor does not have to
+// re-verify their email just to start the session they bought.
+const PAID_ROUND_TRIP_KEY = "solve-demo-paid-round-trip";
+
+function parkDemoTokenForCheckout(token: string, email: string): void {
+  try {
+    window.sessionStorage.setItem(PAID_ROUND_TRIP_KEY, JSON.stringify({ token, email }));
+  } catch {
+    // Storage blocked: the visitor simply verifies their email again on return.
+  }
+}
+
+function takeParkedDemoToken(): { token: string; email: string } | null {
+  try {
+    const raw = window.sessionStorage.getItem(PAID_ROUND_TRIP_KEY);
+    window.sessionStorage.removeItem(PAID_ROUND_TRIP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.token !== "string" || typeof parsed?.email !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export default function DemoV2() {
   const [step, setStep] = useState<Step>("landing");
   const [email, setEmail] = useState("");
@@ -83,11 +111,38 @@ export default function DemoV2() {
   const [industry, setIndustry] = useState<string | null>(null);
   const [finalSession, setFinalSession] = useState<DemoV2Session | null>(null);
   const [stalledStep, setStalledStep] = useState<string | null>(null);
+  const [paidReturn, setPaidReturn] = useState(false);
+
+  // The return trip from Stripe Checkout. Success confirms the purchase on the
+  // welcome screen and restores the parked token so the visitor can start the
+  // session they bought; a cancelled checkout lands normally and says nothing.
+  // Either way the query (including the Stripe session id) is stripped from the
+  // address bar.
+  useEffect(() => {
+    const paid = new URLSearchParams(hashToSearch(window.location.hash)).get("paid");
+    if (!paid) return;
+    const parked = takeParkedDemoToken();
+    if (paid === "success") {
+      if (parked) {
+        setEmail(parked.email);
+        setToken(parked.token);
+      }
+      setPaidReturn(true);
+    }
+    window.history.replaceState({}, "", "#/demo");
+  }, []);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto w-full max-w-2xl px-4 py-8">
-        {step === "landing" && <Landing onStart={() => setStep("email")} />}
+        {step === "landing" && (
+          <Landing
+            paidReturn={paidReturn}
+            // A visitor returning with a live token has already verified, so they
+            // go straight to the industry choice.
+            onStart={() => setStep(token ? "industry" : "email")}
+          />
+        )}
 
         {step === "email" && (
           <EmailStep
@@ -146,6 +201,7 @@ export default function DemoV2() {
             session={finalSession}
             stalledStep={stalledStep}
             email={email}
+            token={token}
             limitReached={limitReached}
           />
         )}
@@ -154,9 +210,21 @@ export default function DemoV2() {
   );
 }
 
-function Landing({ onStart }: { onStart: () => void }) {
+function Landing({ onStart, paidReturn }: { onStart: () => void; paidReturn: boolean }) {
   return (
     <div className="space-y-6 text-center">
+      {paidReturn && (
+        <div
+          className="rounded-lg border-2 p-4 text-left"
+          style={{ borderColor: ORANGE }}
+          data-testid="banner-demo-v2-paid-return"
+        >
+          <p className="font-semibold" style={{ color: ORANGE }}>
+            {PAID_RETURN_NOTICE.headline}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">{PAID_RETURN_NOTICE.body}</p>
+        </div>
+      )}
       <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
         <Phone className="h-3.5 w-3.5" /> Free AI practice conversation
       </div>
@@ -819,11 +887,13 @@ function ResultsAndCta({
   session,
   stalledStep,
   email,
+  token,
   limitReached,
 }: {
   session: DemoV2Session | null;
   stalledStep: string | null;
   email: string;
+  token: string | null;
   limitReached: boolean;
 }) {
   const rubric: Record<string, number> | null = session?.rubricScores
@@ -895,7 +965,7 @@ function ResultsAndCta({
         )
       )}
 
-      <NextStepFork email={email} />
+      <NextStepFork email={email} token={token} />
 
       <CtaForm email={email} />
     </div>
@@ -905,8 +975,23 @@ function ResultsAndCta({
 // The post-free-session fork. Two options, membership visually dominant, with
 // no lime green anywhere: emphasis comes from size, border, tint and weight,
 // since lime is reserved for admin/vault.
-function NextStepFork({ email }: { email: string }) {
-  const [showInterest, setShowInterest] = useState(false);
+function NextStepFork({ email, token }: { email: string; token: string | null }) {
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+
+  // Hands off to Stripe Checkout. The demo token is parked first so the visitor
+  // comes back to a screen that can start the session they just bought without
+  // verifying their email a second time.
+  const checkout = useMutation({
+    mutationFn: () => {
+      setCheckoutError(null);
+      return demoV2Api.createPaidSessionCheckout(token ?? "");
+    },
+    onSuccess: (data) => {
+      if (token) parkDemoTokenForCheckout(token, email);
+      window.location.href = data.url;
+    },
+    onError: (e: Error) => setCheckoutError(e.message || PAY_PER_SESSION_OPTION.errorMessage),
+  });
 
   return (
     <div className="grid gap-4 md:grid-cols-5" data-testid="demo-v2-next-step-fork">
@@ -995,91 +1080,24 @@ function NextStepFork({ email }: { email: string }) {
           <p className="text-xs text-muted-foreground" data-testid="text-demo-v2-fork-pps-disclaimer">
             {PAY_PER_SESSION_OPTION.disclaimer}
           </p>
-          {showInterest ? (
-            <PayPerSessionInterestForm email={email} />
-          ) : (
-            <Button
-              variant="outline"
-              className="w-full whitespace-normal"
-              style={{ borderColor: ORANGE, color: ORANGE }}
-              // Live $4.99 one-time Stripe charge intentionally deferred to a follow-up PR per product decision (see demo_paywall_redesign_spec.md). This currently captures interest only.
-              onClick={() => setShowInterest(true)}
-              data-testid="button-demo-v2-pay-per-session"
-            >
-              {PAY_PER_SESSION_OPTION.buttonLabel}
-            </Button>
+          {checkoutError && (
+            <p className="text-sm text-destructive" data-testid="text-demo-v2-pps-error">
+              {checkoutError}
+            </p>
           )}
+          <Button
+            variant="outline"
+            className="w-full whitespace-normal"
+            style={{ borderColor: ORANGE, color: ORANGE }}
+            disabled={checkout.isPending}
+            onClick={() => checkout.mutate()}
+            data-testid="button-demo-v2-pay-per-session"
+          >
+            {checkout.isPending ? PAY_PER_SESSION_OPTION.pendingLabel : PAY_PER_SESSION_OPTION.buttonLabel}
+          </Button>
         </CardContent>
       </Card>
     </div>
-  );
-}
-
-// Interest capture for pay-per-session. Reuses the existing demo lead endpoint
-// (/api/demo/lead, the same one CtaForm posts to) rather than adding a new
-// mechanism, and touches no payment code.
-function PayPerSessionInterestForm({ email }: { email: string }) {
-  const [leadEmail, setLeadEmail] = useState(email);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = useMutation({
-    mutationFn: () =>
-      demoV2Api.submitLead({
-        name: leadEmail,
-        email: leadEmail,
-        message: PAY_PER_SESSION_INTEREST.leadMessage,
-      }),
-    onError: (e: Error) => setError(e.message),
-  });
-
-  if (submit.isSuccess) {
-    return (
-      <div className="space-y-1 rounded-lg border p-3 text-sm" data-testid="text-demo-v2-pps-success">
-        <p className="font-medium">{PAY_PER_SESSION_INTEREST.successHeadline}</p>
-        <p className="text-muted-foreground">{PAY_PER_SESSION_INTEREST.successBody}</p>
-      </div>
-    );
-  }
-
-  return (
-    <form
-      className="space-y-2 rounded-lg border p-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (leadEmail.trim()) submit.mutate();
-      }}
-      data-testid="form-demo-v2-pps-interest"
-    >
-      <p className="text-sm font-medium" data-testid="text-demo-v2-pps-interest-headline">
-        {PAY_PER_SESSION_INTEREST.headline}
-      </p>
-      <p className="text-sm text-muted-foreground">{PAY_PER_SESSION_INTEREST.body}</p>
-      <Label htmlFor="demo-v2-pps-email" className="sr-only">
-        Email
-      </Label>
-      <Input
-        id="demo-v2-pps-email"
-        type="email"
-        value={leadEmail}
-        onChange={(e) => setLeadEmail(e.target.value)}
-        placeholder="you@company.com"
-        data-testid="input-demo-v2-pps-email"
-      />
-      {error && (
-        <p className="text-sm text-destructive" data-testid="text-demo-v2-pps-error">
-          {error}
-        </p>
-      )}
-      <Button
-        type="submit"
-        className="w-full"
-        style={{ backgroundColor: ORANGE, color: "white" }}
-        disabled={!leadEmail.trim() || submit.isPending}
-        data-testid="button-demo-v2-pps-notify"
-      >
-        {submit.isPending ? "Saving..." : PAY_PER_SESSION_INTEREST.buttonLabel}
-      </Button>
-    </form>
   );
 }
 
