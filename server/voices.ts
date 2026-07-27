@@ -87,6 +87,17 @@ export const PERSONA_VOICES: Record<string, string> = {
   "apartment-rental-remote-worker-noise": "echo", // Jordan, 31 (m)
   "apartment-rental-pet-owner-restrictions": "coral", // Sam, 35 (f) — was "onyx" (male), corrected
 
+  // Public demo (industry-choice flow). All six are curated explicitly: without
+  // entries here they fall through to the hash fallback, which collided Denise
+  // and Nia on the same voice. The six below are mutually distinct so no two
+  // demo personas ever sound alike.
+  "demo-v2-auto-1": "onyx", // Vince, 44 (m), blunt and skeptical
+  "demo-v2-auto-2": "ballad", // Don, 68 (m), easygoing and unhurried
+  "demo-v2-auto-3": "coral", // Denise, 43 (f), protective and practical
+  "demo-v2-re-1": "shimmer", // Margaret, 71 (f), warm and measured
+  "demo-v2-re-2": "echo", // Marcus, 38 (m), direct and quick
+  "demo-v2-re-3": "nova", // Nia, 26 (f), younger and nervous
+
   // Leadership — upset customer service
   "upset-customer-late-delivery-refund": "coral", // Dana, 38 (f)
   "upset-customer-damaged-item-replacement": "echo", // Marcus, 44 (m)

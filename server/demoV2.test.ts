@@ -1,13 +1,14 @@
-// Tests for the demo v2 flow: the no-repeat picker, the six new scenarios, the
-// four worked no-repeat examples over real HTTP, and scoring parity with a real
-// beginner session. Nothing here touches the v1 demo.
+// Tests for the public demo flow: the no-repeat picker, the six demo scenarios,
+// the four worked no-repeat examples over real HTTP (now at /api/demo/*), the
+// gating that keeps those six out of real trainee training, and scoring parity
+// with a real beginner session.
 import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerPublicAndAdminRoutes } from "./routes";
+import { registerPublicAndAdminRoutes, isDemoOnlyScenario, realTrainingScenarios } from "./routes";
 import { __setFetchForTests } from "./notifications";
 import { normalizeEmail, signDemoToken, MAX_DEMO_SESSIONS } from "./demo";
 import {
@@ -20,6 +21,8 @@ import {
   type DemoV2ScenarioOption,
 } from "./demoV2";
 import { scenarios } from "./seed";
+import { getVoiceForScenario } from "./voices";
+import { __setReplyStreamDepsForTests } from "./turnStream";
 import { personaVariantSeed } from "./personaVariants";
 import {
   scoreTranscript,
@@ -188,10 +191,40 @@ describe("demo v2 seeded scenarios", () => {
     }
   });
 
-  test("all six are inactive, so they stay out of the trainee picker and cert pool", () => {
+  // The demo's whole premise is that no two sessions repeat, so two personas
+  // sharing a voice reads as a repeat even when the scenarios differ. Resolved
+  // against each row's seeded gender, which is authoritative over the voice.
+  test("all six resolve to distinct voices from their seeded gender", () => {
+    const voices = DEMO_V2_ALL_SLUGS.map((slug) => getVoiceForScenario(slug, rows.get(slug)!.gender));
+    assert.equal(new Set(voices).size, 6, `voice collision: ${voices.join(", ")}`);
+  });
+
+  test("all six are active, because they are the live demo content", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
-      assert.equal(rows.get(slug)!.active, false, slug);
+      assert.equal(rows.get(slug)!.active, true, slug);
     }
+  });
+
+  // active:true is what USED to keep these out of real training, so the guard has
+  // to be somewhere else now. These two tests are the ones that would catch a
+  // regression leaking demo content to paying trainees.
+  test("all six are flagged demo-only, so active:true is not the only gate", () => {
+    for (const slug of DEMO_V2_ALL_SLUGS) {
+      assert.equal(isDemoOnlyScenario(slug), true, slug);
+    }
+  });
+
+  test("realTrainingScenarios drops all six while keeping ordinary active scenarios", () => {
+    const kept = realTrainingScenarios(
+      scenarios.map((s) => ({ slug: s.slug, active: s.active ?? false })),
+    );
+    for (const slug of DEMO_V2_ALL_SLUGS) {
+      assert.equal(kept.some((s) => s.slug === slug), false, `${slug} leaked into the trainee pool`);
+    }
+    // A sanity check on the filter itself: a normal active training scenario in
+    // one of the same two verticals is still offered.
+    assert.ok(kept.some((s) => s.slug === "auto-sales-tech-worker-upgrade"));
+    assert.ok(kept.length > 50, "the real training pool should be essentially untouched");
   });
 
   test("verticals match the industry they are offered under", () => {
@@ -323,7 +356,7 @@ describe("demo v2 endpoints", () => {
           ...row,
           title: `Scenario ${row.slug}`,
           difficulty: "beginner",
-          active: false,
+          active: true,
           briefing: "b",
           description: "d",
           customerPersona: "p",
@@ -408,7 +441,7 @@ describe("demo v2 endpoints", () => {
     const token = signDemoToken(email);
     const picks: number[] = [];
     for (const industry of choices) {
-      const res = await post("/api/demo-v2/session", { token, industry });
+      const res = await post("/api/demo/session", { token, industry });
       assert.equal(res.status, 200, `start failed for ${industry}`);
       const body = await res.json();
       picks.push(body.scenario.id);
@@ -418,7 +451,7 @@ describe("demo v2 endpoints", () => {
   }
 
   test("options are served from the server, not hardcoded in the client", async () => {
-    const res = await fetch(`${baseUrl}/api/demo-v2/options`);
+    const res = await fetch(`${baseUrl}/api/demo/options`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(body.options.map((o: any) => o.key), ["auto", "real_estate"]);
@@ -473,7 +506,7 @@ describe("demo v2 endpoints", () => {
     } as unknown as DemoSession);
 
     const token = signDemoToken("hadv1@example.com");
-    const res = await post("/api/demo-v2/session", { token, industry: "real_estate" });
+    const res = await post("/api/demo/session", { token, industry: "real_estate" });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.scenario.id, 55, "the v1 row must not have been treated as seen");
@@ -483,7 +516,7 @@ describe("demo v2 endpoints", () => {
     verifiedSignup("badindustry@example.com");
     const token = signDemoToken("badindustry@example.com");
     for (const industry of [undefined, "", "apartment_rental"]) {
-      const res = await post("/api/demo-v2/session", { token, industry });
+      const res = await post("/api/demo/session", { token, industry });
       assert.equal(res.status, 400);
     }
     assert.equal(sessions.length, 0);
@@ -491,7 +524,7 @@ describe("demo v2 endpoints", () => {
   });
 
   test("an unverified token is rejected", async () => {
-    const res = await post("/api/demo-v2/session", { token: "bogus", industry: "auto" });
+    const res = await post("/api/demo/session", { token: "bogus", industry: "auto" });
     assert.equal(res.status, 401);
   });
 
@@ -499,7 +532,7 @@ describe("demo v2 endpoints", () => {
     const signup = verifiedSignup("capped@example.com");
     signup.sessionsUsed = MAX_DEMO_SESSIONS;
     const token = signDemoToken("capped@example.com");
-    const res = await post("/api/demo-v2/session", { token, industry: "auto" });
+    const res = await post("/api/demo/session", { token, industry: "auto" });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.limitReached, true);
@@ -528,7 +561,7 @@ describe("demo v2 endpoints", () => {
       flow: "v2",
     } as unknown as DemoSession);
 
-    const res = await post("/api/demo-v2/session/1/complete", { token });
+    const res = await post("/api/demo/session/1/complete", { token });
     assert.equal(res.status, 409);
     const body = await res.json();
     assert.equal(body.incomplete, true);
@@ -551,13 +584,249 @@ describe("demo v2 endpoints", () => {
       flow: "v2",
     } as unknown as DemoSession);
     const token = signDemoToken("owner@example.com");
-    const res = await fetch(`${baseUrl}/api/demo-v2/session/1?token=${encodeURIComponent(token)}`);
+    const res = await fetch(`${baseUrl}/api/demo/session/1?token=${encodeURIComponent(token)}`);
     assert.equal(res.status, 404);
   });
 
-  test("the v1 demo routes still exist and are unaffected by v2 registration", async () => {
+  // ---- The swap: /api/demo/* is this flow, /api/demo-v2/* is gone ----------
+  // A request with a token but no industry proves WHICH handler answered: the
+  // retired single-scenario route accepted that body and 401'd on the bad token,
+  // whereas this flow validates the industry choice first and 400s.
+  test("/api/demo/session is served by the industry-choice flow, not the retired one", async () => {
     const res = await post("/api/demo/session", { token: "bogus" });
-    assert.equal(res.status, 401);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.message, /Auto Sales or Real Estate/);
+  });
+
+  test("the old parallel /api/demo-v2/* prefix no longer resolves", async () => {
+    const token = signDemoToken("gone@example.com");
+    for (const path of [
+      "/api/demo-v2/options",
+      "/api/demo-v2/session",
+      "/api/demo-v2/session/1",
+      "/api/demo-v2/session/1/message",
+      "/api/demo-v2/session/1/complete",
+    ]) {
+      const res = await post(path, { token, industry: "auto" });
+      assert.equal(res.status, 404, `${path} should be gone`);
+    }
+  });
+
+  // The three flow-agnostic routes stay in server/routes.ts and must survive the
+  // retired session routes being unmounted around them. Their behavior is covered
+  // in demo.test.ts; all this asserts is that they are still mounted, by sending a
+  // body each one rejects at validation (400) rather than 404s on.
+  test("the shared code, verify and lead routes still answer under /api/demo", async () => {
+    for (const path of ["/api/demo/request-code", "/api/demo/verify", "/api/demo/lead"]) {
+      const res = await post(path, {});
+      assert.equal(res.status, 400, `${path} should still be mounted`);
+    }
+  });
+});
+
+// ===========================================================================
+// HTTP: the demo streams its replies the way real sessions do
+// ===========================================================================
+// The demo used to block on the whole LLM reply and then synthesize it in one
+// TTS call, so nothing was heard until everything was ready and one TTS failure
+// lost the entire turn. It now drives the same streamer real sessions use (see
+// server/turnStream.test.ts for the real path's own pin).
+
+describe("demo v2 streamed replies", () => {
+  let server: Server;
+  let baseUrl: string;
+  let signups: DemoSignup[];
+  let sessions: DemoSession[];
+  let scenarioRows: Scenario[];
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerPublicAndAdminRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+  });
+
+  after(() => server?.close());
+
+  beforeEach(() => {
+    signups = [
+      {
+        id: 1,
+        email: normalizeEmail("streamer@example.com"),
+        verified: true,
+        sessionsUsed: MAX_DEMO_SESSIONS,
+      } as DemoSignup,
+    ];
+    scenarioRows = [
+      {
+        id: 91,
+        slug: "demo-v2-auto-3",
+        vertical: "auto_sales",
+        title: "Denise",
+        difficulty: "beginner",
+        active: true,
+        briefing: "b",
+        description: "d",
+        customerPersona: "legacy",
+        personaCore: "You are Denise, 43.",
+        gender: "female",
+        track: "consulting",
+      } as unknown as Scenario,
+    ];
+    // Voice unlocks on the third session, which is the only one that streams.
+    sessions = [
+      {
+        id: 1,
+        signupId: 1,
+        email: signups[0].email,
+        scenarioId: 91,
+        status: "in_progress",
+        transcript: JSON.stringify([
+          { role: "customer", content: "What have you got that's cheap?", timestamp: "t0" },
+        ]),
+        sessionNumber: MAX_DEMO_SESSIONS,
+        flow: "v2",
+      } as unknown as DemoSession,
+    ];
+
+    (storage as any).getScenario = async (id: number) => scenarioRows.find((s) => s.id === id);
+    (storage as any).getDemoSignupByEmail = async (email: string) => signups.find((s) => s.email === email);
+    (storage as any).getDemoSession = async (id: number) => sessions.find((s) => s.id === id);
+    (storage as any).updateDemoSession = async (id: number, patch: any) => {
+      const row = sessions.find((s) => s.id === id);
+      if (!row) return undefined;
+      Object.assign(row, patch);
+      return row;
+    };
+
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        const onSentence = args[5] as (s: string, i: number) => void;
+        onSentence("Nothing too fast.", 0);
+        onSentence("It's for my kid.", 1);
+        return "Nothing too fast. It's for my kid.";
+      },
+      synthesize: async () => Buffer.from("audio"),
+    });
+  });
+
+  afterEach(() => __setReplyStreamDepsForTests(null));
+
+  let ipCounter = 100;
+  function post(path: string, body: unknown) {
+    ipCounter += 1;
+    return fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": `10.40.0.${ipCounter}` },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function transcriptOf(id: number): TranscriptMessage[] {
+    return JSON.parse(sessions.find((s) => s.id === id)!.transcript);
+  }
+
+  async function sendVoiceTurn() {
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken("streamer@example.com"),
+      content: "What's it for?",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    return res.json();
+  }
+
+  test("a voice turn returns a stream URL immediately instead of a finished reply", async () => {
+    const body = await sendVoiceTurn();
+    assert.ok(body.streamMsgId);
+    assert.equal(body.replyStreamUrl, `/api/demo/session/1/turn-stream/${body.streamMsgId}`);
+    // The customer message is an empty placeholder: nothing was generated yet.
+    const last = transcriptOf(1).at(-1)!;
+    assert.equal(last.role, "customer");
+    assert.equal(last.content, "");
+    assert.equal(last.audioStatus, "pending");
+  });
+
+  test("the stream emits one sentence event per sentence, then done", async () => {
+    const { replyStreamUrl, streamMsgId } = await sendVoiceTurn();
+    const res = await fetch(`${baseUrl}${replyStreamUrl}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+
+    const events = (await res.text())
+      .split("\n\n")
+      .filter((b) => b.trim())
+      .map((b) => ({
+        event: /^event: (.*)$/m.exec(b)?.[1],
+        data: JSON.parse(/^data: (.*)$/m.exec(b)?.[1] ?? "{}"),
+      }));
+    assert.deepEqual(events, [
+      { event: "sentence", data: { index: 0, text: "Nothing too fast.", audioUrl: `/api/audio/${streamMsgId}-0.mp3` } },
+      { event: "sentence", data: { index: 1, text: "It's for my kid.", audioUrl: `/api/audio/${streamMsgId}-1.mp3` } },
+      { event: "done", data: { msgId: streamMsgId, text: "Nothing too fast. It's for my kid." } },
+    ]);
+  });
+
+  test("the placeholder is filled in with the full reply once the stream ends", async () => {
+    const { replyStreamUrl, streamMsgId } = await sendVoiceTurn();
+    await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
+    const filled = transcriptOf(1).find((m) => m.msgId === streamMsgId)!;
+    assert.equal(filled.content, "Nothing too fast. It's for my kid.");
+    assert.equal(filled.audioStatus, "ready");
+    assert.equal(filled.audioUrl, `/api/demo/session/1/audio-stream/${streamMsgId}`);
+  });
+
+  test("one sentence's TTS failing costs only that sentence, not the whole reply", async () => {
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        const onSentence = args[5] as (s: string, i: number) => void;
+        onSentence("Nothing too fast.", 0);
+        onSentence("It's for my kid.", 1);
+        return "Nothing too fast. It's for my kid.";
+      },
+      synthesize: async (text: string) => {
+        if (text === "It's for my kid.") throw new Error("tts down");
+        return Buffer.from("audio");
+      },
+    });
+    const { replyStreamUrl } = await sendVoiceTurn();
+    const raw = await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
+    assert.match(raw, /"text":"Nothing too fast\.","audioUrl":"\/api\/audio\//);
+    assert.match(raw, /"text":"It's for my kid\.","audioUrl":null/);
+    assert.match(raw, /event: done/);
+  });
+
+  // Streaming rides on the voice gate, so a session that has not unlocked voice
+  // must stay on the blocking text path rather than being handed a stream it is
+  // not allowed to consume. The reply itself needs a live model, which the suite
+  // deliberately does not have, so this asserts the branch and not the reply.
+  test("a turn with voice locked never opens a stream", async () => {
+    sessions[0].sessionNumber = 1;
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken("streamer@example.com"),
+      content: "What's it for?",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal((await res.json()).replyStreamUrl, undefined);
+    assert.ok(!transcriptOf(1).some((m) => m.audioStatus === "pending"));
+  });
+
+  test("the stream endpoint refuses a session whose voice is still locked", async () => {
+    sessions[0].sessionNumber = 1;
+    const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/anything`);
+    assert.equal(res.status, 403);
+  });
+
+  test("the stream endpoint 404s on an unknown message id", async () => {
+    const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/not-a-real-msg`);
+    assert.equal(res.status, 404);
   });
 });
 

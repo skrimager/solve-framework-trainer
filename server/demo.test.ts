@@ -31,6 +31,7 @@ import {
   MAX_DEMO_SESSIONS_PER_IP,
   IP_WINDOW_MS,
 } from "./demo";
+import { DEMO_V2_ALL_SLUGS, industryForSlug } from "./demoV2";
 import type { DemoSignup, DemoSession, Scenario, Contact } from "@shared/schema";
 
 // ===========================================================================
@@ -351,6 +352,10 @@ describe("public demo endpoints", () => {
   let sessions: DemoSession[];
   let leads: Contact[];
   let scenario: Scenario;
+  // The live POST /api/demo/session serves the industry-choice flow, which
+  // reaches its scenarios by slug, so a session start only succeeds if the whole
+  // six-scenario pool resolves. Ids start above the retired row's.
+  let demoPool: Map<string, Scenario>;
 
   before(async () => {
     const app = express();
@@ -384,13 +389,33 @@ describe("public demo endpoints", () => {
       customerPersona: "p",
       gender: "female",
     } as unknown as Scenario;
+    demoPool = new Map(
+      DEMO_V2_ALL_SLUGS.map((slug, i) => [
+        slug,
+        {
+          id: 100 + i,
+          slug,
+          title: slug,
+          vertical: industryForSlug(slug) === "auto" ? "auto_sales" : "real_estate",
+          difficulty: "beginner",
+          active: true,
+          briefing: "b",
+          description: "d",
+          customerPersona: "p",
+          gender: "female",
+        } as unknown as Scenario,
+      ]),
+    );
 
     process.env.RESEND_API_KEY = "re_test_key";
     __setFetchForTests(async () => new Response(JSON.stringify({ id: "email_1" }), { status: 200 }));
 
     (storage as any).getScenarioBySlug = async (slug: string) =>
-      slug === scenario.slug ? scenario : undefined;
-    (storage as any).getScenario = async (id: number) => (id === scenario.id ? scenario : undefined);
+      slug === scenario.slug ? scenario : demoPool.get(slug);
+    (storage as any).getScenario = async (id: number) =>
+      id === scenario.id
+        ? scenario
+        : Array.from(demoPool.values()).find((s) => s.id === id);
     (storage as any).getDemoSignupByEmail = async (email: string) =>
       signups.find((s) => s.email === email);
     (storage as any).createDemoSignup = async (row: any) => {
@@ -425,6 +450,8 @@ describe("public demo endpoints", () => {
       sessions.filter((s) => s.deviceFingerprint === fp);
     (storage as any).listDemoSessionsByIp = async (ip: string) =>
       sessions.filter((s) => s.ipAddress === ip);
+    (storage as any).listDemoSessionsBySignup = async (signupId: number) =>
+      sessions.filter((s) => s.signupId === signupId);
     (storage as any).listDemoSignups = async () => signups;
     (storage as any).listDemoSessions = async () => sessions;
   });
@@ -585,8 +612,10 @@ describe("public demo endpoints", () => {
     assert.equal(body.token, undefined);
   });
 
+  // The session-start tests below all pass an `industry`, because the live
+  // handler validates the industry choice before it looks at the token.
   test("starting a session requires a valid demo token", async () => {
-    const res = await post("/api/demo/session", { token: "bogus" });
+    const res = await post("/api/demo/session", { token: "bogus", industry: "auto" });
     assert.equal(res.status, 401);
   });
 
@@ -602,7 +631,7 @@ describe("public demo endpoints", () => {
       lastSentAt: null,
     } as DemoSignup);
     const token = signDemoToken("full@example.com");
-    const res = await post("/api/demo/session", { token });
+    const res = await post("/api/demo/session", { token, industry: "auto" });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.limitReached, true);
@@ -655,7 +684,7 @@ describe("public demo endpoints", () => {
       lastSentAt: null,
     } as DemoSignup);
     const token = signDemoToken("unverified@example.com");
-    const res = await post("/api/demo/session", { token });
+    const res = await post("/api/demo/session", { token, industry: "auto" });
     assert.equal(res.status, 401);
     assert.equal(sessions.length, 0);
   });
@@ -664,7 +693,7 @@ describe("public demo endpoints", () => {
   test("the per-email cap holds across different devices (a new device does not reset it)", async () => {
     verifiedSignup("multidevice@example.com", MAX_DEMO_SESSIONS);
     const token = signDemoToken("multidevice@example.com");
-    const res = await post("/api/demo/session", { token, fingerprint: "brand-new-device" });
+    const res = await post("/api/demo/session", { token, industry: "auto", fingerprint: "brand-new-device" });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.reason, "email");
@@ -679,7 +708,7 @@ describe("public demo endpoints", () => {
     }
     verifiedSignup("fresh@example.com", 0);
     const token = signDemoToken("fresh@example.com");
-    const res = await post("/api/demo/session", { token, fingerprint: fp });
+    const res = await post("/api/demo/session", { token, industry: "auto", fingerprint: fp });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.reason, "device");
@@ -696,7 +725,7 @@ describe("public demo endpoints", () => {
     const token = signDemoToken("seventh@example.com");
     // No fingerprint so the device cap can't interfere; email is fresh so the
     // email cap can't interfere. Only the IP cap should trip.
-    const res = await postFromIp("/api/demo/session", { token }, ip);
+    const res = await postFromIp("/api/demo/session", { token, industry: "auto" }, ip);
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.reason, "ip");
@@ -713,7 +742,7 @@ describe("public demo endpoints", () => {
     }
     verifiedSignup(founder, MAX_DEMO_SESSIONS + 5);
     const token = signDemoToken(founder);
-    const res = await postFromIp("/api/demo/session", { token, fingerprint: fp, scenario: "real_estate" }, ip);
+    const res = await postFromIp("/api/demo/session", { token, industry: "real_estate", fingerprint: fp }, ip);
     assert.equal(res.status, 200, "founder is never walled by fair-use caps");
     const body = await res.json();
     assert.ok(body.session);

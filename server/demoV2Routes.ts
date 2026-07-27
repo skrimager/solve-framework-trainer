@@ -1,17 +1,20 @@
-// Demo v2 HTTP surface: /api/demo-v2/*. A parallel flow to /api/demo/*, which is
-// left completely untouched. The difference is the visitor picks an industry
-// before every session and never sees the same scenario twice inside an industry
-// (see pickNextV2Scenario). Everything else is deliberately the same code as the
-// real platform: the same roleplay pipeline, the same scoreTranscript call with
-// the same four arguments, the same rubric, the same 85 standard, the same
-// beginner leniency, the same score cache. Nothing about scoring is re-derived
-// here.
+// Demo v2 HTTP surface. This is the only demo session flow: the visitor picks an
+// industry before every session and never sees the same scenario twice inside an
+// industry (see pickNextV2Scenario). Everything else is deliberately the same
+// code as the real platform: the same roleplay pipeline, the same scoreTranscript
+// call with the same four arguments, the same rubric, the same 85 standard, the
+// same beginner leniency, the same score cache. Nothing about scoring is
+// re-derived here.
 //
-// Email verification is NOT duplicated. The v2 client calls the existing
+// These handlers answer under DEMO_API_BASE (/api/demo/*). They were originally
+// mounted at /api/demo-v2/* alongside the retired v1 session routes; that
+// parallel prefix is gone and only this flow serves /api/demo/session*.
+//
+// Email verification is NOT duplicated. The client calls the existing
 // /api/demo/request-code and /api/demo/verify, which only touch demo_signups and
 // are flow-agnostic; the signed token they mint is accepted here unchanged. Lead
-// capture likewise reuses /api/demo/lead. That keeps one copy of the code-email
-// path and one copy of the per-email session counter.
+// capture likewise reuses /api/demo/lead. Those three routes are registered in
+// server/routes.ts and are the only demo routes not defined in this file.
 import type { Express, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -45,6 +48,7 @@ import {
 import { deriveStalledStep } from "./realConversations";
 import { personaCoreFor, sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { historyForTurn, runReplyStream } from "./turnStream";
 import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type TranscriptMessage } from "@shared/schema";
 
 // The pieces of server/routes.ts that v2 needs are module-private there (a
@@ -65,9 +69,19 @@ export type DemoV2Deps = {
     },
   ) => Promise<void>;
   updateDemoMsgAudioStatus: (sessionId: number, msgId: string, status: "ready" | "failed") => Promise<void>;
+  updateDemoMsgContentAndStatus: (
+    sessionId: number,
+    msgId: string,
+    content: string,
+    status: "ready" | "failed",
+  ) => Promise<void>;
 };
 
 export const DEMO_V2_FLOW = "v2";
+
+// The public demo's URL prefix. Declared once so the route registrations and the
+// audio-stream URL handed to the client can never drift apart.
+export const DEMO_API_BASE = "/api/demo";
 
 function publicDemoSession(s: DemoSession) {
   return {
@@ -98,7 +112,7 @@ export async function loadDemoV2Pool(): Promise<DemoV2ScenarioOption[]> {
 }
 
 export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
-  const { clientIp, demoLimiter, streamMessageAudio, updateDemoMsgAudioStatus } = deps;
+  const { clientIp, demoLimiter, streamMessageAudio, updateDemoMsgAudioStatus, updateDemoMsgContentAndStatus } = deps;
 
   async function requireDemoSignup(req: Request, res: Response): Promise<DemoSignup | null> {
     const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
@@ -116,14 +130,14 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
   // The industry choices, served rather than hardcoded in the client, so the two
   // never drift apart.
-  app.get("/api/demo-v2/options", (_req, res) => {
+  app.get(`${DEMO_API_BASE}/options`, (_req, res) => {
     res.json({ options: DEMO_V2_INDUSTRIES });
   });
 
-  // Start a session in the chosen industry. Same three caps as v1 (email,
-  // device, IP), same increment-before-create ordering so a refresh cannot buy a
-  // fourth run, and the same shared per-email counter.
-  app.post("/api/demo-v2/session", async (req, res) => {
+  // Start a session in the chosen industry. All three fair-use caps (email,
+  // device, IP) are enforced here, with increment-before-create ordering so a
+  // refresh cannot buy a fourth run.
+  app.post(`${DEMO_API_BASE}/session`, async (req, res) => {
     if (!demoLimiter.check(clientIp(req))) {
       return res.status(429).json({ message: "Too many requests. Please try again shortly." });
     }
@@ -235,7 +249,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     });
   });
 
-  app.get("/api/demo-v2/session/:id", async (req, res) => {
+  app.get(`${DEMO_API_BASE}/session/:id`, async (req, res) => {
     const signup = await requireDemoSignup(req, res);
     if (!signup) return;
     const session = await storage.getDemoSession(Number(req.params.id));
@@ -245,9 +259,12 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     res.json({ session: publicDemoSession(session) });
   });
 
-  // A conversational turn. Identical to v1: same getCustomerReply, escalation
-  // tier pinned to 0, same voice gating on the third session only.
-  app.post("/api/demo-v2/session/:id/message", async (req, res) => {
+  // A conversational turn. Escalation tier is pinned to 0 and voice is gated to
+  // the third session only. In voice mode the reply is streamed exactly as it is
+  // for real trainee sessions: this handler does not block on the LLM, it appends
+  // an empty customer placeholder and hands back an SSE URL that the shared
+  // streamer fills in sentence by sentence (see /turn-stream below).
+  app.post(`${DEMO_API_BASE}/session/:id/message`, async (req, res) => {
     try {
       if (!demoLimiter.check(clientIp(req))) {
         return res.status(429).json({ message: "Too many requests. Please slow down." });
@@ -262,7 +279,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
       const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
-      const { content, withAudio } = req.body ?? {};
+      const { content, withAudio, stream } = req.body ?? {};
       const useAudio = Boolean(withAudio) && voiceUnlocked;
       const transcript = JSON.parse(session.transcript);
       transcript.push(
@@ -273,15 +290,36 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
         }),
       );
 
+      const msgId = randomUUID();
+
+      if (stream && useAudio) {
+        transcript.push(
+          transcriptMessageSchema.parse({
+            role: "customer",
+            content: "",
+            audioStatus: "pending",
+            // Replay uses this same-msg endpoint later, once content is filled in.
+            audioUrl: `${DEMO_API_BASE}/session/${session.id}/audio-stream/${msgId}`,
+            msgId,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        const streamed = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
+        return res.json({
+          session: publicDemoSession(streamed!),
+          streamMsgId: msgId,
+          replyStreamUrl: `${DEMO_API_BASE}/session/${session.id}/turn-stream/${msgId}`,
+        });
+      }
+
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
       const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
-      const msgId = randomUUID();
       transcript.push(
         transcriptMessageSchema.parse({
           role: "customer",
           content: customerReplyText,
           audioStatus: useAudio ? "pending" : "none",
-          audioUrl: useAudio ? `/api/demo-v2/session/${session.id}/audio-stream/${msgId}` : undefined,
+          audioUrl: useAudio ? `${DEMO_API_BASE}/session/${session.id}/audio-stream/${msgId}` : undefined,
           msgId,
           timestamp: new Date().toISOString(),
         }),
@@ -295,11 +333,11 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     }
   });
 
-  // Not signup-gated for the same reason as v1: the request comes from an
-  // <audio> element that cannot carry the demo token, and the unguessable msgId
-  // is the capability. Voice is re-checked server side so a crafted request
-  // cannot spend TTS budget on a locked session.
-  app.get("/api/demo-v2/session/:id/audio-stream/:msgId", async (req, res) => {
+  // Not signup-gated: the request comes from an <audio> element that cannot carry
+  // the demo token, and the unguessable msgId is the capability. Voice is
+  // re-checked server side so a crafted request cannot spend TTS budget on a
+  // locked session.
+  app.get(`${DEMO_API_BASE}/session/:id/audio-stream/:msgId`, async (req, res) => {
     const session = await storage.getDemoSession(Number(req.params.id));
     if (!session) return res.status(404).end();
     if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
@@ -319,13 +357,45 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     });
   });
 
+  // Server-Sent Events turn stream, the demo's half of the same streaming
+  // pipeline real trainee sessions use: the shared streamer generates the reply
+  // for the placeholder created by POST /message and pushes one `sentence` event
+  // per sentence the moment that sentence's audio is synthesized, so the first
+  // one plays while the rest are still being generated. Gated the same way the
+  // audio-stream route is (unguessable msgId as the capability, since EventSource
+  // requests cannot carry the demo token, plus a server-side voice re-check).
+  app.get(`${DEMO_API_BASE}/session/:id/turn-stream/:msgId`, async (req, res) => {
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+      return res.status(403).end();
+    }
+    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+    const placeholder = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
+    if (!placeholder) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await runReplyStream(res, {
+      msgId: req.params.msgId,
+      history: historyForTurn(transcript, req.params.msgId),
+      scenario,
+      // Demo sessions never escalate difficulty within a level.
+      escalationTier: 0,
+      variantSection: sessionVariantSection(scenario, { id: session.id, personaVariant: null }),
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      persist: (content, status) =>
+        updateDemoMsgContentAndStatus(session.id, req.params.msgId, content, status),
+    });
+  });
+
   // End and score. The scoreTranscript call is byte-for-byte the v1/real call
   // with the same four arguments, so the rubric, the 85 standard, the beginner
   // leniency, and the score cache all apply unchanged. Two additions over v1,
   // both borrowed from real sessions: the completeness gate, so a two-line
   // conversation is not scored as a legitimate attempt, and the stalled-step
   // diagnosis in the payload.
-  app.post("/api/demo-v2/session/:id/complete", async (req, res) => {
+  app.post(`${DEMO_API_BASE}/session/:id/complete`, async (req, res) => {
     try {
       const signup = await requireDemoSignup(req, res);
       if (!signup) return;

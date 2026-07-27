@@ -2,7 +2,7 @@ import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
 import { personaVariantSeed } from "./personaVariants";
-import type { InsertScenario, Office } from "@shared/schema";
+import type { InsertScenario, Office, Scenario } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
 const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
@@ -45,6 +45,45 @@ async function ensureDemoOffice(): Promise<Office> {
   });
 }
 
+// The six public demo scenarios, listed literally rather than derived from a
+// broader "which rows disagree with the source data" scan. The seed loop below
+// is insert-only, so these rows kept the active:false they were first deployed
+// with even after the source data here flipped to active:true, and the demo
+// resolved nothing. The reconcile is scoped to exactly these slugs so it can
+// never move the active flag on any of the real training scenarios.
+const DEMO_V2_RECONCILE_SLUGS = [
+  "demo-v2-re-1",
+  "demo-v2-re-2",
+  "demo-v2-re-3",
+  "demo-v2-auto-1",
+  "demo-v2-auto-2",
+  "demo-v2-auto-3",
+] as const;
+
+type ScenarioActiveWriter = {
+  updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
+};
+
+// Flips any already-persisted demo scenario back to active:true. Pass the
+// pre-insert snapshot of the table: rows the insert loop creates this boot
+// already carry active:true from source, so they need no second write. Returns
+// the slugs actually updated, which is empty on every boot after the first.
+export async function reconcileDemoV2Active(
+  existingScenarios: Pick<Scenario, "id" | "slug" | "active">[],
+  store: ScenarioActiveWriter,
+): Promise<string[]> {
+  const bySlug = new Map(existingScenarios.map((s) => [s.slug, s]));
+  const reconciled: string[] = [];
+  for (const slug of DEMO_V2_RECONCILE_SLUGS) {
+    const row = bySlug.get(slug);
+    if (!row || row.active === true) continue;
+    await store.updateScenario(row.id, { active: true });
+    console.log(`[seed] reconciled active=true for ${slug}`);
+    reconciled.push(slug);
+  }
+  return reconciled;
+}
+
 // Seeds demo users and the full scenario portfolio across all verticals.
 // Safe to run multiple times — skips if data already exists.
 export async function seed() {
@@ -76,6 +115,8 @@ export async function seed() {
     }
     console.log(`Seeded ${missing.length} new scenario(s) across ${new Set(missing.map((s) => s.vertical)).size} vertical(s).`);
   }
+
+  await reconcileDemoV2Active(existingScenarios, storage);
 
   // Backfill the structured persona fields onto rows seeded before the persona
   // variation rewrite. Keyed off an empty personaCore so it runs once per row and
@@ -1148,10 +1189,14 @@ Stay conversational, natural, and realistic — like a real person, not a script
   // ─────────────────────────────────────────────────────────────
   // DEMO V2 (public free demo: industry choice + no-repeat rotation)
   // ─────────────────────────────────────────────────────────────
-  // Three Auto and three Real Estate scenarios for the /api/demo-v2/* flow (see
-  // server/demoV2.ts). active:false keeps them out of the trainee scenario
-  // picker and the certification pool exactly like the two rows above; the demo
-  // reaches them by slug only. All prose lives in personaVariantSeed, and the
+  // Three Auto and three Real Estate scenarios for the public demo at /api/demo/*
+  // (see server/demoV2.ts). These are active:true because they are the live demo
+  // content rather than a staging pool. active:true alone would put them in front
+  // of paying trainees, so they are kept out of every trainee-facing pool by slug
+  // instead: see realTrainingScenarios in server/routes.ts, which is what
+  // GET /api/scenarios and the certification expert picker now filter through.
+  // The demo itself reaches them by slug and ignores `active` either way. All
+  // prose lives in personaVariantSeed, and the
   // merge loop at the bottom of this file stamps personaCore plus the three
   // variation pools onto these rows at module load, so a first insertion already
   // carries the structured fields. customerPersona is the legacy freeform column
@@ -1163,7 +1208,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Price-Only Caller Burned by His Last Vehicle",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A caller wants nothing but an out-the-door price on one specific SUV. Practice a warm discovery conversation: find out what he actually uses the vehicle for and what went wrong last time before you talk numbers.",
     description:
@@ -1176,7 +1221,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Retired Couple Trading In, Nothing Fancy",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A retired couple wants to trade in a nine-year-old sedan for something newer and says nothing fancy. Practice a warm discovery conversation: understand how they actually use the vehicle and what a comfortable payment looks like before recommending anything.",
     description:
@@ -1189,7 +1234,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Cheap and Reliable, Nothing Too Fast",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A customer wants something cheap and reliable for her kid. Practice a warm discovery conversation: find out who is actually going to be driving it and what she genuinely needs before you show her the cheapest thing on the lot.",
     description:
@@ -1203,7 +1248,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A couple in their seventies say they're just looking at something smaller, nothing serious yet. Practice a warm discovery conversation: understand why now and what matters most before talking listings.",
     description:
@@ -1217,7 +1262,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A buyer asks what's on the market in one specific neighborhood. Practice a warm discovery conversation: understand his timeline and who is moving with him before reciting inventory.",
     description:
@@ -1231,7 +1276,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A first-time buyer asks for the cheapest thing you have. Practice a warm discovery conversation: find out what is behind the focus on price before sending listings.",
     description:

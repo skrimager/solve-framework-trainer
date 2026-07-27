@@ -1,11 +1,11 @@
-// Thin client for the demo v2 API (/api/demo-v2/*). Deliberately a separate file
-// from demoApi.ts so the two flows can never break each other; the small amount
-// of duplicated fetch plumbing is the price of that isolation.
+// Thin client for the public demo API (/api/demo/*). Kept separate from the
+// retired demoApi.ts rather than merged into it, so the retired single-scenario
+// client can stay in the repo for reference without this one depending on it.
 //
-// Two endpoints are shared with v1 on purpose rather than forked: the email code
-// pair (/api/demo/request-code, /api/demo/verify), which only touches demo_signups
-// and mints the same signed token both flows accept, and /api/demo/lead, which is
-// already generic lead capture. Everything session-shaped is v2-specific.
+// Three endpoints are flow-agnostic and are still served by server/routes.ts
+// directly: the email code pair (/api/demo/request-code, /api/demo/verify), which
+// only touches demo_signups, and /api/demo/lead, which is generic lead capture.
+// Everything session-shaped is served by server/demoV2Routes.ts.
 import type { TranscriptMessage } from "@shared/schema";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
@@ -54,13 +54,14 @@ async function post(url: string, body: Json): Promise<{ ok: boolean; status: num
 
 export const demoV2Api = {
   async options() {
-    const res = await fetch(`${API_BASE}/api/demo-v2/options`);
+    const res = await fetch(`${API_BASE}/api/demo/options`);
     if (!res.ok) throw new Error("Couldn't load the industry list.");
     const data = await res.json();
     return data.options as DemoV2Industry[];
   },
 
-  // Shared with v1: the code email and the signed token are flow-agnostic.
+  // Flow-agnostic: nothing about the code email or the signed token is specific
+  // to a demo flow.
   async requestCode(email: string) {
     const { ok, data } = await post("/api/demo/request-code", { email });
     if (!ok) throw new Error(data.message ?? "We couldn't send your code. Please try again.");
@@ -74,7 +75,7 @@ export const demoV2Api = {
   },
 
   async startSession(token: string, industry: string, fingerprint?: string) {
-    const { ok, data } = await post("/api/demo-v2/session", { token, industry, fingerprint });
+    const { ok, data } = await post("/api/demo/session", { token, industry, fingerprint });
     if (!ok) {
       const err = new Error(data.message ?? "Couldn't start the practice conversation.") as Error & {
         limitReached?: boolean;
@@ -92,22 +93,33 @@ export const demoV2Api = {
   },
 
   async getSession(token: string, id: number) {
-    const res = await fetch(`${API_BASE}/api/demo-v2/session/${id}?token=${encodeURIComponent(token)}`);
+    const res = await fetch(`${API_BASE}/api/demo/session/${id}?token=${encodeURIComponent(token)}`);
     if (!res.ok) throw new Error(`${res.status}`);
     const data = await res.json();
     return data.session as DemoV2Session;
   },
 
+  // In voice mode we ask the backend to stream the reply sentence by sentence
+  // over SSE, exactly as the real trainee platform does, and it answers with a
+  // replyStreamUrl instead of a finished reply.
   async sendMessage(token: string, id: number, content: string, withAudio: boolean) {
-    const { ok, data } = await post(`/api/demo-v2/session/${id}/message`, { token, content, withAudio });
+    const { ok, data } = await post(`/api/demo/session/${id}/message`, {
+      token,
+      content,
+      withAudio,
+      stream: withAudio,
+    });
     if (!ok) throw new Error(data.message ?? "Message failed to send.");
-    return data.session as DemoV2Session;
+    return {
+      session: data.session as DemoV2Session,
+      replyStreamUrl: data.replyStreamUrl as string | undefined,
+    };
   },
 
   // `force` skips the completeness gate. The UI sends it only after the visitor
   // is told the conversation looks unfinished and chooses to score it anyway.
   async complete(token: string, id: number, force = false) {
-    const { ok, status, data } = await post(`/api/demo-v2/session/${id}/complete`, { token, force });
+    const { ok, status, data } = await post(`/api/demo/session/${id}/complete`, { token, force });
     if (!ok) {
       const err = new Error(data.message ?? "Couldn't score the conversation.") as Error & {
         incomplete?: boolean;
@@ -118,7 +130,7 @@ export const demoV2Api = {
     return data as { session: DemoV2Session; stalledStep: string | null };
   },
 
-  // Shared with v1: generic lead capture, nothing demo-flow specific in it.
+  // Generic lead capture, nothing demo-flow specific in it.
   async submitLead(lead: { name: string; email: string; company?: string; teamSize?: string; message?: string }) {
     const { ok, data } = await post("/api/demo/lead", lead);
     if (!ok) throw new Error(data.message ?? "Couldn't submit. Please try again.");

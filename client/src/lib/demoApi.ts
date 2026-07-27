@@ -1,3 +1,6 @@
+// RETIRED, kept for reference only alongside pages/demo.tsx. The live demo client
+// is demoV2Api.ts; the session endpoints this file calls are no longer mounted.
+//
 // Thin client for the public "Free Voice Demo" API. These endpoints are
 // unauthenticated: the email + 6-digit code IS the auth, and a signed demo
 // token (returned by /verify) authorizes the roleplay calls. Kept separate from
