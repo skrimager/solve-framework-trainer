@@ -99,10 +99,21 @@ export const demoV2Api = {
     return data.session as DemoV2Session;
   },
 
+  // In voice mode we ask the backend to stream the reply sentence by sentence
+  // over SSE, exactly as the real trainee platform does, and it answers with a
+  // replyStreamUrl instead of a finished reply.
   async sendMessage(token: string, id: number, content: string, withAudio: boolean) {
-    const { ok, data } = await post(`/api/demo/session/${id}/message`, { token, content, withAudio });
+    const { ok, data } = await post(`/api/demo/session/${id}/message`, {
+      token,
+      content,
+      withAudio,
+      stream: withAudio,
+    });
     if (!ok) throw new Error(data.message ?? "Message failed to send.");
-    return data.session as DemoV2Session;
+    return {
+      session: data.session as DemoV2Session,
+      replyStreamUrl: data.replyStreamUrl as string | undefined,
+    };
   },
 
   // `force` skips the completeness gate. The UI sends it only after the visitor

@@ -21,6 +21,8 @@ import {
   type DemoV2ScenarioOption,
 } from "./demoV2";
 import { scenarios } from "./seed";
+import { getVoiceForScenario } from "./voices";
+import { __setReplyStreamDepsForTests } from "./turnStream";
 import { personaVariantSeed } from "./personaVariants";
 import {
   scoreTranscript,
@@ -187,6 +189,14 @@ describe("demo v2 seeded scenarios", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
       assert.equal(rows.get(slug)!.difficulty, "beginner", slug);
     }
+  });
+
+  // The demo's whole premise is that no two sessions repeat, so two personas
+  // sharing a voice reads as a repeat even when the scenarios differ. Resolved
+  // against each row's seeded gender, which is authoritative over the voice.
+  test("all six resolve to distinct voices from their seeded gender", () => {
+    const voices = DEMO_V2_ALL_SLUGS.map((slug) => getVoiceForScenario(slug, rows.get(slug)!.gender));
+    assert.equal(new Set(voices).size, 6, `voice collision: ${voices.join(", ")}`);
   });
 
   test("all six are active, because they are the live demo content", () => {
@@ -612,6 +622,211 @@ describe("demo v2 endpoints", () => {
       const res = await post(path, {});
       assert.equal(res.status, 400, `${path} should still be mounted`);
     }
+  });
+});
+
+// ===========================================================================
+// HTTP: the demo streams its replies the way real sessions do
+// ===========================================================================
+// The demo used to block on the whole LLM reply and then synthesize it in one
+// TTS call, so nothing was heard until everything was ready and one TTS failure
+// lost the entire turn. It now drives the same streamer real sessions use (see
+// server/turnStream.test.ts for the real path's own pin).
+
+describe("demo v2 streamed replies", () => {
+  let server: Server;
+  let baseUrl: string;
+  let signups: DemoSignup[];
+  let sessions: DemoSession[];
+  let scenarioRows: Scenario[];
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerPublicAndAdminRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+  });
+
+  after(() => server?.close());
+
+  beforeEach(() => {
+    signups = [
+      {
+        id: 1,
+        email: normalizeEmail("streamer@example.com"),
+        verified: true,
+        sessionsUsed: MAX_DEMO_SESSIONS,
+      } as DemoSignup,
+    ];
+    scenarioRows = [
+      {
+        id: 91,
+        slug: "demo-v2-auto-3",
+        vertical: "auto_sales",
+        title: "Denise",
+        difficulty: "beginner",
+        active: true,
+        briefing: "b",
+        description: "d",
+        customerPersona: "legacy",
+        personaCore: "You are Denise, 43.",
+        gender: "female",
+        track: "consulting",
+      } as unknown as Scenario,
+    ];
+    // Voice unlocks on the third session, which is the only one that streams.
+    sessions = [
+      {
+        id: 1,
+        signupId: 1,
+        email: signups[0].email,
+        scenarioId: 91,
+        status: "in_progress",
+        transcript: JSON.stringify([
+          { role: "customer", content: "What have you got that's cheap?", timestamp: "t0" },
+        ]),
+        sessionNumber: MAX_DEMO_SESSIONS,
+        flow: "v2",
+      } as unknown as DemoSession,
+    ];
+
+    (storage as any).getScenario = async (id: number) => scenarioRows.find((s) => s.id === id);
+    (storage as any).getDemoSignupByEmail = async (email: string) => signups.find((s) => s.email === email);
+    (storage as any).getDemoSession = async (id: number) => sessions.find((s) => s.id === id);
+    (storage as any).updateDemoSession = async (id: number, patch: any) => {
+      const row = sessions.find((s) => s.id === id);
+      if (!row) return undefined;
+      Object.assign(row, patch);
+      return row;
+    };
+
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        const onSentence = args[5] as (s: string, i: number) => void;
+        onSentence("Nothing too fast.", 0);
+        onSentence("It's for my kid.", 1);
+        return "Nothing too fast. It's for my kid.";
+      },
+      synthesize: async () => Buffer.from("audio"),
+    });
+  });
+
+  afterEach(() => __setReplyStreamDepsForTests(null));
+
+  let ipCounter = 100;
+  function post(path: string, body: unknown) {
+    ipCounter += 1;
+    return fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": `10.40.0.${ipCounter}` },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function transcriptOf(id: number): TranscriptMessage[] {
+    return JSON.parse(sessions.find((s) => s.id === id)!.transcript);
+  }
+
+  async function sendVoiceTurn() {
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken("streamer@example.com"),
+      content: "What's it for?",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    return res.json();
+  }
+
+  test("a voice turn returns a stream URL immediately instead of a finished reply", async () => {
+    const body = await sendVoiceTurn();
+    assert.ok(body.streamMsgId);
+    assert.equal(body.replyStreamUrl, `/api/demo/session/1/turn-stream/${body.streamMsgId}`);
+    // The customer message is an empty placeholder: nothing was generated yet.
+    const last = transcriptOf(1).at(-1)!;
+    assert.equal(last.role, "customer");
+    assert.equal(last.content, "");
+    assert.equal(last.audioStatus, "pending");
+  });
+
+  test("the stream emits one sentence event per sentence, then done", async () => {
+    const { replyStreamUrl, streamMsgId } = await sendVoiceTurn();
+    const res = await fetch(`${baseUrl}${replyStreamUrl}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+
+    const events = (await res.text())
+      .split("\n\n")
+      .filter((b) => b.trim())
+      .map((b) => ({
+        event: /^event: (.*)$/m.exec(b)?.[1],
+        data: JSON.parse(/^data: (.*)$/m.exec(b)?.[1] ?? "{}"),
+      }));
+    assert.deepEqual(events, [
+      { event: "sentence", data: { index: 0, text: "Nothing too fast.", audioUrl: `/api/audio/${streamMsgId}-0.mp3` } },
+      { event: "sentence", data: { index: 1, text: "It's for my kid.", audioUrl: `/api/audio/${streamMsgId}-1.mp3` } },
+      { event: "done", data: { msgId: streamMsgId, text: "Nothing too fast. It's for my kid." } },
+    ]);
+  });
+
+  test("the placeholder is filled in with the full reply once the stream ends", async () => {
+    const { replyStreamUrl, streamMsgId } = await sendVoiceTurn();
+    await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
+    const filled = transcriptOf(1).find((m) => m.msgId === streamMsgId)!;
+    assert.equal(filled.content, "Nothing too fast. It's for my kid.");
+    assert.equal(filled.audioStatus, "ready");
+    assert.equal(filled.audioUrl, `/api/demo/session/1/audio-stream/${streamMsgId}`);
+  });
+
+  test("one sentence's TTS failing costs only that sentence, not the whole reply", async () => {
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        const onSentence = args[5] as (s: string, i: number) => void;
+        onSentence("Nothing too fast.", 0);
+        onSentence("It's for my kid.", 1);
+        return "Nothing too fast. It's for my kid.";
+      },
+      synthesize: async (text: string) => {
+        if (text === "It's for my kid.") throw new Error("tts down");
+        return Buffer.from("audio");
+      },
+    });
+    const { replyStreamUrl } = await sendVoiceTurn();
+    const raw = await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
+    assert.match(raw, /"text":"Nothing too fast\.","audioUrl":"\/api\/audio\//);
+    assert.match(raw, /"text":"It's for my kid\.","audioUrl":null/);
+    assert.match(raw, /event: done/);
+  });
+
+  // Streaming rides on the voice gate, so a session that has not unlocked voice
+  // must stay on the blocking text path rather than being handed a stream it is
+  // not allowed to consume. The reply itself needs a live model, which the suite
+  // deliberately does not have, so this asserts the branch and not the reply.
+  test("a turn with voice locked never opens a stream", async () => {
+    sessions[0].sessionNumber = 1;
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken("streamer@example.com"),
+      content: "What's it for?",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal((await res.json()).replyStreamUrl, undefined);
+    assert.ok(!transcriptOf(1).some((m) => m.audioStatus === "pending"));
+  });
+
+  test("the stream endpoint refuses a session whose voice is still locked", async () => {
+    sessions[0].sessionNumber = 1;
+    const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/anything`);
+    assert.equal(res.status, 403);
+  });
+
+  test("the stream endpoint 404s on an unknown message id", async () => {
+    const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/not-a-real-msg`);
+    assert.equal(res.status, 404);
   });
 });
 

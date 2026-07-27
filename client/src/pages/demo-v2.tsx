@@ -579,9 +579,15 @@ function Roleplay({
   const sendMessage = useMutation({
     mutationFn: ({ content, withAudio }: { content: string; withAudio: boolean }) =>
       demoV2Api.sendMessage(token, sessionId, content, withAudio),
-    onSuccess: (updated: DemoV2Session) => {
+    onSuccess: ({ session: updated, replyStreamUrl }) => {
       queryClient.setQueryData(["/api/demo/session", sessionId], updated);
-      voiceRef.current?.handleReply(parseTranscript(updated.transcript));
+      // When the backend opened a streamed turn, consume it over SSE and play the
+      // reply sentence by sentence. Otherwise fall back to the single-clip path.
+      if (replyStreamUrl) {
+        voiceRef.current?.handleReplyStream(replyStreamUrl);
+      } else {
+        voiceRef.current?.handleReply(parseTranscript(updated.transcript));
+      }
       setLastFailedMessage(null);
     },
     onError: (_err, variables) => setLastFailedMessage(variables.content),

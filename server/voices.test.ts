@@ -27,6 +27,32 @@ describe("getVoiceForScenario", () => {
   });
 });
 
+describe("the six public demo personas", () => {
+  // Slug -> the gender on the seeded scenario row, which is authoritative over
+  // the heard voice. Curated entries only survive if they agree with it.
+  const DEMO_PERSONAS: Array<[string, "male" | "female"]> = [
+    ["demo-v2-auto-1", "male"], // Vince, 44
+    ["demo-v2-auto-2", "male"], // Don, 68
+    ["demo-v2-auto-3", "female"], // Denise, 43
+    ["demo-v2-re-1", "female"], // Margaret, 71
+    ["demo-v2-re-2", "male"], // Marcus, 38
+    ["demo-v2-re-3", "female"], // Nia, 26
+  ];
+
+  test("each resolves through an explicit curated entry, not the hash fallback", () => {
+    for (const [slug, gender] of DEMO_PERSONAS) {
+      const curated = PERSONA_VOICES[slug];
+      assert.ok(curated, `${slug} has no curated voice and would hit the hash fallback`);
+      assert.equal(getVoiceForScenario(slug, gender), curated, slug);
+    }
+  });
+
+  test("all six voices are pairwise distinct so no two demo personas sound alike", () => {
+    const voices = DEMO_PERSONAS.map(([slug, gender]) => getVoiceForScenario(slug, gender));
+    assert.equal(new Set(voices).size, voices.length, `collision in ${voices.join(", ")}`);
+  });
+});
+
 describe("getVoiceInstructionsForScenario", () => {
   test("returns a youthful delivery steer for the young first-car persona", () => {
     const instructions = getVoiceInstructionsForScenario("auto-sales-first-car-college-student");

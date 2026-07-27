@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
-import { getCustomerReply, streamCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeech, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -35,6 +35,8 @@ import {
   sessionVariantSection,
 } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { AUDIO_DIR, audioPathForMsg } from "./audioCache";
+import { historyForTurn, runReplyStream, type MsgAudioStatus } from "./turnStream";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
 import {
   parsePastedTranscript,
@@ -222,9 +224,6 @@ function deriveSessionStalledStep(rubricScoresJson: string | null): string | nul
 const leadsLimiter = new RateLimiter(5, 60 * 1000); // 5 lead submissions / IP / minute
 const visitsLimiter = new RateLimiter(60, 60 * 1000); // 60 page-views / IP / minute
 const demoLimiter = new RateLimiter(20, 60 * 1000); // 20 demo actions / IP / minute (code requests, verify, turns)
-
-const AUDIO_DIR = path.join(process.cwd(), "audio_cache");
-if (!fsSync.existsSync(AUDIO_DIR)) fsSync.mkdirSync(AUDIO_DIR, { recursive: true });
 
 // Scenarios that exist only to be served by the public demo. They carry real
 // verticals (auto_sales, real_estate) and are active so the demo can serve them,
@@ -2028,6 +2027,7 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     demoLimiter,
     streamMessageAudio,
     updateDemoMsgAudioStatus,
+    updateDemoMsgContentAndStatus,
   });
 
   // ===========================================================================
@@ -4178,15 +4178,6 @@ async function checkPracticeCap(userId: number): Promise<PracticeCapStatus> {
 }
 
 
-// On-disk cache path for a message's synthesized audio. Keyed by message id so
-// the stream endpoint can reuse a previously rendered file (replay) instead of
-// re-synthesizing.
-function audioPathForMsg(msgId: string): string {
-  return path.join(AUDIO_DIR, `${msgId}.mp3`);
-}
-
-type MsgAudioStatus = "ready" | "failed";
-
 async function updateSessionMsgAudioStatus(sessionId: number, msgId: string, status: MsgAudioStatus): Promise<void> {
   const latest = await storage.getSession(sessionId);
   if (!latest) return;
@@ -4254,13 +4245,6 @@ async function streamMessageAudio(res: Response, opts: StreamMessageAudioOptions
   }
 }
 
-// On-disk cache path for one sentence's synthesized audio within a streamed
-// reply. Keyed by message id + sentence index so the SSE endpoint can write and
-// the existing /api/audio/:filename route can serve each sentence clip.
-function sentenceAudioPath(msgId: string, index: number): string {
-  return path.join(AUDIO_DIR, `${msgId}-${index}.mp3`);
-}
-
 // Recomputes the within-level difficulty escalation tier for a session. Pulled
 // out of the message route so the streaming turn endpoint derives the identical
 // tier (it is deterministic from already-completed sessions, so it stays stable
@@ -4298,6 +4282,23 @@ async function updateSessionMsgContentAndStatus(
   await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
 }
 
+// The demo's counterpart to updateSessionMsgContentAndStatus, writing to
+// demo_sessions instead of sessions.
+async function updateDemoMsgContentAndStatus(
+  sessionId: number,
+  msgId: string,
+  content: string,
+  status: MsgAudioStatus,
+): Promise<void> {
+  const latest = await storage.getDemoSession(sessionId);
+  if (!latest) return;
+  const transcript: TranscriptMessage[] = JSON.parse(latest.transcript);
+  const idx = transcript.findIndex((m) => m.msgId === msgId);
+  if (idx === -1) return;
+  transcript[idx] = { ...transcript[idx], content, audioStatus: status };
+  await storage.updateDemoSession(sessionId, { transcript: JSON.stringify(transcript) });
+}
+
 interface RunTurnStreamOptions {
   msgId: string;
   session: Session;
@@ -4307,85 +4308,25 @@ interface RunTurnStreamOptions {
   persist: (content: string, status: MsgAudioStatus) => Promise<void>;
 }
 
-// Drives one streamed customer turn over Server-Sent Events. Streams the reply
-// text, and for each completed sentence starts TTS immediately (overlapping
-// continued generation) while emitting `sentence` events strictly in order so
-// the client can queue them gaplessly. Emits a final `done` (or `error`) event
-// and persists the full reply text + audio status when finished.
-async function runTurnStream(res: Response, opts: RunTurnStreamOptions): Promise<void> {
+// One streamed customer turn for a real trainee session. Derives the inputs that
+// are specific to a persisted session -- the history minus the placeholder, the
+// within-level escalation tier, and the session's persona variant -- and hands
+// them to the shared sentence-by-sentence streamer, which the public demo drives
+// with its own inputs. Exported so server/turnStream.test.ts can pin exactly what
+// the real session path derives and puts on the wire.
+export async function runTurnStream(res: Response, opts: RunTurnStreamOptions): Promise<void> {
   const { msgId, session, scenario, voice, instructions, persist } = opts;
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  // Disable proxy buffering (nginx) so events flush to the client immediately.
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders?.();
-
-  let clientGone = false;
-  res.on("close", () => {
-    clientGone = true;
-  });
-
-  const sse = (event: string, data: unknown) => {
-    if (clientGone || res.writableEnded) return;
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
   const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
-  // The LLM should see the history through the consultant's latest turn, not the
-  // empty placeholder we are about to fill.
-  const history = transcript.filter((m) => m.msgId !== msgId);
-
-  const escalationTier = await computeSessionEscalationTier(session, scenario);
-  const variantSection = sessionVariantSection(scenario, session);
-
-  let anyAudio = false;
-  // Serializes SSE emission in sentence order even though each sentence's TTS
-  // runs concurrently with generation and with the other sentences.
-  let emitChain: Promise<void> = Promise.resolve();
-
-  const handleSentence = (sentence: string, index: number) => {
-    const ttsPromise = synthesizeSpeech(sentence, voice, instructions)
-      .then(async (buf) => {
-        await fs.writeFile(sentenceAudioPath(msgId, index), buf);
-        return true;
-      })
-      .catch((err) => {
-        console.error("Sentence TTS failed:", err);
-        return false;
-      });
-    emitChain = emitChain.then(async () => {
-      const ok = await ttsPromise;
-      if (ok) anyAudio = true;
-      sse("sentence", {
-        index,
-        text: sentence,
-        audioUrl: ok ? `/api/audio/${msgId}-${index}.mp3` : null,
-      });
-    });
-  };
-
-  let fullText = "";
-  try {
-    fullText = await streamCustomerReply(
-      personaCoreFor(scenario),
-      history,
-      scenario.difficulty,
-      escalationTier,
-      variantSection,
-      handleSentence,
-    );
-    await emitChain;
-    await persist(fullText, anyAudio ? "ready" : "failed");
-    sse("done", { msgId, text: fullText });
-  } catch (err) {
-    console.error("Turn stream failed:", err);
-    await emitChain.catch(() => {});
-    // Persist whatever text was generated so the transcript is never left blank.
-    await persist(fullText, "failed").catch(() => {});
-    sse("error", { message: "reply_failed" });
-  } finally {
-    if (!res.writableEnded) res.end();
-  }
+  await runReplyStream(res, {
+    msgId,
+    // The LLM should see the history through the consultant's latest turn, not
+    // the empty placeholder we are about to fill.
+    history: historyForTurn(transcript, msgId),
+    scenario,
+    escalationTier: await computeSessionEscalationTier(session, scenario),
+    variantSection: sessionVariantSection(scenario, session),
+    voice,
+    instructions,
+    persist,
+  });
 }

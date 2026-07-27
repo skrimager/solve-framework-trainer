@@ -48,6 +48,7 @@ import {
 import { deriveStalledStep } from "./realConversations";
 import { personaCoreFor, sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { historyForTurn, runReplyStream } from "./turnStream";
 import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type TranscriptMessage } from "@shared/schema";
 
 // The pieces of server/routes.ts that v2 needs are module-private there (a
@@ -68,6 +69,12 @@ export type DemoV2Deps = {
     },
   ) => Promise<void>;
   updateDemoMsgAudioStatus: (sessionId: number, msgId: string, status: "ready" | "failed") => Promise<void>;
+  updateDemoMsgContentAndStatus: (
+    sessionId: number,
+    msgId: string,
+    content: string,
+    status: "ready" | "failed",
+  ) => Promise<void>;
 };
 
 export const DEMO_V2_FLOW = "v2";
@@ -105,7 +112,7 @@ export async function loadDemoV2Pool(): Promise<DemoV2ScenarioOption[]> {
 }
 
 export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
-  const { clientIp, demoLimiter, streamMessageAudio, updateDemoMsgAudioStatus } = deps;
+  const { clientIp, demoLimiter, streamMessageAudio, updateDemoMsgAudioStatus, updateDemoMsgContentAndStatus } = deps;
 
   async function requireDemoSignup(req: Request, res: Response): Promise<DemoSignup | null> {
     const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
@@ -252,8 +259,11 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     res.json({ session: publicDemoSession(session) });
   });
 
-  // A conversational turn. Identical to v1: same getCustomerReply, escalation
-  // tier pinned to 0, same voice gating on the third session only.
+  // A conversational turn. Escalation tier is pinned to 0 and voice is gated to
+  // the third session only. In voice mode the reply is streamed exactly as it is
+  // for real trainee sessions: this handler does not block on the LLM, it appends
+  // an empty customer placeholder and hands back an SSE URL that the shared
+  // streamer fills in sentence by sentence (see /turn-stream below).
   app.post(`${DEMO_API_BASE}/session/:id/message`, async (req, res) => {
     try {
       if (!demoLimiter.check(clientIp(req))) {
@@ -269,7 +279,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
       const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
-      const { content, withAudio } = req.body ?? {};
+      const { content, withAudio, stream } = req.body ?? {};
       const useAudio = Boolean(withAudio) && voiceUnlocked;
       const transcript = JSON.parse(session.transcript);
       transcript.push(
@@ -280,9 +290,30 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
         }),
       );
 
+      const msgId = randomUUID();
+
+      if (stream && useAudio) {
+        transcript.push(
+          transcriptMessageSchema.parse({
+            role: "customer",
+            content: "",
+            audioStatus: "pending",
+            // Replay uses this same-msg endpoint later, once content is filled in.
+            audioUrl: `${DEMO_API_BASE}/session/${session.id}/audio-stream/${msgId}`,
+            msgId,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        const streamed = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
+        return res.json({
+          session: publicDemoSession(streamed!),
+          streamMsgId: msgId,
+          replyStreamUrl: `${DEMO_API_BASE}/session/${session.id}/turn-stream/${msgId}`,
+        });
+      }
+
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
       const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
-      const msgId = randomUUID();
       transcript.push(
         transcriptMessageSchema.parse({
           role: "customer",
@@ -323,6 +354,38 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
       setStatus: (status) => updateDemoMsgAudioStatus(session.id, req.params.msgId, status),
+    });
+  });
+
+  // Server-Sent Events turn stream, the demo's half of the same streaming
+  // pipeline real trainee sessions use: the shared streamer generates the reply
+  // for the placeholder created by POST /message and pushes one `sentence` event
+  // per sentence the moment that sentence's audio is synthesized, so the first
+  // one plays while the rest are still being generated. Gated the same way the
+  // audio-stream route is (unguessable msgId as the capability, since EventSource
+  // requests cannot carry the demo token, plus a server-side voice re-check).
+  app.get(`${DEMO_API_BASE}/session/:id/turn-stream/:msgId`, async (req, res) => {
+    const session = await storage.getDemoSession(Number(req.params.id));
+    if (!session) return res.status(404).end();
+    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
+      return res.status(403).end();
+    }
+    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
+    const placeholder = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
+    if (!placeholder) return res.status(404).end();
+    const scenario = await storage.getScenario(session.scenarioId);
+    if (!scenario) return res.status(404).end();
+    await runReplyStream(res, {
+      msgId: req.params.msgId,
+      history: historyForTurn(transcript, req.params.msgId),
+      scenario,
+      // Demo sessions never escalate difficulty within a level.
+      escalationTier: 0,
+      variantSection: sessionVariantSection(scenario, { id: session.id, personaVariant: null }),
+      voice: getVoiceForScenario(scenario.slug, scenario.gender),
+      instructions: getVoiceInstructionsForScenario(scenario.slug),
+      persist: (content, status) =>
+        updateDemoMsgContentAndStatus(session.id, req.params.msgId, content, status),
     });
   });
 
