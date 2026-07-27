@@ -27,7 +27,7 @@ describe("post-free-session fork copy", () => {
   test("membership is the recommended path and lists the full member benefits", () => {
     assert.equal(MEMBER_OPTION.badge, "Recommended");
     assert.equal(MEMBER_OPTION.features.length, 14);
-    assert.equal(MEMBER_OPTION.features[0], "Unlimited practice sessions (based on your membership plan)");
+    assert.equal(MEMBER_OPTION.features[0], "Up to 10 hours of practice sessions every month");
     assert.ok(MEMBER_OPTION.features.includes("Certifications"));
     assert.ok(MEMBER_OPTION.features.includes("SOLVE Academy access"));
   });

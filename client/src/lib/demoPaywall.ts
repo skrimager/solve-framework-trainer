@@ -14,7 +14,7 @@ export const MEMBER_OPTION = {
   buttonLabel: "Become a Member",
   badge: "Recommended",
   features: [
-    "Unlimited practice sessions (based on your membership plan)",
+    "Up to 10 hours of practice sessions every month",
     "Full Manager Dashboard",
     "Team management",
     "Progress tracking",
