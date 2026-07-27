@@ -1,3 +1,6 @@
+// RETIRED, kept for reference only: this was the original single-scenario /demo
+// page. /demo now renders pages/demo-v2.tsx and nothing routes here. Its session
+// endpoints under /api/demo/* are retired too, so this page would not work as-is.
 import { useState, useRef, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";

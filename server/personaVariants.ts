@@ -2420,7 +2420,7 @@ Stay conversational and realistic, proud, territorial, and defensive early, open
   // DEMO V2 (public free demo: industry choice + no-repeat rotation)
   // ─────────────────────────────────────────────────────────────
   // Six beginner scenarios, three per industry, reachable by slug only from the
-  // /api/demo-v2/* flow (see server/demoV2.ts). Each hides a DIFFERENT real
+  // /api/demo/* flow (see server/demoV2.ts). Each hides a DIFFERENT real
   // motivation beneath a plausible surface request, and each volunteers exactly
   // one problem the trainee can lean into or walk straight past. That volunteered
   // signal is the highest-weight dimension in RUBRIC_SYSTEM, so it gets its own

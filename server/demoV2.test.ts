@@ -1,13 +1,14 @@
-// Tests for the demo v2 flow: the no-repeat picker, the six new scenarios, the
-// four worked no-repeat examples over real HTTP, and scoring parity with a real
-// beginner session. Nothing here touches the v1 demo.
+// Tests for the public demo flow: the no-repeat picker, the six demo scenarios,
+// the four worked no-repeat examples over real HTTP (now at /api/demo/*), the
+// gating that keeps those six out of real trainee training, and scoring parity
+// with a real beginner session.
 import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerPublicAndAdminRoutes } from "./routes";
+import { registerPublicAndAdminRoutes, isDemoOnlyScenario, realTrainingScenarios } from "./routes";
 import { __setFetchForTests } from "./notifications";
 import { normalizeEmail, signDemoToken, MAX_DEMO_SESSIONS } from "./demo";
 import {
@@ -188,10 +189,32 @@ describe("demo v2 seeded scenarios", () => {
     }
   });
 
-  test("all six are inactive, so they stay out of the trainee picker and cert pool", () => {
+  test("all six are active, because they are the live demo content", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
-      assert.equal(rows.get(slug)!.active, false, slug);
+      assert.equal(rows.get(slug)!.active, true, slug);
     }
+  });
+
+  // active:true is what USED to keep these out of real training, so the guard has
+  // to be somewhere else now. These two tests are the ones that would catch a
+  // regression leaking demo content to paying trainees.
+  test("all six are flagged demo-only, so active:true is not the only gate", () => {
+    for (const slug of DEMO_V2_ALL_SLUGS) {
+      assert.equal(isDemoOnlyScenario(slug), true, slug);
+    }
+  });
+
+  test("realTrainingScenarios drops all six while keeping ordinary active scenarios", () => {
+    const kept = realTrainingScenarios(
+      scenarios.map((s) => ({ slug: s.slug, active: s.active ?? false })),
+    );
+    for (const slug of DEMO_V2_ALL_SLUGS) {
+      assert.equal(kept.some((s) => s.slug === slug), false, `${slug} leaked into the trainee pool`);
+    }
+    // A sanity check on the filter itself: a normal active training scenario in
+    // one of the same two verticals is still offered.
+    assert.ok(kept.some((s) => s.slug === "auto-sales-tech-worker-upgrade"));
+    assert.ok(kept.length > 50, "the real training pool should be essentially untouched");
   });
 
   test("verticals match the industry they are offered under", () => {
@@ -323,7 +346,7 @@ describe("demo v2 endpoints", () => {
           ...row,
           title: `Scenario ${row.slug}`,
           difficulty: "beginner",
-          active: false,
+          active: true,
           briefing: "b",
           description: "d",
           customerPersona: "p",
@@ -408,7 +431,7 @@ describe("demo v2 endpoints", () => {
     const token = signDemoToken(email);
     const picks: number[] = [];
     for (const industry of choices) {
-      const res = await post("/api/demo-v2/session", { token, industry });
+      const res = await post("/api/demo/session", { token, industry });
       assert.equal(res.status, 200, `start failed for ${industry}`);
       const body = await res.json();
       picks.push(body.scenario.id);
@@ -418,7 +441,7 @@ describe("demo v2 endpoints", () => {
   }
 
   test("options are served from the server, not hardcoded in the client", async () => {
-    const res = await fetch(`${baseUrl}/api/demo-v2/options`);
+    const res = await fetch(`${baseUrl}/api/demo/options`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(body.options.map((o: any) => o.key), ["auto", "real_estate"]);
@@ -473,7 +496,7 @@ describe("demo v2 endpoints", () => {
     } as unknown as DemoSession);
 
     const token = signDemoToken("hadv1@example.com");
-    const res = await post("/api/demo-v2/session", { token, industry: "real_estate" });
+    const res = await post("/api/demo/session", { token, industry: "real_estate" });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.scenario.id, 55, "the v1 row must not have been treated as seen");
@@ -483,7 +506,7 @@ describe("demo v2 endpoints", () => {
     verifiedSignup("badindustry@example.com");
     const token = signDemoToken("badindustry@example.com");
     for (const industry of [undefined, "", "apartment_rental"]) {
-      const res = await post("/api/demo-v2/session", { token, industry });
+      const res = await post("/api/demo/session", { token, industry });
       assert.equal(res.status, 400);
     }
     assert.equal(sessions.length, 0);
@@ -491,7 +514,7 @@ describe("demo v2 endpoints", () => {
   });
 
   test("an unverified token is rejected", async () => {
-    const res = await post("/api/demo-v2/session", { token: "bogus", industry: "auto" });
+    const res = await post("/api/demo/session", { token: "bogus", industry: "auto" });
     assert.equal(res.status, 401);
   });
 
@@ -499,7 +522,7 @@ describe("demo v2 endpoints", () => {
     const signup = verifiedSignup("capped@example.com");
     signup.sessionsUsed = MAX_DEMO_SESSIONS;
     const token = signDemoToken("capped@example.com");
-    const res = await post("/api/demo-v2/session", { token, industry: "auto" });
+    const res = await post("/api/demo/session", { token, industry: "auto" });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.limitReached, true);
@@ -528,7 +551,7 @@ describe("demo v2 endpoints", () => {
       flow: "v2",
     } as unknown as DemoSession);
 
-    const res = await post("/api/demo-v2/session/1/complete", { token });
+    const res = await post("/api/demo/session/1/complete", { token });
     assert.equal(res.status, 409);
     const body = await res.json();
     assert.equal(body.incomplete, true);
@@ -551,13 +574,44 @@ describe("demo v2 endpoints", () => {
       flow: "v2",
     } as unknown as DemoSession);
     const token = signDemoToken("owner@example.com");
-    const res = await fetch(`${baseUrl}/api/demo-v2/session/1?token=${encodeURIComponent(token)}`);
+    const res = await fetch(`${baseUrl}/api/demo/session/1?token=${encodeURIComponent(token)}`);
     assert.equal(res.status, 404);
   });
 
-  test("the v1 demo routes still exist and are unaffected by v2 registration", async () => {
+  // ---- The swap: /api/demo/* is this flow, /api/demo-v2/* is gone ----------
+  // A request with a token but no industry proves WHICH handler answered: the
+  // retired single-scenario route accepted that body and 401'd on the bad token,
+  // whereas this flow validates the industry choice first and 400s.
+  test("/api/demo/session is served by the industry-choice flow, not the retired one", async () => {
     const res = await post("/api/demo/session", { token: "bogus" });
-    assert.equal(res.status, 401);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.message, /Auto Sales or Real Estate/);
+  });
+
+  test("the old parallel /api/demo-v2/* prefix no longer resolves", async () => {
+    const token = signDemoToken("gone@example.com");
+    for (const path of [
+      "/api/demo-v2/options",
+      "/api/demo-v2/session",
+      "/api/demo-v2/session/1",
+      "/api/demo-v2/session/1/message",
+      "/api/demo-v2/session/1/complete",
+    ]) {
+      const res = await post(path, { token, industry: "auto" });
+      assert.equal(res.status, 404, `${path} should be gone`);
+    }
+  });
+
+  // The three flow-agnostic routes stay in server/routes.ts and must survive the
+  // retired session routes being unmounted around them. Their behavior is covered
+  // in demo.test.ts; all this asserts is that they are still mounted, by sending a
+  // body each one rejects at validation (400) rather than 404s on.
+  test("the shared code, verify and lead routes still answer under /api/demo", async () => {
+    for (const path of ["/api/demo/request-code", "/api/demo/verify", "/api/demo/lead"]) {
+      const res = await post(path, {});
+      assert.equal(res.status, 400, `${path} should still be mounted`);
+    }
   });
 });
 

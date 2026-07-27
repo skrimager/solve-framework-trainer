@@ -84,16 +84,12 @@ import {
   remainingSessions,
   isUnlimitedDemoEmail,
   signDemoToken,
-  verifyDemoToken,
   ctaSeatQuestion,
   isDisposableEmail,
-  isDeviceLimitReached,
-  isIpLimitReached,
-  countDemoSessionsInIpWindow,
-  isVoiceUnlockedForDemo,
   demoAbuseAnalytics,
 } from "./demo";
 import { registerDemoV2Routes } from "./demoV2Routes";
+import { DEMO_V2_ALL_SLUGS } from "./demoV2";
 import {
   contactTypeSchema,
   contactPatchSchema,
@@ -229,6 +225,26 @@ const demoLimiter = new RateLimiter(20, 60 * 1000); // 20 demo actions / IP / mi
 
 const AUDIO_DIR = path.join(process.cwd(), "audio_cache");
 if (!fsSync.existsSync(AUDIO_DIR)) fsSync.mkdirSync(AUDIO_DIR, { recursive: true });
+
+// Scenarios that exist only to be served by the public demo. They carry real
+// verticals (auto_sales, real_estate) and are active so the demo can serve them,
+// but they must never reach a paying trainee: they are tuned as first-touch
+// showcase conversations, and a trainee who completed one would earn real
+// per-vertical certification credit for it. The demo reaches them by slug
+// (loadDemoV2Pool calls getScenarioBySlug), which consults neither `active` nor
+// this set, so excluding them here costs the demo nothing.
+const DEMO_ONLY_SCENARIO_SLUGS = new Set<string>(DEMO_V2_ALL_SLUGS);
+
+export function isDemoOnlyScenario(slug: string): boolean {
+  return DEMO_ONLY_SCENARIO_SLUGS.has(slug);
+}
+
+// The scenarios a real (seat-holding) trainee may be offered. Every trainee-facing
+// pool built from listScenarios() goes through this, so `active` is never the only
+// thing standing between demo content and real training.
+export function realTrainingScenarios<T extends { slug: string; active: boolean }>(all: T[]): T[] {
+  return all.filter((s) => s.active && !isDemoOnlyScenario(s.slug));
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -847,7 +863,7 @@ export async function registerRoutes(
   // --- Scenarios ---
   app.get("/api/scenarios", async (req, res) => {
     const scenarios = await storage.listScenarios();
-    let active = scenarios.filter((s) => s.active);
+    let active = realTrainingScenarios(scenarios);
     // Optional ?track= filter so the client (consultant picker and admin
     // management) can request just one track's scenarios. Unknown/absent track
     // returns all active scenarios (back-compat).
@@ -1664,7 +1680,9 @@ async function awardAcademyCreditsForUser(userId: number, now: Date): Promise<vo
 // pool rather than seeding a special one.
 async function pickExpertScenario(track: Track, vertical?: string | null) {
   const all = await storage.listScenarios();
-  let pool = all.filter((s) => s.active && scenarioTrack(s.track) === track && s.difficulty === "advanced");
+  let pool = realTrainingScenarios(all).filter(
+    (s) => scenarioTrack(s.track) === track && s.difficulty === "advanced",
+  );
   if (vertical) {
     const scoped = pool.filter((s) => (s.vertical ?? null) === vertical);
     // If the industry has no advanced scenario of its own, fall back to the
@@ -1854,46 +1872,21 @@ export function registerPublicAndAdminRoutes(app: Express): void {
   // ===========================================================================
   // Public "Free Voice Demo" (no auth, no seat; the email+code IS the auth)
   // ===========================================================================
-  // Reuses the EXACT existing roleplay pipeline: getCustomerOpening /
-  // getCustomerReply / scoreTranscript / streamMessageAudio / getVoiceForScenario.
   // Anonymous demo traffic lives in demo_signups/demo_sessions and never touches
   // the seat-gated users/sessions tables, office analytics, or level progression.
+  //
+  // Only the three flow-agnostic routes below live here: the email code pair and
+  // lead capture. Every session-shaped demo route (/api/demo/options, /session,
+  // /session/:id, its message, audio-stream and complete children) belongs to the
+  // industry-choice flow in server/demoV2Routes.ts, registered at the bottom of
+  // this section. The original single-scenario session routes that used to answer
+  // at those same paths are retired; server/demo.ts keeps their helpers, which
+  // both flows share, and is still the home of the token/cap/abuse logic.
 
-  // Load the demo scenario for the visitor's chosen industry option (by slug).
-  // An unknown/missing key resolves to the default (automotive). The lead route
-  // calls this with no key to get the default scenario's track.
+  // Load the default demo scenario. The lead route calls this with no key purely
+  // to read the default scenario's track for the CTA seat question.
   async function getDemoScenario(choiceKey?: string | null) {
     return storage.getScenarioBySlug(demoScenarioSlugForKey(choiceKey));
-  }
-
-  // Resolve the caller's verified signup from the signed token in the body.
-  async function requireDemoSignup(
-    req: Request,
-    res: Response,
-  ): Promise<import("@shared/schema").DemoSignup | null> {
-    const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
-    if (!payload) {
-      res.status(401).json({ message: "Your demo session has expired. Please verify your email again." });
-      return null;
-    }
-    const signup = await storage.getDemoSignupByEmail(payload.email);
-    if (!signup || !signup.verified) {
-      res.status(401).json({ message: "Please verify your email to start the demo." });
-      return null;
-    }
-    return signup;
-  }
-
-  function publicDemoSession(s: import("@shared/schema").DemoSession) {
-    return {
-      id: s.id,
-      scenarioId: s.scenarioId,
-      status: s.status,
-      transcript: s.transcript,
-      score: s.score,
-      rubricScores: s.rubricScores,
-      feedback: s.feedback,
-    };
   }
 
   // Step 1: visitor submits their email; we email a 6-digit code. If the email
@@ -1984,234 +1977,6 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     res.json({ verified: true, token, remaining: remainingSessions(signup.sessionsUsed, email) });
   });
 
-  // Step 3: start a demo roleplay. Usage is incremented AT START (before the
-  // session row is created) so refreshing mid-session can't yield a 4th free run.
-  app.post("/api/demo/session", async (req, res) => {
-    if (!demoLimiter.check(clientIp(req))) {
-      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
-    }
-    const signup = await requireDemoSignup(req, res);
-    if (!signup) return;
-
-    // Fair-use caps, checked in parallel with the per-email cap. If ANY of the
-    // three limits (email, device, IP) is hit, block before creating a session.
-    // All are bypassed for allowlisted founder emails via the helpers below.
-    const fingerprint =
-      typeof req.body?.fingerprint === "string" && req.body.fingerprint.trim()
-        ? req.body.fingerprint.trim().slice(0, 128)
-        : null;
-    const ip = clientIp(req);
-
-    if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
-      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0, reason: "email" });
-    }
-
-    const deviceCount = fingerprint
-      ? (await storage.listDemoSessionsByFingerprint(fingerprint)).length
-      : 0;
-    if (isDeviceLimitReached(deviceCount, signup.email)) {
-      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "device" });
-    }
-
-    const ipRows = await storage.listDemoSessionsByIp(ip);
-    const ipCount = countDemoSessionsInIpWindow(ipRows);
-    if (isIpLimitReached(ipCount, signup.email)) {
-      return res.status(403).json({ message: "You've used all your free practice sessions.", limitReached: true, remaining: 0, reason: "ip" });
-    }
-
-    const scenario = await getDemoScenario(typeof req.body?.scenario === "string" ? req.body.scenario : undefined);
-    if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
-
-    // Increment usage FIRST so a failure after this point can't grant a free retry.
-    // Exempted (unlimited) emails skip the counter entirely so the cap never applies to them.
-    const updatedSignup = isUnlimitedDemoEmail(signup.email)
-      ? signup
-      : await storage.updateDemoSignup(signup.id, { sessionsUsed: signup.sessionsUsed + 1 });
-    // 1-based ordinal of this session for the email; drives voice unlock. Founder
-    // (unlimited) rows aren't incremented, so derive from the pre-start count + 1.
-    const sessionNumber = isUnlimitedDemoEmail(signup.email)
-      ? signup.sessionsUsed + 1
-      : updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1;
-    const voiceEnabled = isVoiceUnlockedForDemo(sessionNumber, signup.email);
-
-    // Create the session first so its id can seed a stable persona rendition.
-    // Demo sessions have no persona_variant column, so the rendition is
-    // re-derived deterministically from the session id (via resolveSessionVariant)
-    // on both the opening and every reply, keeping the customer consistent for
-    // the whole demo conversation while still varying replay to replay.
-    let session = await storage.createDemoSession({
-      signupId: signup.id,
-      email: signup.email,
-      scenarioId: scenario.id,
-      status: "in_progress",
-      transcript: "[]",
-      score: null,
-      rubricScores: null,
-      feedback: null,
-      createdAt: new Date().toISOString(),
-      completedAt: null,
-      deviceFingerprint: fingerprint,
-      ipAddress: ip,
-      sessionNumber,
-    });
-
-    try {
-      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
-      const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
-      if (openingText) {
-        const openingMsg = transcriptMessageSchema.parse({
-          role: "customer",
-          content: openingText,
-          audioStatus: "none",
-          msgId: randomUUID(),
-          timestamp: new Date().toISOString(),
-        });
-        session = (await storage.updateDemoSession(session.id, {
-          transcript: JSON.stringify([openingMsg]),
-        })) ?? session;
-      }
-    } catch (err) {
-      console.error("Demo opening generation failed; starting empty:", err);
-    }
-
-    res.json({
-      session: publicDemoSession(session),
-      remaining: remainingSessions(updatedSignup?.sessionsUsed ?? signup.sessionsUsed + 1, signup.email),
-      // Voice (server TTS) is unlocked only on the third free session; the client
-      // hides the voice toggle otherwise. Enforced server-side in the message route.
-      voiceEnabled,
-      scenario: {
-        id: scenario.id,
-        slug: scenario.slug,
-        title: scenario.title,
-        briefing: scenario.briefing,
-        track: scenario.track,
-        gender: scenario.gender,
-      },
-    });
-  });
-
-  // Fetch a demo session's current state (used to poll for background audio).
-  app.get("/api/demo/session/:id", async (req, res) => {
-    const signup = await requireDemoSignup(req, res);
-    if (!signup) return;
-    const session = await storage.getDemoSession(Number(req.params.id));
-    if (!session || session.signupId !== signup.id) {
-      return res.status(404).json({ message: "Session not found" });
-    }
-    res.json({ session: publicDemoSession(session) });
-  });
-
-  // A conversational turn in the demo — mirrors POST /api/sessions/:id/message.
-  app.post("/api/demo/session/:id/message", async (req, res) => {
-    try {
-      if (!demoLimiter.check(clientIp(req))) {
-        return res.status(429).json({ message: "Too many requests. Please slow down." });
-      }
-      const signup = await requireDemoSignup(req, res);
-      if (!signup) return;
-      const session = await storage.getDemoSession(Number(req.params.id));
-      if (!session || session.signupId !== signup.id) {
-        return res.status(404).json({ message: "Session not found" });
-      }
-      const scenario = await storage.getScenario(session.scenarioId);
-      if (!scenario) return res.status(404).json({ message: "Conversation not found" });
-
-      // Voice (server TTS) is unlocked only on the third free session (see
-      // isVoiceUnlockedForDemo). Gate it here so a frontend-only default cannot
-      // force text-mode sessions 1 and 2 to spend TTS budget: even if the client
-      // sends withAudio, we ignore it unless the session's ordinal unlocks voice.
-      const voiceUnlocked = isVoiceUnlockedForDemo(session.sessionNumber, signup.email);
-      const { content, withAudio } = req.body ?? {};
-      const useAudio = Boolean(withAudio) && voiceUnlocked;
-      const transcript = JSON.parse(session.transcript);
-      const consultantMsg = transcriptMessageSchema.parse({
-        role: "consultant",
-        content,
-        timestamp: new Date().toISOString(),
-      });
-      transcript.push(consultantMsg);
-
-      const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
-      const msgId = randomUUID();
-      const customerMsg = transcriptMessageSchema.parse({
-        role: "customer",
-        content: customerReplyText,
-        audioStatus: useAudio ? "pending" : "none",
-        // Streamed on demand from this URL (see the sessions route for details).
-        // Gated on useAudio (voiceUnlocked && withAudio), not the raw withAudio
-        // flag, so a client can't force TTS budget spend on a locked session.
-        audioUrl: useAudio ? `/api/demo/session/${session.id}/audio-stream/${msgId}` : undefined,
-        msgId,
-        timestamp: new Date().toISOString(),
-      });
-      transcript.push(customerMsg);
-
-      const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
-      res.json({ session: publicDemoSession(updated!) });
-    } catch (err: any) {
-      console.error(err);
-      res.status(500).json({ message: err.message ?? "Failed to process message" });
-    }
-  });
-
-  // Stream a demo reply's TTS audio on demand (mirrors the sessions endpoint).
-  // Not signup-gated: the request comes from an <audio> element that cannot send
-  // the demo token, and the unguessable msgId is the capability (this matches
-  // the previous unauthenticated /api/audio/<uuid>.mp3 static file behavior).
-  app.get("/api/demo/session/:id/audio-stream/:msgId", async (req, res) => {
-    const session = await storage.getDemoSession(Number(req.params.id));
-    if (!session) return res.status(404).end();
-    // Server-side re-check: voice is only unlocked on the third free session
-    // (see isVoiceUnlockedForDemo). The JSON response only includes audioUrl
-    // when unlocked, but that alone doesn't stop a crafted direct request to
-    // this URL from spending TTS budget on a locked session, so gate here too.
-    if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
-      return res.status(403).end();
-    }
-    const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
-    const msg = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
-    if (!msg) return res.status(404).end();
-    const scenario = await storage.getScenario(session.scenarioId);
-    if (!scenario) return res.status(404).end();
-    await streamMessageAudio(res, {
-      msgId: req.params.msgId,
-      text: msg.content,
-      voice: getVoiceForScenario(scenario.slug, scenario.gender),
-      instructions: getVoiceInstructionsForScenario(scenario.slug),
-      setStatus: (status) => updateDemoMsgAudioStatus(session.id, req.params.msgId, status),
-    });
-  });
-
-  // End & score a demo session with the SAME rubric as real sessions. The demo
-  // ends naturally (no time limit, no incomplete-consultation gate).
-  app.post("/api/demo/session/:id/complete", async (req, res) => {
-    try {
-      const signup = await requireDemoSignup(req, res);
-      if (!signup) return;
-      const session = await storage.getDemoSession(Number(req.params.id));
-      if (!session || session.signupId !== signup.id) {
-        return res.status(404).json({ message: "Session not found" });
-      }
-      const transcript = JSON.parse(session.transcript);
-      const scenario = await storage.getScenario(session.scenarioId);
-      const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
-      const updated = await storage.updateDemoSession(session.id, {
-        status: "completed",
-        score: overall,
-        rubricScores: JSON.stringify(rubric),
-        feedback,
-        completedAt: new Date().toISOString(),
-      });
-      res.json({ session: publicDemoSession(updated!) });
-    } catch (err: any) {
-      console.error(err);
-      res.status(500).json({ message: err.message ?? "Failed to score session" });
-    }
-  });
-
   // Post-demo CTA lead capture. Reuses the existing contact/lead flow (creates a
   // contact + fires the same best-effort notification email). The team-size
   // answer is folded into the message so it shows in the admin CRM.
@@ -2252,12 +2017,12 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     res.status(201).json({ ok: true, id: lead.id });
   });
 
-  // The parallel /api/demo-v2/* flow (industry choice + no-repeat rotation). Its
-  // handlers live in server/demoV2Routes.ts and none of the routes above are
-  // altered by this call. clientIp, demoLimiter, streamMessageAudio and
-  // updateDemoMsgAudioStatus are module-private here, so they are passed in
-  // rather than duplicated: v2 shares this exact demoLimiter instance, meaning
-  // one visitor cannot use the second flow to double their rate-limit budget.
+  // The public demo session flow (industry choice + no-repeat rotation), which
+  // owns /api/demo/options and every /api/demo/session* path. clientIp,
+  // demoLimiter, streamMessageAudio and updateDemoMsgAudioStatus are
+  // module-private here, so they are passed in rather than duplicated: the demo
+  // shares this exact demoLimiter instance with the code/verify/lead routes
+  // above, so one visitor cannot split their rate-limit budget across the two.
   registerDemoV2Routes(app, {
     clientIp,
     demoLimiter,

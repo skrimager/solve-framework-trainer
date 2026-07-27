@@ -1148,10 +1148,14 @@ Stay conversational, natural, and realistic — like a real person, not a script
   // ─────────────────────────────────────────────────────────────
   // DEMO V2 (public free demo: industry choice + no-repeat rotation)
   // ─────────────────────────────────────────────────────────────
-  // Three Auto and three Real Estate scenarios for the /api/demo-v2/* flow (see
-  // server/demoV2.ts). active:false keeps them out of the trainee scenario
-  // picker and the certification pool exactly like the two rows above; the demo
-  // reaches them by slug only. All prose lives in personaVariantSeed, and the
+  // Three Auto and three Real Estate scenarios for the public demo at /api/demo/*
+  // (see server/demoV2.ts). These are active:true because they are the live demo
+  // content rather than a staging pool. active:true alone would put them in front
+  // of paying trainees, so they are kept out of every trainee-facing pool by slug
+  // instead: see realTrainingScenarios in server/routes.ts, which is what
+  // GET /api/scenarios and the certification expert picker now filter through.
+  // The demo itself reaches them by slug and ignores `active` either way. All
+  // prose lives in personaVariantSeed, and the
   // merge loop at the bottom of this file stamps personaCore plus the three
   // variation pools onto these rows at module load, so a first insertion already
   // carries the structured fields. customerPersona is the legacy freeform column
@@ -1163,7 +1167,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Price-Only Caller Burned by His Last Vehicle",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A caller wants nothing but an out-the-door price on one specific SUV. Practice a warm discovery conversation: find out what he actually uses the vehicle for and what went wrong last time before you talk numbers.",
     description:
@@ -1176,7 +1180,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Retired Couple Trading In, Nothing Fancy",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A retired couple wants to trade in a nine-year-old sedan for something newer and says nothing fancy. Practice a warm discovery conversation: understand how they actually use the vehicle and what a comfortable payment looks like before recommending anything.",
     description:
@@ -1189,7 +1193,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     title: "Demo: Cheap and Reliable, Nothing Too Fast",
     vertical: "auto_sales",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're an auto sales consultant. A customer wants something cheap and reliable for her kid. Practice a warm discovery conversation: find out who is actually going to be driving it and what she genuinely needs before you show her the cheapest thing on the lot.",
     description:
@@ -1203,7 +1207,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A couple in their seventies say they're just looking at something smaller, nothing serious yet. Practice a warm discovery conversation: understand why now and what matters most before talking listings.",
     description:
@@ -1217,7 +1221,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A buyer asks what's on the market in one specific neighborhood. Practice a warm discovery conversation: understand his timeline and who is moving with him before reciting inventory.",
     description:
@@ -1231,7 +1235,7 @@ Stay conversational, natural, and realistic — like a real person, not a script
     vertical: "real_estate",
     transactionType: "re_buyer_agent",
     difficulty: "beginner",
-    active: false,
+    active: true,
     briefing:
       "You're a real estate agent. A first-time buyer asks for the cheapest thing you have. Practice a warm discovery conversation: find out what is behind the focus on price before sending listings.",
     description:

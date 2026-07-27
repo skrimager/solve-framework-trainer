@@ -1,17 +1,20 @@
-// Demo v2 HTTP surface: /api/demo-v2/*. A parallel flow to /api/demo/*, which is
-// left completely untouched. The difference is the visitor picks an industry
-// before every session and never sees the same scenario twice inside an industry
-// (see pickNextV2Scenario). Everything else is deliberately the same code as the
-// real platform: the same roleplay pipeline, the same scoreTranscript call with
-// the same four arguments, the same rubric, the same 85 standard, the same
-// beginner leniency, the same score cache. Nothing about scoring is re-derived
-// here.
+// Demo v2 HTTP surface. This is the only demo session flow: the visitor picks an
+// industry before every session and never sees the same scenario twice inside an
+// industry (see pickNextV2Scenario). Everything else is deliberately the same
+// code as the real platform: the same roleplay pipeline, the same scoreTranscript
+// call with the same four arguments, the same rubric, the same 85 standard, the
+// same beginner leniency, the same score cache. Nothing about scoring is
+// re-derived here.
 //
-// Email verification is NOT duplicated. The v2 client calls the existing
+// These handlers answer under DEMO_API_BASE (/api/demo/*). They were originally
+// mounted at /api/demo-v2/* alongside the retired v1 session routes; that
+// parallel prefix is gone and only this flow serves /api/demo/session*.
+//
+// Email verification is NOT duplicated. The client calls the existing
 // /api/demo/request-code and /api/demo/verify, which only touch demo_signups and
 // are flow-agnostic; the signed token they mint is accepted here unchanged. Lead
-// capture likewise reuses /api/demo/lead. That keeps one copy of the code-email
-// path and one copy of the per-email session counter.
+// capture likewise reuses /api/demo/lead. Those three routes are registered in
+// server/routes.ts and are the only demo routes not defined in this file.
 import type { Express, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -69,6 +72,10 @@ export type DemoV2Deps = {
 
 export const DEMO_V2_FLOW = "v2";
 
+// The public demo's URL prefix. Declared once so the route registrations and the
+// audio-stream URL handed to the client can never drift apart.
+export const DEMO_API_BASE = "/api/demo";
+
 function publicDemoSession(s: DemoSession) {
   return {
     id: s.id,
@@ -116,14 +123,14 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
   // The industry choices, served rather than hardcoded in the client, so the two
   // never drift apart.
-  app.get("/api/demo-v2/options", (_req, res) => {
+  app.get(`${DEMO_API_BASE}/options`, (_req, res) => {
     res.json({ options: DEMO_V2_INDUSTRIES });
   });
 
-  // Start a session in the chosen industry. Same three caps as v1 (email,
-  // device, IP), same increment-before-create ordering so a refresh cannot buy a
-  // fourth run, and the same shared per-email counter.
-  app.post("/api/demo-v2/session", async (req, res) => {
+  // Start a session in the chosen industry. All three fair-use caps (email,
+  // device, IP) are enforced here, with increment-before-create ordering so a
+  // refresh cannot buy a fourth run.
+  app.post(`${DEMO_API_BASE}/session`, async (req, res) => {
     if (!demoLimiter.check(clientIp(req))) {
       return res.status(429).json({ message: "Too many requests. Please try again shortly." });
     }
@@ -235,7 +242,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     });
   });
 
-  app.get("/api/demo-v2/session/:id", async (req, res) => {
+  app.get(`${DEMO_API_BASE}/session/:id`, async (req, res) => {
     const signup = await requireDemoSignup(req, res);
     if (!signup) return;
     const session = await storage.getDemoSession(Number(req.params.id));
@@ -247,7 +254,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
   // A conversational turn. Identical to v1: same getCustomerReply, escalation
   // tier pinned to 0, same voice gating on the third session only.
-  app.post("/api/demo-v2/session/:id/message", async (req, res) => {
+  app.post(`${DEMO_API_BASE}/session/:id/message`, async (req, res) => {
     try {
       if (!demoLimiter.check(clientIp(req))) {
         return res.status(429).json({ message: "Too many requests. Please slow down." });
@@ -281,7 +288,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
           role: "customer",
           content: customerReplyText,
           audioStatus: useAudio ? "pending" : "none",
-          audioUrl: useAudio ? `/api/demo-v2/session/${session.id}/audio-stream/${msgId}` : undefined,
+          audioUrl: useAudio ? `${DEMO_API_BASE}/session/${session.id}/audio-stream/${msgId}` : undefined,
           msgId,
           timestamp: new Date().toISOString(),
         }),
@@ -295,11 +302,11 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     }
   });
 
-  // Not signup-gated for the same reason as v1: the request comes from an
-  // <audio> element that cannot carry the demo token, and the unguessable msgId
-  // is the capability. Voice is re-checked server side so a crafted request
-  // cannot spend TTS budget on a locked session.
-  app.get("/api/demo-v2/session/:id/audio-stream/:msgId", async (req, res) => {
+  // Not signup-gated: the request comes from an <audio> element that cannot carry
+  // the demo token, and the unguessable msgId is the capability. Voice is
+  // re-checked server side so a crafted request cannot spend TTS budget on a
+  // locked session.
+  app.get(`${DEMO_API_BASE}/session/:id/audio-stream/:msgId`, async (req, res) => {
     const session = await storage.getDemoSession(Number(req.params.id));
     if (!session) return res.status(404).end();
     if (!isVoiceUnlockedForDemo(session.sessionNumber, session.email)) {
@@ -325,7 +332,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
   // both borrowed from real sessions: the completeness gate, so a two-line
   // conversation is not scored as a legitimate attempt, and the stalled-step
   // diagnosis in the payload.
-  app.post("/api/demo-v2/session/:id/complete", async (req, res) => {
+  app.post(`${DEMO_API_BASE}/session/:id/complete`, async (req, res) => {
     try {
       const signup = await requireDemoSignup(req, res);
       if (!signup) return;

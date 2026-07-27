@@ -395,7 +395,7 @@ function IndustryStep({
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const { data: options, isLoading, isError } = useQuery<DemoV2Industry[]>({
-    queryKey: ["/api/demo-v2/options"],
+    queryKey: ["/api/demo/options"],
     queryFn: () => demoV2Api.options(),
   });
 
@@ -580,7 +580,7 @@ function Roleplay({
     mutationFn: ({ content, withAudio }: { content: string; withAudio: boolean }) =>
       demoV2Api.sendMessage(token, sessionId, content, withAudio),
     onSuccess: (updated: DemoV2Session) => {
-      queryClient.setQueryData(["/api/demo-v2/session", sessionId], updated);
+      queryClient.setQueryData(["/api/demo/session", sessionId], updated);
       voiceRef.current?.handleReply(parseTranscript(updated.transcript));
       setLastFailedMessage(null);
     },
@@ -591,7 +591,7 @@ function Roleplay({
     send: (content, withAudio) => sendMessage.mutate({ content, withAudio }),
     isSending: sendMessage.isPending,
     onReplyAudioSettled: () =>
-      queryClient.invalidateQueries({ queryKey: ["/api/demo-v2/session", sessionId] }),
+      queryClient.invalidateQueries({ queryKey: ["/api/demo/session", sessionId] }),
   });
   voiceRef.current = voice;
 
@@ -609,7 +609,7 @@ function Roleplay({
   } = voice;
 
   const { data: session } = useQuery<DemoV2Session>({
-    queryKey: ["/api/demo-v2/session", sessionId],
+    queryKey: ["/api/demo/session", sessionId],
     queryFn: () => demoV2Api.getSession(token, sessionId),
     initialData: initialSession,
   });

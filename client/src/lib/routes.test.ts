@@ -59,6 +59,15 @@ describe("chooser and canonical routes", () => {
     assert.equal(matchFirst("/demo"), "demo");
     assert.equal(ROUTES.demo, "/demo");
   });
+
+  // The industry-choice demo shipped behind a temporary parallel /demo-v2 URL and
+  // now serves /demo directly. /demo-v2 is deliberately not a route and not a
+  // redirect, so it 404s like any other unknown path.
+  test("the temporary /demo-v2 path is gone, with no route and no redirect", () => {
+    assert.equal(matchFirst("/demo-v2"), null);
+    assert.equal(LEGACY_REDIRECTS["/demo-v2"], undefined);
+    assert.equal(Object.values(ROUTES).includes("/demo-v2" as never), false);
+  });
 });
 
 describe("backward-compatible redirects", () => {

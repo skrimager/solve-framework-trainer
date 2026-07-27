@@ -11,7 +11,7 @@ export type DemoV2Industry = {
   blurb: string;
 };
 
-// Served from GET /api/demo-v2/options so the client never hardcodes this list.
+// Served from GET /api/demo/options so the client never hardcodes this list.
 export const DEMO_V2_INDUSTRIES: DemoV2Industry[] = [
   {
     key: "auto",

@@ -7,6 +7,13 @@ import type { DemoSignup, InsertDemoSignup, DemoSession } from "@shared/schema";
 // pure (no DB/HTTP) so it can be unit-tested directly. The demo is separate
 // from every seat-gated flow: an anonymous visitor verifies ONE email via a
 // 6-digit code, and that verified email is capped at MAX_DEMO_SESSIONS all-time.
+//
+// This module is still live: the token, cap, abuse-analytics and email helpers
+// below are what the current demo (server/demoV2Routes.ts) and the admin demo
+// report run on. What IS retired is the original single-scenario session flow
+// that these helpers were first written for, so the two-option scenario picker
+// (DEMO_SCENARIO_OPTIONS / demoScenarioSlugForKey) is now reference-only apart
+// from the lead route reading the default scenario's track.
 // ---------------------------------------------------------------------------
 
 // A verified visitor gets this many free roleplay sessions, ever, per email.
