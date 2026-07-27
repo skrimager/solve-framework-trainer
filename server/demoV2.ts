@@ -65,8 +65,8 @@ export type DemoV2PriorSession = { scenarioId: number };
  *
  * Exclusion is scoped per industry: the caller passes every v2 session for the
  * email, and scenarios from the other industry simply never match a candidate,
- * so three Real Estate sessions in a row yield three distinct Real Estate
- * scenarios regardless of how much Auto history exists.
+ * so repeated Real Estate sessions yield distinct Real Estate scenarios
+ * regardless of how much Auto history exists.
  */
 export function pickNextV2Scenario(
   industryKey: DemoV2IndustryKey,
@@ -82,9 +82,9 @@ export function pickNextV2Scenario(
   const unseen = candidates.find((option) => !seen.has(option.id));
   if (unseen) return unseen;
 
-  // Exhaustion fallback. Unreachable with three scenarios and a three-session
-  // cap, but a shrunken pool (a scenario deactivated mid-flight) must degrade to
-  // a repeat rather than a 500. Least recently used: the candidate whose most
+  // Exhaustion fallback. Unreachable while the per-industry pool is larger than
+  // the number of sessions one visitor can run, but a shrunken pool (a scenario
+  // deactivated mid-flight) must degrade to a repeat rather than a 500. Least recently used: the candidate whose most
   // recent appearance in this email's history is furthest back.
   const lastSeenAt = new Map<number, number>();
   priorSessions.forEach((session, index) => {

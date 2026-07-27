@@ -60,8 +60,8 @@ function AppRouter() {
       {/* Public free voice demo: no auth. The email+code verification and a
           signed demo token gate it server-side, so it stays outside RequireAuth
           and never touches the trainee/admin login flows. The visitor picks an
-          industry before each of their three conversations and never repeats a
-          scenario within one. This URL is what the marketing site links to, so it
+          industry, runs their one free conversation, then lands on the
+          membership / pay-per-session fork. This URL is what the marketing site links to, so it
           stays /demo; the earlier single-scenario page it replaced is retired but
           kept at pages/demo.tsx for reference. There is deliberately no parallel
           /demo-v2 route. */}

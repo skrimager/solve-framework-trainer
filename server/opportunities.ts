@@ -351,7 +351,7 @@ export function buildInboundDay3Body(name: string | null | undefined): string {
 
 A few days ago you signed up to try the SOLVE Framework — I wanted to check in personally.
 
-If you haven't run a practice session yet, no pressure. Just know your three free sessions are sitting there whenever you're ready. Pick any conversation that feels close to a real one you have often, and just talk to it the way you naturally would. That's it.
+If you haven't run a practice session yet, no pressure. Just know your free practice session is sitting there whenever you're ready. Pick any conversation that feels close to a real one you have often, and just talk to it the way you naturally would. That's it.
 
 If you have already run one — did you read your SOLVE Coach feedback afterward? That's genuinely where most people tell me the real "aha" moment happens. The practice conversation teaches you something. The coaching afterward is what actually changes how you show up next time.
 

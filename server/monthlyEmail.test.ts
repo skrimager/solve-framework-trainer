@@ -100,7 +100,7 @@ describe("monthly copy", () => {
   });
 
   test("demo segment nudges conversion; paying segment nudges re-engagement", () => {
-    assert.match(buildMonthlyDemoBody("d@x.com"), /removes the three-session cap/i);
+    assert.match(buildMonthlyDemoBody("d@x.com"), /removes the free-session cap/i);
     assert.match(buildMonthlyPayingBody("p@x.com"), /monthly nudge/i);
   });
 });

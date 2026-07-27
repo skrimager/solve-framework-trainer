@@ -167,9 +167,15 @@ describe("demo v2 industry metadata", () => {
     assert.equal(isDemoV2Industry(undefined), false);
   });
 
-  test("three scenarios per industry, matching the three-session cap", () => {
-    assert.equal(DEMO_V2_SLUGS.auto.length, MAX_DEMO_SESSIONS);
-    assert.equal(DEMO_V2_SLUGS.real_estate.length, MAX_DEMO_SESSIONS);
+  // The pool stays at three per industry even though the free allowance is now
+  // one session. Allowlisted founder emails run many sessions back to back and
+  // must not repeat a customer, and the pool is what a paid session will draw
+  // from, so shrinking it to match the free cap would be a regression.
+  test("three scenarios per industry, a pool wider than the free-session cap", () => {
+    assert.equal(DEMO_V2_SLUGS.auto.length, 3);
+    assert.equal(DEMO_V2_SLUGS.real_estate.length, 3);
+    assert.ok(DEMO_V2_SLUGS.auto.length > MAX_DEMO_SESSIONS);
+    assert.ok(DEMO_V2_SLUGS.real_estate.length > MAX_DEMO_SESSIONS);
   });
 });
 
@@ -403,6 +409,7 @@ describe("demo v2 endpoints", () => {
   afterEach(() => {
     __setFetchForTests(null);
     delete process.env.RESEND_API_KEY;
+    delete process.env.UNLIMITED_DEMO_EMAILS;
   });
 
   // Each request gets a fresh IP so the per-IP cap and the shared rate limiter
@@ -438,6 +445,13 @@ describe("demo v2 endpoints", () => {
   // created with an empty transcript and the pick is still observable.
   async function runSequence(email: string, choices: ("auto" | "real_estate")[]): Promise<number[]> {
     verifiedSignup(email);
+    // The free allowance is a single session, so running several in a row on one
+    // email is only reachable for an allowlisted (founder) address. The picker's
+    // no-repeat guarantee still has to hold across those runs, which is what
+    // these sequences pin.
+    if (choices.length > MAX_DEMO_SESSIONS) {
+      process.env.UNLIMITED_DEMO_EMAILS = normalizeEmail(email);
+    }
     const token = signDemoToken(email);
     const picks: number[] = [];
     for (const industry of choices) {
@@ -528,7 +542,7 @@ describe("demo v2 endpoints", () => {
     assert.equal(res.status, 401);
   });
 
-  test("the per-email cap still blocks a fourth conversation", async () => {
+  test("the per-email cap blocks a second conversation once the free one is used", async () => {
     const signup = verifiedSignup("capped@example.com");
     signup.sessionsUsed = MAX_DEMO_SESSIONS;
     const token = signDemoToken("capped@example.com");
@@ -540,7 +554,7 @@ describe("demo v2 endpoints", () => {
     assert.equal(sessions.length, 0);
   });
 
-  test("usage is incremented at start, so a refresh cannot buy a fourth run", async () => {
+  test("usage is incremented at start, so a refresh cannot buy an extra run", async () => {
     await runSequence("counted@example.com", ["auto"]);
     assert.equal(signups[0].sessionsUsed, 1);
   });
@@ -634,6 +648,9 @@ describe("demo v2 endpoints", () => {
 // server/turnStream.test.ts for the real path's own pin).
 
 describe("demo v2 streamed replies", () => {
+  // Allowlisted, so its sessions have voice; the other address never does.
+  const STREAM_EMAIL = "wadeskrimager@icloud.com";
+  const LOCKED_EMAIL = "streamer@example.com";
   let server: Server;
   let baseUrl: string;
   let signups: DemoSignup[];
@@ -655,9 +672,17 @@ describe("demo v2 streamed replies", () => {
 
   beforeEach(() => {
     signups = [
+      // Voice is gated on paid sessions, and nothing is purchasable yet, so the
+      // allowlisted founder address is the only one that streams today.
       {
         id: 1,
-        email: normalizeEmail("streamer@example.com"),
+        email: normalizeEmail(STREAM_EMAIL),
+        verified: true,
+        sessionsUsed: MAX_DEMO_SESSIONS,
+      } as DemoSignup,
+      {
+        id: 2,
+        email: normalizeEmail(LOCKED_EMAIL),
         verified: true,
         sessionsUsed: MAX_DEMO_SESSIONS,
       } as DemoSignup,
@@ -678,7 +703,8 @@ describe("demo v2 streamed replies", () => {
         track: "consulting",
       } as unknown as Scenario,
     ];
-    // Voice unlocks on the third session, which is the only one that streams.
+    // Session 1 belongs to the allowlisted email and streams; session 2 belongs
+    // to an ordinary visitor and must stay text-only.
     sessions = [
       {
         id: 1,
@@ -689,7 +715,19 @@ describe("demo v2 streamed replies", () => {
         transcript: JSON.stringify([
           { role: "customer", content: "What have you got that's cheap?", timestamp: "t0" },
         ]),
-        sessionNumber: MAX_DEMO_SESSIONS,
+        sessionNumber: 1,
+        flow: "v2",
+      } as unknown as DemoSession,
+      {
+        id: 2,
+        signupId: 2,
+        email: signups[1].email,
+        scenarioId: 91,
+        status: "in_progress",
+        transcript: JSON.stringify([
+          { role: "customer", content: "What have you got that's cheap?", timestamp: "t0" },
+        ]),
+        sessionNumber: 1,
         flow: "v2",
       } as unknown as DemoSession,
     ];
@@ -733,7 +771,7 @@ describe("demo v2 streamed replies", () => {
 
   async function sendVoiceTurn() {
     const res = await post("/api/demo/session/1/message", {
-      token: signDemoToken("streamer@example.com"),
+      token: signDemoToken(STREAM_EMAIL),
       content: "What's it for?",
       withAudio: true,
       stream: true,
@@ -807,20 +845,18 @@ describe("demo v2 streamed replies", () => {
   // not allowed to consume. The reply itself needs a live model, which the suite
   // deliberately does not have, so this asserts the branch and not the reply.
   test("a turn with voice locked never opens a stream", async () => {
-    sessions[0].sessionNumber = 1;
-    const res = await post("/api/demo/session/1/message", {
-      token: signDemoToken("streamer@example.com"),
+    const res = await post("/api/demo/session/2/message", {
+      token: signDemoToken(LOCKED_EMAIL),
       content: "What's it for?",
       withAudio: true,
       stream: true,
     });
     assert.equal((await res.json()).replyStreamUrl, undefined);
-    assert.ok(!transcriptOf(1).some((m) => m.audioStatus === "pending"));
+    assert.ok(!transcriptOf(2).some((m) => m.audioStatus === "pending"));
   });
 
   test("the stream endpoint refuses a session whose voice is still locked", async () => {
-    sessions[0].sessionNumber = 1;
-    const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/anything`);
+    const res = await fetch(`${baseUrl}/api/demo/session/2/turn-stream/anything`);
     assert.equal(res.status, 403);
   });
 

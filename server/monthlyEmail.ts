@@ -78,13 +78,13 @@ export function buildMonthlyDemoBody(email: string): string {
 
 That is not a slogan. The professionals who keep the most deals alive are the ones who keep practicing the conversation before it happens for real.
 
-You tried the SOLVE Framework demo, and your free practice sessions showed you how it works: real conversations, scored by your SOLVE Coach, with feedback on exactly where trust was won or lost.
+You tried the SOLVE Framework demo, and your free practice session showed you how it works: real conversations, scored by your SOLVE Coach, with feedback on exactly where trust was won or lost.
 
-A full account removes the three-session cap and gives you the complete scenario library, so you can practice the exact conversations your role runs into, as often as you want.
+A full account removes the free-session cap and gives you the complete scenario library, so you can practice the exact conversations your role runs into, as often as you want.
 
 Get Started: ${GET_STARTED_URL}
 
-Or run another free practice session first: ${DEMO_URL}`;
+Or revisit the demo first: ${DEMO_URL}`;
   return body + unsubscribeFooter(email, "You are getting this because you started a SOLVE Framework demo.");
 }
 

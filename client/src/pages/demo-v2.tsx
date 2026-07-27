@@ -1,9 +1,10 @@
 // Demo v2 page. Same structural components and styling as the original demo page
-// but a different shape of flow: the visitor picks an industry before each of
-// their three conversations, and the server guarantees a scenario they have not
-// seen in that industry. Copied and adapted from client/src/pages/demo.tsx rather
-// than importing from it, so the original demo cannot be broken by changes here.
+// but a different shape of flow: the visitor picks an industry, runs their one
+// free conversation, and then lands on the membership / pay-per-session fork.
+// Copied and adapted from client/src/pages/demo.tsx rather than importing from
+// it, so the original demo cannot be broken by changes here.
 import { useState, useRef, useEffect } from "react";
+import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,12 @@ import {
 } from "@/lib/demoV2Api";
 import { getDeviceFingerprint } from "@/lib/fingerprint";
 import {
+  MEMBER_OPTION,
+  MEMBER_SIGNUP_PATH,
+  PAY_PER_SESSION_INTEREST,
+  PAY_PER_SESSION_OPTION,
+} from "@/lib/demoPaywall";
+import {
   Volume2,
   Send,
   Loader2,
@@ -33,6 +40,7 @@ import {
   User,
   Phone,
   CheckCircle2,
+  X,
 } from "lucide-react";
 import type {
   RubricScores,
@@ -64,12 +72,8 @@ function isLeadershipRubric(r: Record<string, number>): r is LeadershipRubricSco
 
 type Step = "landing" | "email" | "code" | "industry" | "roleplay" | "results";
 
-const TOTAL_FREE_SESSIONS = 3;
-
 // Brand palette (shared with the rest of the app).
 const ORANGE = "#E06D00";
-
-const REQUEST_ACCESS_URL = "https://www.solveframework.com/#pricing";
 
 export default function DemoV2() {
   const [step, setStep] = useState<Step>("landing");
@@ -79,10 +83,6 @@ export default function DemoV2() {
   const [industry, setIndustry] = useState<string | null>(null);
   const [finalSession, setFinalSession] = useState<DemoV2Session | null>(null);
   const [stalledStep, setStalledStep] = useState<string | null>(null);
-  // 1-based ordinal of the conversation the visitor is about to run or just ran.
-  const [sessionNumber, setSessionNumber] = useState(1);
-
-  const finished = sessionNumber >= TOTAL_FREE_SESSIONS;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -118,7 +118,6 @@ export default function DemoV2() {
 
         {step === "industry" && (
           <IndustryStep
-            sessionNumber={sessionNumber}
             onChoose={(key) => {
               setIndustry(key);
               setStep("roleplay");
@@ -148,19 +147,6 @@ export default function DemoV2() {
             stalledStep={stalledStep}
             email={email}
             limitReached={limitReached}
-            sessionNumber={sessionNumber}
-            showClosing={finished || limitReached}
-            onNext={
-              finished || limitReached
-                ? null
-                : () => {
-                    setSessionNumber(sessionNumber + 1);
-                    setFinalSession(null);
-                    setStalledStep(null);
-                    setIndustry(null);
-                    setStep("industry");
-                  }
-            }
           />
         )}
       </div>
@@ -172,26 +158,25 @@ function Landing({ onStart }: { onStart: () => void }) {
   return (
     <div className="space-y-6 text-center">
       <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-        <Phone className="h-3.5 w-3.5" /> Free live voice practice
+        <Phone className="h-3.5 w-3.5" /> Free AI practice conversation
       </div>
       <h1 className="text-3xl font-bold tracking-tight" data-testid="text-demo-v2-heading">
-        Three free practice conversations. No credit card.
+        One free practice conversation. No credit card.
       </h1>
       <p className="mx-auto max-w-xl text-muted-foreground">
-        Pick Auto or Real Estate for each one, and every conversation you run will
-        be different, just like real customers. Our AI plays a customer whose real
-        motivation sits underneath what they first ask for. Talk to them like a real
-        call, dig for what they actually need, and get scored on your discovery.
+        Pick Auto or Real Estate, and our AI plays a customer whose real motivation
+        sits underneath what they first ask for. Talk to them like a real call, dig
+        for what they actually need, and get scored on your discovery.
       </p>
 
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          Choose your industry fresh before every conversation.
+          Choose the industry you actually sell in.
         </li>
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          You will never get the same customer twice inside an industry.
+          A customer whose real motivation is not what they open with.
         </li>
         <li className="flex items-start gap-2">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -233,8 +218,8 @@ function EmailStep({
         Where should we send your access code?
       </h2>
       <p className="text-sm text-muted-foreground">
-        Enter your email and we'll send a 6-digit code to start your three free
-        conversations.
+        Enter your email and we'll send a 6-digit code to start your free
+        conversation.
       </p>
       <form
         className="space-y-3"
@@ -383,16 +368,11 @@ function CodeStep({
   );
 }
 
-// The per-session industry picker. Options come from the server so this list and
-// the server's scenario pools cannot drift apart. Repeating an industry is
-// allowed: the server just hands over a customer the visitor has not met yet.
-function IndustryStep({
-  sessionNumber,
-  onChoose,
-}: {
-  sessionNumber: number;
-  onChoose: (key: string) => void;
-}) {
+// The industry picker. Options come from the server so this list and the
+// server's scenario pools cannot drift apart. The server hands over a customer
+// the visitor has not met yet, which still matters for allowlisted emails and
+// for any future paid session.
+function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const { data: options, isLoading, isError } = useQuery<DemoV2Industry[]>({
     queryKey: ["/api/demo/options"],
@@ -417,12 +397,12 @@ function IndustryStep({
   return (
     <div className="space-y-6 text-center">
       <p className="text-sm font-medium text-muted-foreground" data-testid="text-demo-v2-session-counter">
-        Conversation {sessionNumber} of {TOTAL_FREE_SESSIONS}
+        Your free practice conversation
       </p>
-      <h2 className="text-2xl font-semibold">Which industry do you want this time?</h2>
+      <h2 className="text-2xl font-semibold">Which industry do you want?</h2>
       <p className="mx-auto max-w-xl text-sm text-muted-foreground">
-        Pick either one. You can repeat an industry as many times as you like, and
-        you will get a customer you have not talked to yet each time.
+        Pick either one. You will meet a customer whose real motivation sits
+        underneath the request they open with.
       </p>
 
       <div
@@ -673,7 +653,7 @@ function Roleplay({
             </>
           ) : (
             <span className="text-xs text-muted-foreground" data-testid="text-demo-v2-voice-locked">
-              Voice unlocks on your third conversation
+              Voice unlocks on paid sessions
             </span>
           )}
         </div>
@@ -833,22 +813,18 @@ function Roleplay({
   );
 }
 
+// The free session's results, then the fork. There is no next free session to
+// start, so the only forward paths are membership or a purchased session.
 function ResultsAndCta({
   session,
   stalledStep,
   email,
   limitReached,
-  sessionNumber,
-  showClosing,
-  onNext,
 }: {
   session: DemoV2Session | null;
   stalledStep: string | null;
   email: string;
   limitReached: boolean;
-  sessionNumber: number;
-  showClosing: boolean;
-  onNext: (() => void) | null;
 }) {
   const rubric: Record<string, number> | null = session?.rubricScores
     ? parseRubric(session.rubricScores)
@@ -861,22 +837,12 @@ function ResultsAndCta({
       {limitReached ? (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">You've used all your free practice conversations</CardTitle>
+            <CardTitle className="text-lg">You've used your free practice conversation</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4 text-sm text-muted-foreground">
+          <CardContent className="text-sm text-muted-foreground">
             <p data-testid="text-demo-v2-limit-reached">
-              Ready for unlimited practice, coaching, and certification? Get full
-              access for you and your whole team below.
+              Ready to keep practicing? Choose one of the options below.
             </p>
-            <Button
-              asChild
-              style={{ backgroundColor: ORANGE, color: "white" }}
-              data-testid="button-demo-v2-request-access"
-            >
-              <a href={REQUEST_ACCESS_URL} target="_blank" rel="noopener noreferrer">
-                Request Access
-              </a>
-            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -929,35 +895,191 @@ function ResultsAndCta({
         )
       )}
 
-      {onNext && (
-        <div className="flex flex-col items-center gap-2">
-          <Button size="lg" onClick={onNext} data-testid="button-demo-v2-next-session">
-            Start conversation {sessionNumber + 1} of {TOTAL_FREE_SESSIONS}
-          </Button>
-          <p className="text-xs text-muted-foreground">
-            Pick either industry again. It will be a different customer.
-          </p>
-        </div>
-      )}
+      <NextStepFork email={email} />
 
-      {showClosing && !limitReached && (
-        <Card>
-          <CardContent className="space-y-2 py-6">
-            <p className="font-medium" data-testid="text-demo-v2-closing">
-              Three conversations. Three different customers, three different
-              motivations.
-            </p>
-            <p className="text-sm text-muted-foreground">
-              You had to dig for each one, that's the point. The full platform has
-              hundreds of conversations across every industry and difficulty level,
-              and none of them let you coast.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {showClosing && <CtaForm email={email} />}
+      <CtaForm email={email} />
     </div>
+  );
+}
+
+// The post-free-session fork. Two options, membership visually dominant, with
+// no lime green anywhere: emphasis comes from size, border, tint and weight,
+// since lime is reserved for admin/vault.
+function NextStepFork({ email }: { email: string }) {
+  const [showInterest, setShowInterest] = useState(false);
+
+  return (
+    <div className="grid gap-4 md:grid-cols-5" data-testid="demo-v2-next-step-fork">
+      <Card
+        className="border-2 shadow-lg md:col-span-3"
+        style={{ borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.05)" }}
+        data-testid="demo-v2-fork-member"
+      >
+        <CardHeader className="space-y-2">
+          <span
+            className="w-fit rounded-full px-2.5 py-1 text-xs font-semibold text-white"
+            style={{ backgroundColor: ORANGE }}
+            data-testid="text-demo-v2-fork-member-badge"
+          >
+            {MEMBER_OPTION.badge}
+          </span>
+          <CardTitle className="text-2xl" data-testid="text-demo-v2-fork-member-headline">
+            {MEMBER_OPTION.headline}
+          </CardTitle>
+          <p className="text-sm font-medium text-foreground">{MEMBER_OPTION.subhead}</p>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <ul className="space-y-2 text-sm">
+            {MEMBER_OPTION.features.map((feature) => (
+              <li key={feature} className="flex items-start gap-2.5">
+                <span
+                  className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: ORANGE }}
+                  aria-hidden="true"
+                />
+                {feature}
+              </li>
+            ))}
+          </ul>
+          <Button
+            asChild
+            size="lg"
+            className="w-full text-base"
+            style={{ backgroundColor: ORANGE, color: "white" }}
+            data-testid="button-demo-v2-become-member"
+          >
+            <Link href={MEMBER_SIGNUP_PATH}>{MEMBER_OPTION.buttonLabel}</Link>
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="md:col-span-2" data-testid="demo-v2-fork-pay-per-session">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-lg" data-testid="text-demo-v2-fork-pps-headline">
+            {PAY_PER_SESSION_OPTION.headline}
+          </CardTitle>
+          <p className="text-base font-semibold" style={{ color: ORANGE }} data-testid="text-demo-v2-fork-pps-price">
+            {PAY_PER_SESSION_OPTION.priceLine}
+          </p>
+          <p className="text-sm text-muted-foreground">{PAY_PER_SESSION_OPTION.subhead}</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.includesLabel}
+              </p>
+              <ul className="space-y-1.5 text-sm">
+                {PAY_PER_SESSION_OPTION.includes.map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: ORANGE }} aria-hidden="true" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.excludesLabel}
+              </p>
+              <ul className="space-y-1.5 text-sm text-muted-foreground">
+                {PAY_PER_SESSION_OPTION.excludes.map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <X className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" aria-hidden="true" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground" data-testid="text-demo-v2-fork-pps-disclaimer">
+            {PAY_PER_SESSION_OPTION.disclaimer}
+          </p>
+          {showInterest ? (
+            <PayPerSessionInterestForm email={email} />
+          ) : (
+            <Button
+              variant="outline"
+              className="w-full whitespace-normal"
+              style={{ borderColor: ORANGE, color: ORANGE }}
+              // Live $4.99 one-time Stripe charge intentionally deferred to a follow-up PR per product decision (see demo_paywall_redesign_spec.md). This currently captures interest only.
+              onClick={() => setShowInterest(true)}
+              data-testid="button-demo-v2-pay-per-session"
+            >
+              {PAY_PER_SESSION_OPTION.buttonLabel}
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// Interest capture for pay-per-session. Reuses the existing demo lead endpoint
+// (/api/demo/lead, the same one CtaForm posts to) rather than adding a new
+// mechanism, and touches no payment code.
+function PayPerSessionInterestForm({ email }: { email: string }) {
+  const [leadEmail, setLeadEmail] = useState(email);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = useMutation({
+    mutationFn: () =>
+      demoV2Api.submitLead({
+        name: leadEmail,
+        email: leadEmail,
+        message: PAY_PER_SESSION_INTEREST.leadMessage,
+      }),
+    onError: (e: Error) => setError(e.message),
+  });
+
+  if (submit.isSuccess) {
+    return (
+      <div className="space-y-1 rounded-lg border p-3 text-sm" data-testid="text-demo-v2-pps-success">
+        <p className="font-medium">{PAY_PER_SESSION_INTEREST.successHeadline}</p>
+        <p className="text-muted-foreground">{PAY_PER_SESSION_INTEREST.successBody}</p>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="space-y-2 rounded-lg border p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (leadEmail.trim()) submit.mutate();
+      }}
+      data-testid="form-demo-v2-pps-interest"
+    >
+      <p className="text-sm font-medium" data-testid="text-demo-v2-pps-interest-headline">
+        {PAY_PER_SESSION_INTEREST.headline}
+      </p>
+      <p className="text-sm text-muted-foreground">{PAY_PER_SESSION_INTEREST.body}</p>
+      <Label htmlFor="demo-v2-pps-email" className="sr-only">
+        Email
+      </Label>
+      <Input
+        id="demo-v2-pps-email"
+        type="email"
+        value={leadEmail}
+        onChange={(e) => setLeadEmail(e.target.value)}
+        placeholder="you@company.com"
+        data-testid="input-demo-v2-pps-email"
+      />
+      {error && (
+        <p className="text-sm text-destructive" data-testid="text-demo-v2-pps-error">
+          {error}
+        </p>
+      )}
+      <Button
+        type="submit"
+        className="w-full"
+        style={{ backgroundColor: ORANGE, color: "white" }}
+        disabled={!leadEmail.trim() || submit.isPending}
+        data-testid="button-demo-v2-pps-notify"
+      >
+        {submit.isPending ? "Saving..." : PAY_PER_SESSION_INTEREST.buttonLabel}
+      </Button>
+    </form>
   );
 }
 

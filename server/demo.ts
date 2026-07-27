@@ -17,7 +17,8 @@ import type { DemoSignup, InsertDemoSignup, DemoSession } from "@shared/schema";
 // ---------------------------------------------------------------------------
 
 // A verified visitor gets this many free roleplay sessions, ever, per email.
-export const MAX_DEMO_SESSIONS = 3;
+// One: after it, the results screen forks to membership or a purchased session.
+export const MAX_DEMO_SESSIONS = 1;
 
 // Emails in this allowlist never hit the free-session cap. This exists for the
 // founder's own live sales demos to prospective business customers, where
@@ -162,8 +163,8 @@ export function remainingSessions(sessionsUsed: number, email?: string): number 
 }
 
 // ---------------------------------------------------------------------------
-// Multi-layer abuse protection. These caps sit BEHIND the marketed "3 free
-// sessions per email" promise and only ever surface when someone exceeds fair
+// Multi-layer abuse protection. These caps sit BEHIND the marketed "1 free
+// session per email" promise and only ever surface when someone exceeds fair
 // use (a new email on an already-used device, or many emails from one IP). The
 // legitimate first-time flow never sees them. Every cap is bypassed for
 // allowlisted (founder) emails via isUnlimitedDemoEmail so live sales demos are
@@ -171,8 +172,9 @@ export function remainingSessions(sessionsUsed: number, email?: string): number 
 // ---------------------------------------------------------------------------
 
 // A single device gets this many free sessions total, regardless of how many
-// different emails are used from it. Same number as the per-email cap: a new
-// email on an already-capped device does not reset the count.
+// different emails are used from it. Deliberately above the per-email cap of 1:
+// a shared machine (a showroom floor, a family laptop) should let a few genuine
+// first-time visitors each take their one free session before it stops.
 export const MAX_DEMO_SESSIONS_PER_DEVICE = 3;
 
 // A single IP address gets this many free sessions in any rolling 30-day window.
@@ -296,13 +298,27 @@ export function demoAbuseAnalytics(
   };
 }
 
-// Voice (server-side TTS) is unlocked only on the third free session for cost
-// containment; the first two default to text mode. Allowlisted founder emails
-// always get voice so live sales demos are never text-only. `sessionNumber` is
-// the session's 1-based ordinal for the email.
+// True when the visitor paid for this session, either per-session or through a
+// membership. Always false today: pay-per-session purchasing is stubbed to
+// interest capture only and no purchase is recorded anywhere, so there is
+// nothing to read. It exists as its own function so voice unlock keys off
+// "paid" rather than off a session ordinal.
+// TODO(demo_paywall_redesign_spec.md): return true once a purchased session is
+// persisted, so voice unlocks on paid sessions.
+export function isPaidDemoSession(_sessionNumber: number): boolean {
+  return false;
+}
+
+// Voice (server-side TTS) is unlocked only on a PAID session for cost
+// containment; the single free session is text mode. Under the previous
+// three-session cap this was `sessionNumber >= MAX_DEMO_SESSIONS`, which with a
+// one-session cap would have unlocked voice for every anonymous visitor on
+// their first turn, so the gate is keyed off payment instead of the ordinal.
+// Allowlisted founder emails always get voice so live sales demos are never
+// text-only. `sessionNumber` is the session's 1-based ordinal for the email.
 export function isVoiceUnlockedForDemo(sessionNumber: number, email?: string): boolean {
   if (email && isUnlimitedDemoEmail(email)) return true;
-  return sessionNumber >= MAX_DEMO_SESSIONS;
+  return isPaidDemoSession(sessionNumber);
 }
 
 // Disposable/temporary email domains (mailinator, 10minutemail, guerrillamail,

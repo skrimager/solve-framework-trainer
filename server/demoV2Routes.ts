@@ -136,7 +136,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
   // Start a session in the chosen industry. All three fair-use caps (email,
   // device, IP) are enforced here, with increment-before-create ordering so a
-  // refresh cannot buy a fourth run.
+  // refresh cannot buy an extra run.
   app.post(`${DEMO_API_BASE}/session`, async (req, res) => {
     if (!demoLimiter.check(clientIp(req))) {
       return res.status(429).json({ message: "Too many requests. Please try again shortly." });
@@ -159,7 +159,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     const ip = clientIp(req);
 
     if (isSessionLimitReached(signup.sessionsUsed, signup.email)) {
-      return res.status(403).json({ message: "You've used all 3 free demo sessions.", limitReached: true, remaining: 0, reason: "email" });
+      return res.status(403).json({ message: "You've used your free demo session.", limitReached: true, remaining: 0, reason: "email" });
     }
 
     const deviceCount = fingerprint
@@ -176,7 +176,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
     const pool = await loadDemoV2Pool();
     // Only v2 rows count toward the exclusion set, so a visitor who already ran
-    // the original demo flow still gets all three scenarios here.
+    // the original demo flow still gets an unseen scenario here.
     const priorV2 = (await storage.listDemoSessionsBySignup(signup.id)).filter(
       (row) => row.flow === DEMO_V2_FLOW,
     );
@@ -260,7 +260,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
   });
 
   // A conversational turn. Escalation tier is pinned to 0 and voice is gated to
-  // the third session only. In voice mode the reply is streamed exactly as it is
+  // paid sessions only (see isVoiceUnlockedForDemo). In voice mode the reply is streamed exactly as it is
   // for real trainee sessions: this handler does not block on the LLM, it appends
   // an empty customer placeholder and hands back an SSE URL that the shared
   // streamer fills in sentence by sentence (see /turn-stream below).

@@ -25,6 +25,7 @@ import {
   isIpLimitReached,
   countDemoSessionsInIpWindow,
   isVoiceUnlockedForDemo,
+  isPaidDemoSession,
   isDisposableEmail,
   demoAbuseAnalytics,
   MAX_DEMO_SESSIONS_PER_DEVICE,
@@ -82,6 +83,13 @@ describe("isCodeValid", () => {
 });
 
 describe("session limit helpers", () => {
+  test("the free allowance is exactly one session", () => {
+    assert.equal(MAX_DEMO_SESSIONS, 1);
+    assert.equal(isSessionLimitReached(0), false, "a first-time visitor may practice");
+    assert.equal(isSessionLimitReached(1), true, "a second attempt is blocked");
+    assert.equal(remainingSessions(0), 1);
+  });
+
   test("limit is reached only at or above MAX", () => {
     assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS - 1), false);
     assert.equal(isSessionLimitReached(MAX_DEMO_SESSIONS), true);
@@ -264,11 +272,25 @@ describe("countDemoSessionsInIpWindow (rolling 30-day window)", () => {
   });
 });
 
-describe("isVoiceUnlockedForDemo (cost containment: text default, voice on session 3)", () => {
-  test("sessions 1 and 2 are text-only; session 3 unlocks voice", () => {
+describe("isVoiceUnlockedForDemo (cost containment: voice on paid sessions only)", () => {
+  // The regression this guards: voice used to unlock at
+  // `sessionNumber >= MAX_DEMO_SESSIONS`. Dropping the cap to 1 would have
+  // unlocked TTS for every anonymous visitor on their very first turn.
+  test("a first-time anonymous visitor on the free session gets no voice", () => {
     assert.equal(isVoiceUnlockedForDemo(1), false);
-    assert.equal(isVoiceUnlockedForDemo(2), false);
-    assert.equal(isVoiceUnlockedForDemo(3), true);
+    assert.equal(isVoiceUnlockedForDemo(1, "someoneelse@example.com"), false);
+  });
+
+  test("no session ordinal unlocks voice for a non-allowlisted email", () => {
+    for (const n of [1, 2, 3, 4, 10, MAX_DEMO_SESSIONS]) {
+      assert.equal(isVoiceUnlockedForDemo(n), false, `session ${n}`);
+      assert.equal(isVoiceUnlockedForDemo(n, "someoneelse@example.com"), false, `session ${n}`);
+    }
+  });
+
+  test("no demo session is paid yet, so the paid path never opens voice", () => {
+    assert.equal(isPaidDemoSession(1), false);
+    assert.equal(isPaidDemoSession(99), false);
   });
 
   test("allowlisted founder email always has voice, even on session 1", () => {

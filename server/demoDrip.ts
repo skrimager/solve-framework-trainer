@@ -46,12 +46,12 @@ export function demoScheduledAtForStep(step: number, nowMs: number): string {
   return new Date(nowMs + offset * DAY_MS).toISOString();
 }
 
-// Day 0 welcome: confirms the three free sessions and the SOLVE Coach scoring,
+// Day 0 welcome: confirms the free session and the SOLVE Coach scoring,
 // and points them at the demo to start practicing.
 export function buildDemoDay0Body(email: string): string {
   const body = `Welcome to the SOLVE Framework demo.
 
-Your demo includes three free practice sessions. Pick a conversation that feels close to one you actually have, and just talk to it the way you naturally would. There are no scripts and no gotcha questions.
+Your demo includes one free practice session. Pick a conversation that feels close to one you actually have, and just talk to it the way you naturally would. There are no scripts and no gotcha questions.
 
 After each session, your SOLVE Coach reviews the conversation and scores it, then shows you which questions uncovered the real motivations, where you could have built more trust, and what to do differently next time.
 
@@ -76,9 +76,9 @@ export function buildDemoDay1Body(email: string, session?: DemoSessionSummary | 
 
 That number is just a starting point. The real growth comes from running another session and watching what changes when you ask one more discovery question before you offer a solution.${feedbackLine}
 
-You still have free sessions left. Try another one here: ${DEMO_URL}`;
+Individual practice sessions are $4.99 each, or a membership opens up unlimited practice. See your options here: ${DEMO_URL}`;
   } else {
-    core = `A day ago you unlocked your SOLVE Framework demo, and your three free practice sessions are still sitting there whenever you are ready.
+    core = `A day ago you unlocked your SOLVE Framework demo, and your free practice session is still sitting there whenever you are ready.
 
 If you have not run one yet, no pressure. Pick any conversation that feels close to a real one you have often, and just talk to it the way you naturally would. Your SOLVE Coach will score it and show you exactly where you can improve.
 
@@ -88,10 +88,10 @@ Start your first session here: ${DEMO_URL}`;
 }
 
 // Day 3 follow-up: convert-to-paid. References what the full product adds beyond
-// the demo's three-session cap: the full scenario library, the manager
+// the demo's one-session cap: the full scenario library, the manager
 // dashboard, and the certification path.
 export function buildDemoDay3Body(email: string): string {
-  const body = `Your SOLVE demo gave you three practice sessions. A full account removes that cap and opens up what the demo does not show you yet.
+  const body = `Your SOLVE demo gave you one practice session. A full account removes that cap and opens up what the demo does not show you yet.
 
 With a full account you get:
 
