@@ -1305,6 +1305,44 @@ describe("the shared scoring-accuracy blocks (Rules 8-10)", () => {
   });
 });
 
+// A verified ending: the consultant paints how the solution fits what was
+// discussed, explicitly asks whether anything is still missing, and the customer
+// explicitly confirms nothing is. The taxonomy classifies that as "client_agreed"
+// exactly like a bare "yes, let's do it", so both share the 85 anchor and the
+// only place the extra rigor could show up is the discovery dimensions. Nothing
+// told the grader to look for it there, so it was credited by chance or not at
+// all. This is a recognition instruction only: no weight, anchor, cap, or
+// threshold moves, and the pattern's absence is explicitly not a deduction.
+describe("ACCEPTED_SOLUTION_RULES - crediting a verified 'nothing missing' ending", () => {
+  test("an explicit gap-check plus an explicit confirmation is named as the stronger ending", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /anything we haven't covered/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /materially stronger ending than a bare "yes, let's do it"/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /verified WITH the customer rather than assumed/);
+    // Credited inside the dimensions that already score discovery quality.
+    assert.match(ACCEPTED_SOLUTION_RULES, /in needsDiscovery/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /in naturalClose/);
+  });
+
+  test("the credit is gated on real discovery and its absence is not a deduction", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /earned, never automatic, and its absence is never a deduction/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /asked "anything else\?" has verified nothing/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /never mark down a conversation that ended in a clear agreement without it/);
+  });
+
+  test("no number moves: the only route to a higher score is a higher sub-score", () => {
+    // Guardrail. A bare agreement and a verified one still share one anchor, and
+    // there is no separate bonus path, so the extra credit has to be earned in
+    // the discovery dimensions the grader must justify from the transcript.
+    assert.equal(closeOutcomeAnchor("client_agreed"), 85);
+    const bare = rubric({ needsDiscovery: 80, naturalClose: 80 });
+    const verified = rubric({ needsDiscovery: 88, naturalClose: 88 });
+    assert.ok(
+      computeConsultingOverall(verified, "client_agreed") >
+        computeConsultingOverall(bare, "client_agreed"),
+    );
+  });
+});
+
 // Rule 11. The live failure: "you needed to talk about financing earlier in the
 // conversation" written about a transcript in which the rep asked about budget,
 // cash-versus-financing, and a trade-in a few turns in. Two defects in one
