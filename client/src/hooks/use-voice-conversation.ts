@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { voiceTransition, type VoiceState, type VoiceEvent, type VoiceEffect } from "@/lib/voiceMachine";
-import { recommendSilenceMs } from "@/lib/turnDetection";
+import { recommendSilenceMs, DEFAULT_SILENCE_MS } from "@/lib/turnDetection";
+import { AUDIO_TAIL_GUARD_MS, isLikelyEchoOfCustomer } from "@/lib/echoGuard";
 import type { TranscriptMessage } from "@shared/schema";
 
 // Web Speech API isn't in TS's default lib — declare the minimal shape we use.
@@ -86,10 +87,10 @@ const MOBILE_LISTEN_WATCHDOG_MS = 12000;
 
 // Neutral (ambiguous) silence wait in voice mode. This is the BASE the adaptive
 // heuristic scales around: it waits shorter when the utterance already sounds
-// finished and longer when it clearly is not (see recommendSilenceMs). Kept at
-// the previous fixed value so the ambiguous case is unchanged. Overridable
-// per-caller via `UseVoiceConversationOptions.silenceAutoSendMs`.
-const DEFAULT_SILENCE_AUTOSEND_MS = 1500;
+// finished and longer when it clearly is not (see recommendSilenceMs). Kept in
+// step with turnDetection's DEFAULT_SILENCE_MS so the two cannot drift.
+// Overridable per-caller via `UseVoiceConversationOptions.silenceAutoSendMs`.
+const DEFAULT_SILENCE_AUTOSEND_MS = DEFAULT_SILENCE_MS;
 
 export interface UseVoiceConversationOptions {
   // Send one turn. `withAudio` reflects whether voice mode is on so the caller's
@@ -184,6 +185,10 @@ export function useVoiceConversation({
   const elementPlayingRef = useRef(false);
   const draftBeforeListening = useRef("");
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // What the AI customer most recently said, so a draft that is really the
+  // recognizer hearing that same speech back can be dropped instead of stored as
+  // a consultant turn (see isLikelyEchoOfCustomer).
+  const lastCustomerTextRef = useRef("");
   // handleSend and dispatch are defined below; keep refs so the recognition
   // callbacks (created once on mount) always call the latest versions.
   const handleSendRef = useRef<() => void>(() => {});
@@ -386,9 +391,16 @@ export function useVoiceConversation({
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         const waitMs = recommendSilenceMs(combined, silenceAutoSendMsRef.current);
         silenceTimerRef.current = setTimeout(() => {
-          if (draftBeforeListening.current.trim()) {
-            handleSendRef.current();
+          const pending = draftBeforeListening.current.trim();
+          if (!pending) return;
+          // Never auto-send the customer's own speech back as a rep turn: that is
+          // what corrupts speaker attribution for the rest of the session.
+          if (isLikelyEchoOfCustomer(pending, lastCustomerTextRef.current)) {
+            draftBeforeListening.current = "";
+            setDraft("");
+            return;
           }
+          handleSendRef.current();
         }, waitMs);
       }
     };
@@ -591,6 +603,9 @@ export function useVoiceConversation({
   const handleReply = useCallback((transcript: TranscriptMessage[]) => {
     if (!voiceModeRef.current) return;
     const last = transcript[transcript.length - 1];
+    if (last?.role === "customer" && last.content.trim()) {
+      lastCustomerTextRef.current = last.content.trim();
+    }
     const hasAudio =
       last?.msgId &&
       last.audioUrl &&
@@ -616,6 +631,7 @@ export function useVoiceConversation({
       if (!voiceModeRef.current) return;
       // Supersede any prior stream and start a fresh generation.
       stopReplyStream();
+      lastCustomerTextRef.current = "";
       const gen = streamGenRef.current;
       const ctx = audioContextRef.current;
       const gain = gainNodeRef.current;
@@ -641,12 +657,16 @@ export function useVoiceConversation({
         if (!streamDone || pending > 0) return;
         const remainingMs = Math.max(0, (nextStartTimeRef.current - ctx!.currentTime) * 1000);
         if (streamEndTimerRef.current) clearTimeout(streamEndTimerRef.current);
+        // AUDIO_TAIL_GUARD_MS beyond `remainingMs` matters for speaker
+        // attribution: `remainingMs` is a timeline estimate, and reopening the
+        // mic even slightly early lets the recognizer hear the tail of the
+        // customer's own TTS and submit it as a consultant turn.
         streamEndTimerRef.current = setTimeout(() => {
           streamEndTimerRef.current = null;
           if (gen !== streamGenRef.current) return;
           dispatchRef.current({ type: "AUDIO_ENDED" });
           settle();
-        }, remainingMs + 60);
+        }, remainingMs + AUDIO_TAIL_GUARD_MS);
       };
 
       const scheduleClip = async (url: string) => {
@@ -732,7 +752,10 @@ export function useVoiceConversation({
       replyStreamRef.current = es;
       es.addEventListener("sentence", (ev: MessageEvent) => {
         try {
-          const data = JSON.parse(ev.data) as { audioUrl?: string };
+          const data = JSON.parse(ev.data) as { audioUrl?: string; text?: string };
+          if (data.text) {
+            lastCustomerTextRef.current = `${lastCustomerTextRef.current} ${data.text}`.trim();
+          }
           if (data.audioUrl) onSentence(data.audioUrl);
         } catch {
           // Malformed event; ignore this sentence.

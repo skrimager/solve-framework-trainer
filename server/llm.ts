@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import OpenAI, { toFile } from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
+import {
+  buildConversationStateLines,
+  deriveConversationState,
+  hasCustomerAcceptedProposal,
+} from "./conversationState";
 import { storage } from "./storage";
 
 const client = new OpenAI();
@@ -10,14 +15,22 @@ const client = new OpenAI();
 // Reuses the SAME shared OpenAI client/credentials as every other call in this
 // file, so there is no second client setup or API key mechanism. verbose_json
 // gives us the reported audio duration (for the ~30 min cap) and per-segment
-// text (natural turn boundaries the audio parser alternates roles across).
+// text WITH timings. The timings matter: a Whisper segment is an acoustic chunk,
+// not a speaker turn, so one person speaking three sentences yields three
+// segments. Alternating speakers per segment therefore mis-attributes most of a
+// real conversation. The parser groups segments into turns by the silence gap
+// between them, which needs `start`/`end`.
 const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
 
 export async function transcribeAudio(input: {
   buffer: Buffer;
   filename: string;
   mimetype: string;
-}): Promise<{ text: string; duration?: number; segments?: { text: string }[] }> {
+}): Promise<{
+  text: string;
+  duration?: number;
+  segments?: { text: string; start?: number; end?: number }[];
+}> {
   const file = await toFile(input.buffer, input.filename, { type: input.mimetype });
   const result = await client.audio.transcriptions.create({
     file,
@@ -27,7 +40,7 @@ export async function transcribeAudio(input: {
   return {
     text: result.text ?? "",
     duration: result.duration,
-    segments: result.segments?.map((s) => ({ text: s.text })),
+    segments: result.segments?.map((s) => ({ text: s.text, start: s.start, end: s.end })),
   };
 }
 
@@ -67,9 +80,13 @@ function cacheKeyForPrefix(stablePrefix: string): string {
 // the injected llm-api:website credential.
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 const TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
-// Slightly faster than OpenAI's default (1.0) so the customer voice sounds
-// natural rather than sluggish. Configurable via OPENAI_TTS_SPEED (0.25–4.0).
-const TTS_SPEED = Number(process.env.OPENAI_TTS_SPEED) || 1.12;
+// OpenAI's natural rate. Any value above 1.0 is applied as a uniform time
+// compression, which flattens the natural variation in phrase length and is a
+// large part of why the customer voice read as clipped and robotic. Pacing is now
+// steered through the `instructions` parameter instead, which the model applies
+// expressively rather than mechanically. Configurable via OPENAI_TTS_SPEED
+// (0.25-4.0) if a deployment needs to override it.
+export const TTS_SPEED = Number(process.env.OPENAI_TTS_SPEED) || 1.0;
 
 // Generates speech audio for a simulated customer's line using OpenAI TTS.
 // Runs directly in Node so it works identically in the dev sandbox and on
@@ -241,6 +258,16 @@ When the consultant asks you to clarify, explain, or say more about something, r
 
 The moment the consultant has adequately addressed, answered, or eased a concern, briefly acknowledge it in your own words ("Okay, that actually makes sense", "Alright, that helps") and MOVE ON to your next underlying concern or a question of your own. Do not relitigate a point that has already been handled.
 
+ONCE A QUESTION IS ANSWERED OR PROPERLY REDIRECTED, STOP ASKING IT. Some things you are curious about genuinely belong to someone else in the business: warranty and service coverage, financing and credit, loan terms, and the specific mechanics of payments or deposits. When the consultant tells you that another department or another person handles one of those, that is a correct and honest answer, not a dodge. You may come back to it ONE more time if it really matters to you. After they redirect it a SECOND time, that topic is closed permanently: never raise it again in any wording, do not keep circling it, and do not treat it as an unresolved reason you cannot move forward. The same applies to anything they have straightforwardly answered: an answered question is finished.
+
+RESPECT THE DECISION-MAKING STRUCTURE THE CONSULTANT UNCOVERS. If the consultant asks who is making this decision, who is paying, or who else needs to be involved, answer honestly and then STAY CONSISTENT with that answer for the whole rest of the conversation. If you told them the decision is yours, it is yours: you can never later produce some other person whose approval is suddenly required as a reason to stall or refuse. Springing a previously unmentioned absent person on the consultant after they have already done that discovery is the single most unfair thing you can do to them, and it is forbidden. If someone else genuinely matters to you, that is what your answer to their question was for. (If the consultant never asked at all, you are free to bring it up naturally later, because that is a real gap in their discovery.)
+
+ASK FOR OTHER OPTIONS AT MOST ONCE. "What else do you have?" is a fair question to ask ONE time. Once the consultant has answered it honestly, including if the honest answer is that this is what fits your situation or that there is nothing else in your range, accept that answer and work with it or say plainly that none of it fits. Do not ask it again in different words, and do not use it to restart discovery into a fresh round of choices. Endlessly asking to be shown something else is not being a tough customer; it is refusing to have a conversation.
+
+LET THE CONVERSATION BE ABLE TO END. This is not an endurance test. Once the consultant has understood your situation and put together something that genuinely fits it, and you have said so, your job is to let the conversation reach a natural close, not to keep it alive. Do not manufacture a new requirement, a new objection, or a new demand for the sake of continuing. Wrap up the way a real person does: confirm what you understood, name at most the ONE thing that is honestly still open for you if there is one (for example that another person still has to lay eyes on it, or that you want to sleep on it), and let the consultant take it from there. A conversation that ends well is a realistic outcome and a good one.
+
+BE DIFFICULT IN A WAY THAT EVOLVES. Difficulty is not a constant setting, it is a trajectory. Where you are guarded at the start, the specific shape of that guardedness should keep changing as the consultant earns or loses ground: a new question of your own, a sharper version of a worry, a concession you make grudgingly, a detail you had been holding back, a shift from testing them to actually thinking it through. A customer who applies the same pressure in the same way on every turn is not difficult, only robotic. Let what the consultant actually does move you, in either direction.
+
 Keep each reply short and conversational, usually one to three sentences, the way people actually speak out loud.`;
 
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
@@ -290,6 +317,11 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
     );
     for (const said of alreadySaid) lines.push(`  - "${said}"`);
   }
+  // The universal state facts (deflected topics, the established decision maker,
+  // the spent alternatives round, an accepted solution, figures already quoted).
+  // Same discipline: each is derived from explicit text in the transcript, so it
+  // can only ever assert something the conversation actually contains.
+  lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
@@ -390,7 +422,96 @@ export async function streamCustomerReply(
   return fullText.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Shared scoring-accuracy blocks. Injected into BOTH rubrics and into the
+// coaching prompt so every graded artifact inherits the same discipline rather
+// than each prompt drifting its own way.
+//
+// None of these blocks change what earns points. They constrain the model to
+// grade what the transcript actually says: the right speaker, the whole
+// transcript, and the outcome the conversation actually reached. Every rubric
+// dimension, weight, anchor, cap, and threshold is untouched.
+// ---------------------------------------------------------------------------
+
+// Rule 9. The observed failure: the CUSTOMER asked "how can I make sure I'm
+// getting something that'll hold up?" and the coach praised the CONSULTANT for
+// asking it. Credit for a question the customer asked is not a harsh or lenient
+// score, it is a wrong one, and it destroys the trainee's trust in every score.
+export const SPEAKER_ATTRIBUTION_RULES = `SPEAKER ATTRIBUTION (NON-NEGOTIABLE - do this before you score or write anything):
+Every turn in the transcript is numbered and prefixed with the name of the person who said it. That prefix is authoritative. Before you evaluate anything, go through the transcript and establish, turn by turn, who said what.
+- Credit the consultant ONLY for words that appear on a CONSULTANT-labeled turn. Never credit them for a question, insight, concern, or piece of information that appears on a CUSTOMER-labeled turn.
+- Likewise, never attribute the consultant's words to the customer.
+- A question the CUSTOMER asked is not evidence of the consultant's discovery skill. It is frequently evidence of the opposite: the customer had to go find that information themselves.
+- When you quote or paraphrase a moment in your feedback, re-check the turn label first and make sure the person you are crediting is the person the transcript says spoke it. If you cannot verify who said something, do not build a judgement on it.
+Misattributing a line is the single worst error you can make here. It is worse than a score that is too harsh and worse than one that is too generous, because it describes a conversation that did not happen.`;
+
+// Rule 10. Two failure modes with one cause: judging the transcript by
+// impression instead of by reading it. The claim "you never asked about safety"
+// about a conversation in which the rep did ask is not strictness, it is a
+// factual error the trainee can see for themselves.
+export const TRANSCRIPT_FIDELITY_RULES = `TRANSCRIPT FIDELITY (grade what is actually there):
+- Score the transcript in front of you, all of it, from the first turn to the last. Do not stop reading partway and grade an impression of the opening. If the transcript is long, work through it to the end before scoring; the later turns are usually where the recommendation and the outcome are.
+- Never state that the consultant failed to do something they demonstrably did. Before writing that they "never asked about" or "didn't cover" something, search the CONSULTANT-labeled turns for it. If it is there, they did it, and the feedback must reflect that. Coaching them to do something they already did tells them you did not read their conversation.
+- If they covered something partially, late, or clumsily, say precisely that instead. "You asked about safety, but only after you had already narrowed to one vehicle" is accurate and useful. "You never asked about safety" is neither.
+- Ground every claim, positive or negative, in a specific turn. If you cannot point to the turn, do not make the claim.`;
+
+// Rule 8. The consulting rubric already has a full close-outcome taxonomy whose
+// top tier is exactly this outcome; the failure was in describing it, not in
+// scoring it. This block removes any reading under which the coach can call an
+// accepted solution "no solution presented" or hunt for a signature.
+export const ACCEPTED_SOLUTION_RULES = `AN ACCEPTED SOLUTION IS A SUCCESSFUL OUTCOME:
+This is discovery and solution engineering, not closing. The goal of the conversation is that the consultant understands the customer's situation well enough to engineer something that genuinely fits, and that the customer agrees it fits. When that has happened, the conversation SUCCEEDED, and you must score and describe it as a success.
+- If the customer expressed agreement that the proposed solution works for them, the recommendation was made and it was accepted. Classify that as "client_agreed". Never classify it as "none", and never write anything to the effect of "you haven't presented a solution yet" or "no recommendation was made" about a conversation in which the customer accepted one. That statement is simply false and the trainee will see that it is false.
+- Do NOT require, look for, or deduct for the absence of a sales close: no signature, no paperwork, no deposit, no "asking for the business", no closing language of any kind. Their absence is not a gap and must not be coached as one.
+- An outcome left open on ONE genuinely external item is still an accepted solution, not a failure to close. "I'll have my son come look at it" or "I want to run it past my wife" from a customer who has already said the solution fits is a normal, healthy ending. Score the quality of the discovery and the fit of the solution, and if there is coaching to give about the ending, make it about confirming that one open item cleanly, not about failing to close.
+- This does not lower the bar anywhere else. Shallow discovery still scores low, a missed volunteered problem still costs points, and a conversation that never reached a recommendation at all is still "none".`;
+
+// Renders a transcript for any graded prompt (scoring, the recommendation gate,
+// coaching) so all of them see the identical, unambiguously attributed text.
+//
+// The previous rendering emitted one `Customer:`/`Consultant:` prefix per MESSAGE
+// but joined on newlines, so a message whose content itself contained a newline
+// produced continuation lines with no speaker prefix at all, and the empty
+// customer placeholder that voice mode inserts produced a bare `Customer:` with
+// nothing after it. Both leave the model guessing who is speaking, which is
+// exactly the condition under which it guesses wrong.
+//
+// Three properties this guarantees:
+//   * Exactly one line per turn, so every line carries a speaker label.
+//   * Blank turns dropped, so the streamed placeholder is never a phantom turn.
+//   * Turns numbered, so the prompt can require a specific turn as evidence and
+//     so a truncated read is visible rather than silent.
+export function renderTranscriptForScoring(
+  transcript: TranscriptMessage[],
+  labels: { customer: string; consultant: string } = { customer: "CUSTOMER", consultant: "CONSULTANT" }
+): string {
+  return transcript
+    .filter((m) => m.content.trim().length > 0)
+    .map((m, i) => {
+      const speaker = m.role === "customer" ? labels.customer : labels.consultant;
+      // Collapse internal newlines so a multi-line message cannot produce an
+      // unlabeled line.
+      const body = m.content.trim().replace(/\s*\n+\s*/g, " ");
+      return `[${i + 1}] ${speaker}: ${body}`;
+    })
+    .join("\n");
+}
+
+// The header that precedes a rendered transcript. States the turn count so the
+// model is accountable for reading all of it, and restates that the labels are
+// authoritative right where the labels appear.
+export function transcriptHeaderForScoring(transcript: TranscriptMessage[]): string {
+  const count = transcript.filter((m) => m.content.trim().length > 0).length;
+  return `Transcript (${count} turns, numbered in order). Each line begins with the speaker who said it; that label is authoritative. Read all ${count} turns before scoring:`;
+}
+
 const RUBRIC_SYSTEM = `You are scoring a discovery-training role-play transcript. This is discovery architecture practice — NOT sales training — so evaluate the consultant's ability to uncover real customer needs and build trust through understanding, not persuasion tactics.
+
+${SPEAKER_ATTRIBUTION_RULES}
+
+${TRANSCRIPT_FIDELITY_RULES}
+
+${ACCEPTED_SOLUTION_RULES}
 
 THE CORE STANDARD: every conversation should leave the other person better than you found them. You are evaluating whether the consultant made an honest effort to understand the customer's situation well enough to actually help them in some real way — solving a problem, making an introduction, sharing an idea, connecting them to a resource, or simply listening until the real issue surfaced. If the conversation ended without the consultant learning enough to help, discovery was not complete, and the score should reflect that no matter how pleasant the conversation was.
 
@@ -441,6 +562,10 @@ const RUBRIC_DIFFICULTY_CALIBRATION: Record<string, string> = {
 // evaluates de-escalation skill (listening, empathy, root-cause discovery,
 // co-created solutions, blameless resolution) instead of sales discovery.
 const LEADERSHIP_RUBRIC_SYSTEM = `You are scoring a conflict-management / de-escalation role-play transcript. The consultant is a manager or service professional handling an upset customer, an aggrieved employee, or a peer conflict. This is NOT sales training — evaluate their ability to de-escalate, understand the other person, and reach a resolution nobody is blamed for.
+
+${SPEAKER_ATTRIBUTION_RULES}
+
+${TRANSCRIPT_FIDELITY_RULES}
 
 Score each dimension 0-100:
 - activeListening: Did the consultant let the person fully vent and feel heard before responding — no interrupting, defending, or jumping to solutions?
@@ -883,9 +1008,7 @@ export async function scoreTranscript(
     };
   }
 
-  const transcriptText = transcript
-    .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
-    .join("\n");
+  const transcriptText = renderTranscriptForScoring(transcript);
 
   const isLeadership = track === "leadership";
   const system = isLeadership ? LEADERSHIP_RUBRIC_SYSTEM : RUBRIC_SYSTEM;
@@ -909,7 +1032,12 @@ export async function scoreTranscript(
     ? `${system}\n\n${calibration}\n\n${txnCalibration}`
     : `${system}\n\n${calibration}`;
 
-  const raw = (await responder(`${stablePrefix}\n\nTranscript:\n${transcriptText}`, cacheKeyForPrefix(stablePrefix))).trim();
+  const raw = (
+    await responder(
+      `${stablePrefix}\n\n${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
+      cacheKeyForPrefix(stablePrefix)
+    )
+  ).trim();
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     throw new Error("Scoring model did not return valid JSON");
@@ -1060,17 +1188,22 @@ export async function hasProposedRecommendation(transcript: TranscriptMessage[])
   const consultantLines = transcript.filter((m) => m.role === "consultant");
   if (consultantLines.length === 0) return false;
 
-  const transcriptText = transcript
-    .map((m) => `${m.role === "customer" ? "Customer" : "Consultant"}: ${m.content}`)
-    .join("\n");
+  // Rule 8, enforced deterministically: if the consultant proposed a solution and
+  // the customer said it works for them, the conversation has unambiguously
+  // reached a terminal point. Deciding that from the transcript's own text means
+  // the gate can never block scoring on the grounds that no solution was
+  // presented while the customer is on record accepting one.
+  if (hasCustomerAcceptedProposal(transcript)) return true;
+
+  const transcriptText = renderTranscriptForScoring(transcript);
 
   // Stable instruction leads; the volatile transcript comes last so the
   // instruction prefix is cacheable across calls.
-  const stablePrefix = `Read this discovery-training role-play transcript. Has the consultant reached a terminal point — that is, either (a) proposed ANY recommendation, solution, product/option, or next step/close to the customer, even a tentative or partial one, OR (b) after a genuine discovery effort, gracefully referred the customer elsewhere because they aren't the right fit? Answer with ONLY the single word "yes" or "no".`;
+  const stablePrefix = `Read this discovery-training role-play transcript. Each turn is numbered and labeled with the speaker who said it; that label is authoritative, so only count something as done by the consultant if it appears on a CONSULTANT turn. Has the consultant reached a terminal point — that is, (a) proposed ANY recommendation, solution, product/option, or next step/close to the customer, even a tentative or partial one, OR (b) after a genuine discovery effort, gracefully referred the customer elsewhere because they aren't the right fit, OR (c) proposed something the customer then agreed works for them, which is a completed outcome regardless of whether any close, signature, paperwork, or payment was discussed? Answer with ONLY the single word "yes" or "no".`;
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
-    input: `${stablePrefix}\n\nTranscript:\n${transcriptText}`,
+    input: `${stablePrefix}\n\n${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
     prompt_cache_key: cacheKeyForPrefix(stablePrefix),
   });
 

@@ -1134,3 +1134,277 @@ describe("computeScoreCacheHash - stability and sensitivity", () => {
     assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "consulting", "resale_buyer"));
   });
 });
+
+// ===========================================================================
+// Part A: the universal state lines reach the customer prompt
+// ===========================================================================
+
+import {
+  ACCEPTED_SOLUTION_RULES,
+  SPEAKER_ATTRIBUTION_RULES,
+  TRANSCRIPT_FIDELITY_RULES,
+  TTS_SPEED,
+  hasProposedRecommendation,
+  renderTranscriptForScoring,
+  transcriptHeaderForScoring,
+} from "./llm";
+
+describe("CONVERSATION_REALISM_RULES - universal behavior rules (Rules 2, 4-7)", () => {
+  const rules = CONVERSATION_REALISM_RULES;
+
+  test("Rule 2: a properly redirected topic must be dropped after the second redirect", () => {
+    assert.match(rules, /STOP ASKING IT/i);
+    assert.match(rules, /redirect/i);
+  });
+
+  test("Rule 4: the decision structure the consultant uncovers is binding", () => {
+    assert.match(rules, /DECISION-MAKING STRUCTURE/i);
+    assert.match(rules, /absent/i);
+  });
+
+  test("Rule 5: other options may be asked for at most once", () => {
+    assert.match(rules, /OTHER OPTIONS AT MOST ONCE/i);
+  });
+
+  test("Rule 6: the conversation must be allowed to end", () => {
+    assert.match(rules, /LET THE CONVERSATION BE ABLE TO END/i);
+  });
+
+  test("Rule 7: difficulty has to evolve rather than repeat", () => {
+    assert.match(rules, /EVOLVES/i);
+  });
+
+  test("Rule 1 (PR #86) is not regressed by the additions", () => {
+    assert.match(rules, /never repeat/i);
+  });
+});
+
+describe("buildTurnStateBlock - carries the derived conversation state (Rules 2-6)", () => {
+  test("a closed deflectable topic is asserted in the state block", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "What does the warranty cover?"),
+      turn("consultant", "Our service department handles that side of it."),
+      turn("customer", "But how long is the warranty good for?"),
+      turn("consultant", "The warranty specialist covers that. Let's first nail down what you need."),
+    ]);
+    assert.match(block, /CLOSED/);
+  });
+
+  test("an established decision maker is asserted as fixed", () => {
+    const block = buildTurnStateBlock([
+      turn("consultant", "Is there anyone else involved in the decision?"),
+      turn("customer", "No, it's my decision and I'm paying for it."),
+    ]);
+    assert.match(block, /now FIXED/);
+  });
+
+  test("an accepted solution tells the customer to let the conversation end", () => {
+    const block = buildTurnStateBlock([
+      turn("consultant", "Based on what you've told me, I'd recommend the compact."),
+      turn("customer", "That sounds right, that's exactly what we need."),
+    ]);
+    assert.match(block, /ALREADY said the proposed solution fits/);
+  });
+
+  test("a conversation with none of these situations is byte-identical to the PR #86 behavior", () => {
+    const plain = [
+      turn("consultant", "What brings you in today?"),
+      turn("customer", "Just starting to look around."),
+    ];
+    const block = buildTurnStateBlock(plain);
+    assert.doesNotMatch(block, /CLOSED|now FIXED|alternatives round|ALREADY said the proposed/);
+  });
+
+  test("the state block stays in the volatile tail, never in the cacheable prefix", () => {
+    const transcript = [
+      turn("consultant", "I'd recommend the compact."),
+      turn("customer", "That works for us."),
+    ];
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "intermediate");
+    assert.ok(prompt.startsWith(prefix));
+    assert.doesNotMatch(prefix, /ALREADY said the proposed solution fits/);
+    assert.match(prompt, /ALREADY said the proposed solution fits/);
+  });
+});
+
+// ===========================================================================
+// Part B: scoring accuracy (Rules 8-10)
+// ===========================================================================
+
+describe("renderTranscriptForScoring - speaker attribution (Rule 9)", () => {
+  test("every turn is numbered and prefixed with an explicit speaker label", () => {
+    const rendered = renderTranscriptForScoring([
+      turn("customer", "How can I make sure I'm getting something that'll hold up?"),
+      turn("consultant", "That's a fair thing to want."),
+    ]);
+    assert.equal(
+      rendered,
+      "[1] CUSTOMER: How can I make sure I'm getting something that'll hold up?\n" +
+        "[2] CONSULTANT: That's a fair thing to want.",
+    );
+  });
+
+  test("a multi-line turn is collapsed so no line is left unlabeled", () => {
+    // The exact shape of the reported failure: an unlabeled continuation line
+    // could be read as the other speaker.
+    const rendered = renderTranscriptForScoring([
+      turn("customer", "I've been burned before.\nHow do I know this will hold up?"),
+    ]);
+    assert.equal(rendered.split("\n").length, 1);
+    assert.match(rendered, /^\[1\] CUSTOMER: /);
+  });
+
+  test("the empty placeholder a streamed turn is about to fill is dropped", () => {
+    const rendered = renderTranscriptForScoring([
+      turn("consultant", "What brings you in?"),
+      turn("customer", "   "),
+    ]);
+    assert.equal(rendered, "[1] CONSULTANT: What brings you in?");
+  });
+
+  test("labels are overridable for the coach's trainee-facing framing", () => {
+    const rendered = renderTranscriptForScoring([turn("consultant", "Tell me more.")], {
+      customer: "CUSTOMER",
+      consultant: "TRAINEE",
+    });
+    assert.equal(rendered, "[1] TRAINEE: Tell me more.");
+  });
+
+  test("the header states the real turn count so the grader reads the whole transcript", () => {
+    const header = transcriptHeaderForScoring([
+      turn("customer", "One."),
+      turn("consultant", "Two."),
+      turn("customer", "   "),
+    ]);
+    assert.match(header, /2 turns/);
+    assert.match(header, /authoritative/);
+    assert.match(header, /Read all 2 turns/);
+  });
+});
+
+describe("the shared scoring-accuracy blocks (Rules 8-10)", () => {
+  test("Rule 9: attribution is stated as non-negotiable and credit is turn-gated", () => {
+    assert.match(SPEAKER_ATTRIBUTION_RULES, /NON-NEGOTIABLE/);
+    assert.match(SPEAKER_ATTRIBUTION_RULES, /CONSULTANT/);
+  });
+
+  test("Rule 10: the grader may not claim the consultant skipped something they did", () => {
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /Never state that the consultant failed to do something they demonstrably did/);
+  });
+
+  test("Rule 8: an accepted solution is a success and no close may be required", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /client_agreed/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /paperwork/i);
+    assert.match(ACCEPTED_SOLUTION_RULES, /haven't presented a solution yet/);
+  });
+
+  test("Rule 8 explicitly refuses to lower the bar anywhere else (guardrail)", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /does not lower the bar/i);
+  });
+});
+
+describe("scoreTranscript - the accuracy blocks reach the model (both tracks)", () => {
+  function capture() {
+    let seen = "";
+    const responder: ScoreResponder = async (input) => {
+      seen = input;
+      return JSON.stringify({
+        needsDiscovery: 8,
+        objectionPrevention: 8,
+        trustBuilding: 8,
+        naturalClose: 8,
+        relationshipContinuity: 8,
+        deEscalation: 8,
+        empathy: 8,
+        boundarySetting: 8,
+        resolutionPath: 8,
+        professionalism: 8,
+        closeOutcome: "client_agreed",
+        feedback: "ok",
+      });
+    };
+    return { responder, input: () => seen };
+  }
+
+  const transcript = [
+    turn("consultant", "What brings you in today?"),
+    turn("customer", "How can I make sure I'm getting something that'll hold up?"),
+    turn("consultant", "Based on what you've told me, I'd recommend the compact."),
+    turn("customer", "That sounds right, that's exactly what we need."),
+  ];
+
+  test("the consulting rubric carries attribution, fidelity, and accepted-solution rules", async () => {
+    const cap = capture();
+    await scoreTranscript(transcript, "intermediate", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.ok(cap.input().includes(SPEAKER_ATTRIBUTION_RULES));
+    assert.ok(cap.input().includes(TRANSCRIPT_FIDELITY_RULES));
+    assert.ok(cap.input().includes(ACCEPTED_SOLUTION_RULES));
+  });
+
+  test("the leadership rubric carries attribution and fidelity too", async () => {
+    const cap = capture();
+    await scoreTranscript(transcript, "intermediate", "leadership", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.ok(cap.input().includes(SPEAKER_ATTRIBUTION_RULES));
+    assert.ok(cap.input().includes(TRANSCRIPT_FIDELITY_RULES));
+  });
+
+  test("the transcript is sent in the labeled, numbered form with a turn-count header", async () => {
+    const cap = capture();
+    await scoreTranscript(transcript, "intermediate", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.ok(cap.input().includes(transcriptHeaderForScoring(transcript)));
+    assert.ok(
+      cap.input().includes(
+        "[2] CUSTOMER: How can I make sure I'm getting something that'll hold up?",
+      ),
+      "the customer's question must be labeled as the customer's",
+    );
+  });
+
+  test("the accuracy blocks sit in the stable prefix, ahead of the volatile transcript", async () => {
+    const cap = capture();
+    await scoreTranscript(transcript, "intermediate", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    const input = cap.input();
+    assert.ok(input.indexOf(SPEAKER_ATTRIBUTION_RULES) < input.indexOf("[1] CONSULTANT:"));
+  });
+});
+
+describe("hasProposedRecommendation - accepted solution short-circuit (Rule 8)", () => {
+  test("an accepted proposal returns true with no API call", async () => {
+    // No responder seam here, so reaching the network would throw on the dummy
+    // key. Passing proves the deterministic short-circuit fired.
+    const result = await hasProposedRecommendation([
+      turn("consultant", "Based on everything you've told me, I'd recommend the compact."),
+      turn("customer", "That sounds right, that's exactly what we need."),
+    ]);
+    assert.equal(result, true);
+  });
+
+  test("an empty consultant side is still false without an API call", async () => {
+    assert.equal(await hasProposedRecommendation([turn("customer", "Hello?")]), false);
+  });
+});
+
+// ===========================================================================
+// Part C, Bug 3: TTS delivery
+// ===========================================================================
+
+describe("TTS_SPEED (Bug 3: robotic delivery)", () => {
+  test("speech is not time-compressed by default", () => {
+    // Playing every persona back faster than recorded is what read as clipped and
+    // announcer-like; natural pacing comes from an unmodified rate.
+    assert.equal(TTS_SPEED, 1.0);
+  });
+});

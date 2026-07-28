@@ -139,11 +139,29 @@ export const PERSONA_VOICE_INSTRUCTIONS: Record<string, string> = {
     "Voice: a 26-year-old early-career professional. Pitch: youthful adult male, energetic. Tone: a little eager and unsure, not a seasoned executive register.",
 };
 
-// Returns gpt-4o-mini-tts delivery instructions for a scenario slug, or
-// undefined when no age/tone steer is curated (falls back to the model's
-// default delivery for that voice).
-export function getVoiceInstructionsForScenario(slug: string | undefined | null): string | undefined {
-  return slug ? PERSONA_VOICE_INSTRUCTIONS[slug] : undefined;
+// Delivery steer applied to EVERY persona in every scenario, curated or not.
+//
+// Without instructions, gpt-4o-mini-tts reads text the way a narrator reads a
+// script: even stress on every phrase, uniform pacing, full articulation of every
+// word. That is what made the customer sound robotic. Real speech is uneven -- it
+// leans on the word that carries the meaning, runs some phrases together,
+// breathes at clause boundaries, and lets pitch fall at the end of a statement.
+// This block asks for exactly that, and it says nothing about age, gender,
+// personality, or mood so it can never conflict with a per-persona steer or with
+// the gender the avatar shows.
+export const NATURAL_DELIVERY_INSTRUCTIONS =
+  "Delivery: speak like a real person in an unscripted conversation, not like someone reading aloud. Pacing: natural conversational speed with uneven rhythm -- run short phrases together, take a small breath at clause boundaries, and let the pace vary with what is being said instead of holding one steady tempo. Emphasis: stress only the one or two words that actually carry the meaning of the sentence and let the rest ride lightly; do not give every word equal weight and do not over-enunciate. Intonation: let pitch fall naturally at the end of statements and rise only on genuine questions. Overall: relaxed, human, and a little imperfect rather than polished or announcer-like.";
+
+// Returns gpt-4o-mini-tts delivery instructions for a scenario slug.
+//
+// Always returns instructions: the universal natural-delivery steer applies to
+// every persona, with any curated age/tone steer appended after it so the
+// per-persona register still wins on the specifics it mentions.
+export function getVoiceInstructionsForScenario(slug: string | undefined | null): string {
+  const curated = slug ? PERSONA_VOICE_INSTRUCTIONS[slug] : undefined;
+  return curated
+    ? `${NATURAL_DELIVERY_INSTRUCTIONS}\n\n${curated}`
+    : NATURAL_DELIVERY_INSTRUCTIONS;
 }
 
 const DEFAULT_FEMALE_VOICE = "shimmer";

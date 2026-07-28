@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import type { TranscriptMessage } from "@shared/schema";
+import {
+  ACCEPTED_SOLUTION_RULES,
+  SPEAKER_ATTRIBUTION_RULES,
+  TRANSCRIPT_FIDELITY_RULES,
+  renderTranscriptForScoring,
+  transcriptHeaderForScoring,
+} from "./llm";
 
 // Reuses the exact same OpenAI client setup as server/llm.ts: a default
 // `new OpenAI()` that reads OPENAI_API_KEY from the environment (or, in the dev
@@ -46,7 +53,13 @@ Ground rules (follow every turn):
 - Keep replies short and conversational — usually two to four sentences. This is a debrief chat, not an essay.
 - Be specific and diagnostic. Tie your coaching to the discovery framework the trainee is being scored on (uncovering the real underlying need, preventing objections through early discovery, building trust independent of the outcome, natural next steps in the client's own words, and preserving the relationship).
 
-Using the transcript (important — be judgment-based):
+${SPEAKER_ATTRIBUTION_RULES}
+
+${TRANSCRIPT_FIDELITY_RULES}
+
+${ACCEPTED_SOLUTION_RULES}
+
+Using the transcript (important, be judgment-based):
 - You have the trainee's actual scenario transcript available below. Use it CONDITIONALLY. When the trainee's question is about what they actually said or how they could have phrased something ("what did I say", "how could I have asked that", "give me a better way to word X", before/after rewrites), quote or closely paraphrase the specific lines from their transcript and offer a concrete rewrite.
 - When the question is general ("why does discovery matter", "what does trust-building mean"), answer from the framework and their feedback. Do NOT force transcript quotes in where they don't help.
 
@@ -61,10 +74,15 @@ export function buildCoachingStablePrefix(params: CoachingPromptParams): string 
   const { track, feedback, rubricScoresJson, overallScore, transcript } = params;
   const trackLabel =
     track === "leadership" ? "conflict-management / de-escalation" : "discovery-architecture";
-  const transcriptText =
-    transcript
-      .map((m) => `${m.role === "customer" ? "Customer" : "Trainee"}: ${m.content}`)
-      .join("\n") || "(no transcript recorded)";
+  // Same numbered, explicitly-labeled rendering the rubric scorer uses, so the
+  // Coach cannot mistake a customer line for something the trainee said.
+  const rendered = renderTranscriptForScoring(transcript, {
+    customer: "CUSTOMER",
+    consultant: "TRAINEE",
+  });
+  const transcriptText = rendered
+    ? `${transcriptHeaderForScoring(transcript)}\n${rendered}`
+    : "(no transcript recorded)";
   const scoresLine =
     overallScore !== null ? `Overall score: ${overallScore}/100.` : "Overall score: (not scored).";
   const rubricLine = rubricScoresJson ? `Per-dimension scores (JSON): ${rubricScoresJson}` : "";
