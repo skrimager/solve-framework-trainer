@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import type { TranscriptMessage } from "@shared/schema";
 import {
   ACCEPTED_SOLUTION_RULES,
+  GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
   TRANSCRIPT_FIDELITY_RULES,
   renderTranscriptForScoring,
@@ -58,6 +59,8 @@ ${SPEAKER_ATTRIBUTION_RULES}
 ${TRANSCRIPT_FIDELITY_RULES}
 
 ${ACCEPTED_SOLUTION_RULES}
+
+${GRACEFUL_RELEASE_RULES}
 
 Using the transcript (important, be judgment-based):
 - You have the trainee's actual scenario transcript available below. Use it CONDITIONALLY. When the trainee's question is about what they actually said or how they could have phrased something ("what did I say", "how could I have asked that", "give me a better way to word X", before/after rewrites), quote or closely paraphrase the specific lines from their transcript and offer a concrete rewrite.
