@@ -52,7 +52,15 @@ export type RealConversationTranscriber = (input: {
   buffer: Buffer;
   filename: string;
   mimetype: string;
-}) => Promise<{ text: string; duration?: number; segments?: { text: string }[] }>;
+}) => Promise<{ text: string; duration?: number; segments?: AudioSegment[] }>;
+
+// One Whisper segment. `start`/`end` are seconds into the recording and are
+// optional because a fake transcriber (or an older API response) may omit them.
+export interface AudioSegment {
+  text: string;
+  start?: number;
+  end?: number;
+}
 
 // The exact consent language the rep must agree to before a submission is
 // accepted. Kept as a single exported constant so the server gate and the client
@@ -251,24 +259,75 @@ function pushOrAppend(
   messages.push({ role, content: text, timestamp });
 }
 
+// A silence gap at or above this many seconds between two consecutive Whisper
+// segments is treated as a speaker change. Below it, the segments are the same
+// person still talking. Back-to-back segments from one speaker are typically
+// contiguous (gap ~0s, since Whisper splits on acoustic/length boundaries mid-
+// speech), whereas a real handover carries an audible beat.
+export const SPEAKER_CHANGE_GAP_SECONDS = 0.75;
+
+// Groups Whisper segments into speaker TURNS before any role is assigned.
+//
+// This is the core diarization fix. A Whisper segment is an acoustic chunk, not a
+// speaker turn: one person saying three sentences produces three segments. The
+// previous behavior alternated roles per SEGMENT, so a single rep turn of three
+// sentences was split across customer/consultant/customer and the scorer was
+// shown a transcript in which most lines were attributed to the wrong speaker.
+// That is what let the coach credit the rep for a question the customer asked.
+//
+// Grouping rule: start a new turn only when there is an audible silence gap
+// (>= SPEAKER_CHANGE_GAP_SECONDS) between the previous segment's end and this
+// segment's start. When timings are missing we cannot detect a handover at all,
+// so we fall back to sentence-terminal punctuation as the boundary, which at
+// least keeps a mid-sentence continuation attached to the same speaker.
+export function groupSegmentsIntoTurns(segments: AudioSegment[]): string[] {
+  const turns: string[] = [];
+  let prevEnd: number | undefined;
+  let prevText = "";
+
+  for (const seg of segments) {
+    const text = seg.text.trim();
+    if (text.length === 0) continue;
+
+    let isNewTurn: boolean;
+    if (turns.length === 0) {
+      isNewTurn = true;
+    } else if (typeof seg.start === "number" && typeof prevEnd === "number") {
+      isNewTurn = seg.start - prevEnd >= SPEAKER_CHANGE_GAP_SECONDS;
+    } else {
+      // No timings: only a completed sentence can plausibly end a turn.
+      isNewTurn = /[.!?]["'”’)\]]*$/.test(prevText);
+    }
+
+    if (isNewTurn) turns.push(text);
+    else turns[turns.length - 1] = `${turns[turns.length - 1]} ${text}`.trim();
+
+    prevText = text;
+    if (typeof seg.end === "number") prevEnd = seg.end;
+    else if (typeof seg.start === "number") prevEnd = seg.start;
+  }
+
+  return turns;
+}
+
 // Parses a Whisper transcript into TranscriptMessage[]. Whisper's basic API
-// returns a flat transcript with no speaker labels, so we cannot know who spoke.
-// This reuses the exact same fallback parsePastedTranscript applies to an
-// unlabeled paste: split the transcript into turns and alternate starting with
-// the customer, since a real discovery conversation is customer-led and the rep
-// is responding. Whisper segments (when present) give natural turn boundaries;
-// otherwise we split the flat text on sentence boundaries as a best effort. The
-// output is only ever fed to the unchanged scoreTranscript, never shown back as
-// an authoritative reconstruction.
+// returns no speaker labels, so who spoke is inferred, never known. Segments are
+// first grouped into TURNS by silence gap (see groupSegmentsIntoTurns) and only
+// then alternated, starting with the customer, since a real discovery
+// conversation is customer-led and the rep is responding. Without segments we
+// split the flat text on sentence boundaries as a best effort.
+//
+// The output is only ever fed to the unchanged scoreTranscript, never shown back
+// as an authoritative reconstruction.
 export function parseAudioTranscript(
   text: string,
-  segments?: { text: string }[]
+  segments?: AudioSegment[]
 ): TranscriptMessage[] {
   const nowIso = new Date().toISOString();
 
   let turns: string[];
   if (segments && segments.length > 0) {
-    turns = segments.map((s) => s.text.trim()).filter((t) => t.length > 0);
+    turns = groupSegmentsIntoTurns(segments);
   } else {
     turns = text
       .replace(/\r\n/g, "\n")

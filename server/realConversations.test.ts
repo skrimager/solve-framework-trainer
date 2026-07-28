@@ -12,6 +12,8 @@ import {
   deriveStalledStep,
   isValidSubmissionType,
   isAllowedAudioFile,
+  groupSegmentsIntoTurns,
+  SPEAKER_CHANGE_GAP_SECONDS,
   REAL_CONVERSATION_CONSENT_TEXT,
   MAX_AUDIO_BYTES,
   type RealConversationScorer,
@@ -447,6 +449,64 @@ describe("parseAudioTranscript (Phase 2)", () => {
   test("empty/blank transcripts yield no messages", () => {
     assert.equal(parseAudioTranscript("").length, 0);
     assert.equal(parseAudioTranscript("   \n  ").length, 0);
+  });
+});
+
+// Bug 1 (speaker attribution). A Whisper segment is an acoustic chunk, not a
+// turn: one speaker's multi-sentence turn arrives as several segments. Alternating
+// roles per segment therefore hands half of a turn to the wrong speaker, which is
+// the same root cause as the coach crediting the rep for a customer line.
+describe("groupSegmentsIntoTurns (Bug 1: diarization)", () => {
+  test("keeps one speaker's consecutive segments in a single turn", () => {
+    const turns = groupSegmentsIntoTurns([
+      { text: "Hi, thanks for coming in.", start: 0, end: 1.6 },
+      { text: "What brought you in today?", start: 1.7, end: 3.0 },
+    ]);
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0], "Hi, thanks for coming in. What brought you in today?");
+  });
+
+  test("starts a new turn only after a speaker-change silence gap", () => {
+    const turns = groupSegmentsIntoTurns([
+      { text: "Hi, thanks for coming in.", start: 0, end: 1.6 },
+      { text: "What brought you in today?", start: 1.7, end: 3.0 },
+      { text: "My truck is killing me on gas.", start: 3.0 + SPEAKER_CHANGE_GAP_SECONDS, end: 5.5 },
+    ]);
+    assert.deepEqual(turns, [
+      "Hi, thanks for coming in. What brought you in today?",
+      "My truck is killing me on gas.",
+    ]);
+  });
+
+  test("a multi-segment turn is not split across both speakers", () => {
+    // The exact shape of the reported failure: the customer asks a question over
+    // two segments, and the old per-segment alternation attributed the question
+    // half of it to the consultant.
+    const parsed = parseAudioTranscript("ignored", [
+      { text: "So I have been burned before.", start: 0, end: 1.8 },
+      { text: "How can I make sure I'm getting something that'll hold up?", start: 1.9, end: 4.2 },
+      { text: "That is a fair thing to want.", start: 5.4, end: 7.0 },
+    ]);
+    assert.deepEqual(
+      parsed.map((m) => m.role),
+      ["customer", "consultant"],
+    );
+    const question = parsed.find((m) => m.content.includes("hold up"));
+    assert.ok(question);
+    assert.equal(question!.role, "customer");
+  });
+
+  test("falls back to terminal punctuation when the model returns no timings", () => {
+    const turns = groupSegmentsIntoTurns([
+      { text: "I think the main thing is" },
+      { text: "the monthly cost." },
+      { text: "Understood, let's look at that." },
+    ]);
+    assert.deepEqual(turns, ["I think the main thing is the monthly cost.", "Understood, let's look at that."]);
+  });
+
+  test("ignores blank segments", () => {
+    assert.deepEqual(groupSegmentsIntoTurns([{ text: "   " }, { text: "" }]), []);
   });
 });
 

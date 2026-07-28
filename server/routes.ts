@@ -46,6 +46,7 @@ import {
   REAL_CONVERSATION_CONSENT_TEXT,
   MAX_AUDIO_BYTES,
   MAX_AUDIO_DURATION_SECONDS,
+  type AudioSegment,
   type RealConversationScorer,
   type RealConversationTranscriber,
 } from "./realConversations";
@@ -3232,7 +3233,7 @@ export function registerRealConversationRoutes(
         if (!cap.ok) return res.status(cap.status).json({ message: cap.message });
 
         // Transcribe with Whisper. A transcription failure never creates a row.
-        let transcription: { text: string; duration?: number; segments?: { text: string }[] };
+        let transcription: { text: string; duration?: number; segments?: AudioSegment[] };
         try {
           transcription = await transcriber({
             buffer: file.buffer,
