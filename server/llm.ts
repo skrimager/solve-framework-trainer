@@ -7,6 +7,7 @@ import {
   deriveConversationState,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
+import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
 
 const client = new OpenAI();
@@ -501,6 +502,23 @@ export const TRANSCRIPT_FIDELITY_RULES = `TRANSCRIPT FIDELITY (grade what is act
 - If they covered something partially, late, or clumsily, say precisely that instead. "You asked about safety, but only after you had already narrowed to one vehicle" is accurate and useful. "You never asked about safety" is neither.
 - Ground every claim, positive or negative, in a specific turn. If you cannot point to the turn, do not make the claim.`;
 
+// Rule 11. The narrower sibling of Rule 10, for the one claim shape that kept
+// getting made without being checked. The live failure: a trainee who asked about
+// budget, cash-versus-financing, and a trade-in a few turns in, right after the
+// customer said they wanted more comfort, was told they needed to talk about
+// financing earlier in the conversation. Two separate defects: the claim was never
+// checked against the transcript, and even a legitimate version of it was allowed
+// to float free of any real moment, which makes it unactionable. The deterministic
+// half of this is the timing pre-check block (see feedbackGrounding.ts), which
+// states what the transcript actually contains so this rule has facts to apply to.
+export const TIMING_FEEDBACK_RULES = `TIMING FEEDBACK MUST BE TRANSCRIPT-GROUNDED (any "you should have asked about X earlier" claim):
+Feedback of the form "that should have come up earlier", "you needed to raise X sooner", or "X came too late" is the easiest kind to get factually wrong, and a timing claim the trainee can disprove by rereading their own conversation costs you their trust in every other thing you told them. So it carries the heaviest burden of proof here.
+- BEFORE you say a topic was missing or late, look for it in the trainee's own labeled turns. A timing pre-check for the money topics is provided with the transcript; it is derived from the transcript text itself and it outranks your impression of the conversation.
+- If the topic was already raised, it was covered. Never write that it was missing, absent, or never came up.
+- If it was raised EARLY, its timing is not a coaching point at all. Do not say it should have happened earlier or sooner, do not suggest it "ideally" would have come up before then, and do not soften the same claim into a hedge. Credit them for raising it when they did.
+- If it genuinely was late, say when it actually happened, quoting or closely paraphrasing that turn, and then attach the suggestion to a specific real moment the CUSTOMER created earlier in this transcript. For example: "right after they mentioned wanting something with more comfort, that would have been a natural moment to ask about their budget and whether they were financing or paying cash, because that is when the shape of a workable option needs to start narrowing." A bare "earlier in the conversation" is not acceptable, because the trainee cannot act on a moment you did not name.
+- The moment you cite has to be something the customer actually said in THIS transcript. Never invent one and never import one from a different conversation.`;
+
 // Rule 8. The consulting rubric already has a full close-outcome taxonomy whose
 // top tier is exactly this outcome; the failure was in describing it, not in
 // scoring it. This block removes any reading under which the coach can call an
@@ -510,6 +528,8 @@ This is discovery and solution engineering, not closing. The goal of the convers
 - If the customer expressed agreement that the proposed solution works for them, the recommendation was made and it was accepted. Classify that as "client_agreed". Never classify it as "none", and never write anything to the effect of "you haven't presented a solution yet" or "no recommendation was made" about a conversation in which the customer accepted one. That statement is simply false and the trainee will see that it is false.
 - Do NOT require, look for, or deduct for the absence of a sales close: no signature, no paperwork, no deposit, no "asking for the business", no closing language of any kind. Their absence is not a gap and must not be coached as one.
 - An outcome left open on ONE genuinely external item is still an accepted solution, not a failure to close. "I'll have my son come look at it" or "I want to run it past my wife" from a customer who has already said the solution fits is a normal, healthy ending. Score the quality of the discovery and the fit of the solution, and if there is coaching to give about the ending, make it about confirming that one open item cleanly, not about failing to close.
+- THE STRONGEST FORM OF THIS ENDING IS A VERIFIED ONE, AND YOU SHOULD SAY SO WHEN YOU SEE IT. Some consultants do three things to close: they paint a concrete picture of how the solution fits what the customer actually told them, they then explicitly ask whether anything is still missing ("is there anything we haven't covered, anything else we should be talking about?"), and the customer explicitly confirms there is nothing left ("no, that's it, it sounds like you've covered everything") and is ready for the next step. That is a materially stronger ending than a bare "yes, let's do it", because the completeness of the discovery was verified WITH the customer rather than assumed by the consultant, and the customer's own confirmation is direct evidence that no unexplored need was left on the table. Credit it where it belongs: in needsDiscovery, as confirmed rather than presumed completeness, and in naturalClose, as a next step the customer walked into on their own. Name it in the feedback so the trainee knows that specific move is what landed.
+- That credit is earned, never automatic, and its absence is never a deduction. It only counts when the gap-check was genuine and the discovery behind it was real: a consultant who asked shallow questions and then asked "anything else?" has verified nothing, and a polite "nope" at the end of a thin conversation is not evidence of completeness. Score those exactly as the discovery itself deserves. Never read this pattern into a transcript that does not contain it, and never mark down a conversation that ended in a clear agreement without it, because that is still a top-tier outcome on its own.
 - This does not lower the bar anywhere else. Shallow discovery still scores low, a missed volunteered problem still costs points, and a conversation that never reached a recommendation at all is still "none".`;
 
 // Rule F. The graceful_referral outcome, its 85 anchor, and its effort gate all
@@ -550,14 +570,10 @@ export function renderTranscriptForScoring(
   transcript: TranscriptMessage[],
   labels: { customer: string; consultant: string } = { customer: "CUSTOMER", consultant: "CONSULTANT" }
 ): string {
-  return transcript
-    .filter((m) => m.content.trim().length > 0)
-    .map((m, i) => {
-      const speaker = m.role === "customer" ? labels.customer : labels.consultant;
-      // Collapse internal newlines so a multi-line message cannot produce an
-      // unlabeled line.
-      const body = m.content.trim().replace(/\s*\n+\s*/g, " ");
-      return `[${i + 1}] ${speaker}: ${body}`;
+  return numberedTurns(transcript)
+    .map((t) => {
+      const speaker = t.role === "customer" ? labels.customer : labels.consultant;
+      return `[${t.turn}] ${speaker}: ${t.text}`;
     })
     .join("\n");
 }
@@ -566,7 +582,7 @@ export function renderTranscriptForScoring(
 // model is accountable for reading all of it, and restates that the labels are
 // authoritative right where the labels appear.
 export function transcriptHeaderForScoring(transcript: TranscriptMessage[]): string {
-  const count = transcript.filter((m) => m.content.trim().length > 0).length;
+  const count = numberedTurns(transcript).length;
   return `Transcript (${count} turns, numbered in order). Each line begins with the speaker who said it; that label is authoritative. Read all ${count} turns before scoring:`;
 }
 
@@ -575,6 +591,8 @@ const RUBRIC_SYSTEM = `You are scoring a discovery-training role-play transcript
 ${SPEAKER_ATTRIBUTION_RULES}
 
 ${TRANSCRIPT_FIDELITY_RULES}
+
+${TIMING_FEEDBACK_RULES}
 
 ${ACCEPTED_SOLUTION_RULES}
 
@@ -612,7 +630,7 @@ Return ONLY valid JSON matching this shape, no other text:
 
 "feedback" should be 3-5 sentences of specific, DIAGNOSTIC narrative feedback in a coaching tone, using discovery-training language (never "sales" or "closing techniques" language). Write it in a warm, knowledgeable-partner voice — never a bare command, never scolding. Do not just tell the consultant WHAT to do ("dig deeper," "ask more questions"); teach WHY it matters, tied to the actual moment in the transcript where it applied. For example, instead of "dig deeper," write something like: "When someone shares a challenge, treat it as an opportunity to understand before offering anything. The best consultants don't ask more questions because a script told them to — they ask because they genuinely want to improve the other person's situation. Here, when they mentioned things were slow, that was your opening to get curious about what's driving it, because that's where you find the way to actually be useful to them." Every piece of feedback should be specific and grounded in a real moment, never generic.
 
-It must do four things: (1) acknowledge specifically what the consultant did well or attempted, quoting or closely paraphrasing a real moment from the transcript; (2) where they lost points — especially if they let a volunteered problem pass without exploring it — give at least one concrete example of a specific question or phrase they could have used at that moment, and explain the principle behind it (why leaning into that opening would have helped them actually understand and help the customer), not just the correction itself; (3) when a topic (for example budget/financing) was handled well but raised LATER rather than earlier, do NOT treat that as a failure — acknowledge that they handled it competently when it came up, and explain WHY raising it earlier generally helps (e.g. it lets you shape options to fit from the start and prevents surprises), framed as forward-looking coaching rather than punishment for a good outcome; and (4) when a REAL scheduling constraint made a same-day signature impossible or inappropriate (the customer is traveling, materials must be ordered, an installer must be scheduled), do NOT frame "no signature today" as a failure — instead evaluate how well they engineered a concrete solution around the constraint: praise locking in a specific timeline/next step, or securing a deposit and proactive logistics before the constraint window; and if they let it end on a vague "we'll call you," coach them on the specific commitment or timeline they could have proposed to keep momentum. It's not about the close — it's about finding out what the client truly needs and engineering a solution they feel good enough about to move forward and refer their friends and family, even if they can't sign or pay in the room that day. This is diagnostic discovery-skills coaching that teaches the principle behind every correction, not just a list of what was missing.`;
+It must do four things: (1) acknowledge specifically what the consultant did well or attempted, quoting or closely paraphrasing a real moment from the transcript; (2) where they lost points — especially if they let a volunteered problem pass without exploring it — give at least one concrete example of a specific question or phrase they could have used at that moment, and explain the principle behind it (why leaning into that opening would have helped them actually understand and help the customer), not just the correction itself; (3) do not write anything about the TIMING of a topic (for example budget/financing) unless the transcript and the timing pre-check show it actually came up later than it should have: if it was raised early, credit that and say nothing about when it happened, and if it genuinely was late, do NOT treat that as a failure, acknowledge that they handled it competently when it came up, name the real earlier customer moment it would have fit naturally after, and explain WHY raising it there generally helps (e.g. it lets you shape options to fit from the start and prevents surprises), framed as forward-looking coaching rather than punishment for a good outcome; and (4) when a REAL scheduling constraint made a same-day signature impossible or inappropriate (the customer is traveling, materials must be ordered, an installer must be scheduled), do NOT frame "no signature today" as a failure — instead evaluate how well they engineered a concrete solution around the constraint: praise locking in a specific timeline/next step, or securing a deposit and proactive logistics before the constraint window; and if they let it end on a vague "we'll call you," coach them on the specific commitment or timeline they could have proposed to keep momentum. It's not about the close — it's about finding out what the client truly needs and engineering a solution they feel good enough about to move forward and refer their friends and family, even if they can't sign or pay in the room that day. This is diagnostic discovery-skills coaching that teaches the principle behind every correction, not just a list of what was missing.`;
 
 // Per-difficulty scoring strictness so a higher-level scenario demands more
 // precision and completeness to earn the same score.
@@ -1107,9 +1125,22 @@ export async function scoreTranscript(
     ? `${system}\n\n${calibration}\n\n${txnCalibration}`
     : `${system}\n\n${calibration}`;
 
+  // Per-session facts about what the transcript contains, so TIMING_FEEDBACK_RULES
+  // has something deterministic to apply instead of the model's recollection. It
+  // sits AFTER the transcript, in the volatile tail, because it is unique per
+  // session and must not disturb the cacheable prefix. The consulting rubric is
+  // the only one that coaches topic timing, so leadership prompts are unchanged.
+  const timingGrounding = isLeadership ? "" : buildTimingGroundingBlock(transcript);
+
   const raw = (
     await responder(
-      `${stablePrefix}\n\n${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
+      [
+        stablePrefix,
+        `${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
+        timingGrounding,
+      ]
+        .filter((part) => part.length > 0)
+        .join("\n\n"),
       cacheKeyForPrefix(stablePrefix)
     )
   ).trim();

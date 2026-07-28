@@ -1142,6 +1142,7 @@ describe("computeScoreCacheHash - stability and sensitivity", () => {
 import {
   ACCEPTED_SOLUTION_RULES,
   SPEAKER_ATTRIBUTION_RULES,
+  TIMING_FEEDBACK_RULES,
   TRANSCRIPT_FIDELITY_RULES,
   TTS_SPEED,
   hasProposedRecommendation,
@@ -1301,6 +1302,152 @@ describe("the shared scoring-accuracy blocks (Rules 8-10)", () => {
 
   test("Rule 8 explicitly refuses to lower the bar anywhere else (guardrail)", () => {
     assert.match(ACCEPTED_SOLUTION_RULES, /does not lower the bar/i);
+  });
+});
+
+// A verified ending: the consultant paints how the solution fits what was
+// discussed, explicitly asks whether anything is still missing, and the customer
+// explicitly confirms nothing is. The taxonomy classifies that as "client_agreed"
+// exactly like a bare "yes, let's do it", so both share the 85 anchor and the
+// only place the extra rigor could show up is the discovery dimensions. Nothing
+// told the grader to look for it there, so it was credited by chance or not at
+// all. This is a recognition instruction only: no weight, anchor, cap, or
+// threshold moves, and the pattern's absence is explicitly not a deduction.
+describe("ACCEPTED_SOLUTION_RULES - crediting a verified 'nothing missing' ending", () => {
+  test("an explicit gap-check plus an explicit confirmation is named as the stronger ending", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /anything we haven't covered/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /materially stronger ending than a bare "yes, let's do it"/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /verified WITH the customer rather than assumed/);
+    // Credited inside the dimensions that already score discovery quality.
+    assert.match(ACCEPTED_SOLUTION_RULES, /in needsDiscovery/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /in naturalClose/);
+  });
+
+  test("the credit is gated on real discovery and its absence is not a deduction", () => {
+    assert.match(ACCEPTED_SOLUTION_RULES, /earned, never automatic, and its absence is never a deduction/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /asked "anything else\?" has verified nothing/);
+    assert.match(ACCEPTED_SOLUTION_RULES, /never mark down a conversation that ended in a clear agreement without it/);
+  });
+
+  test("no number moves: the only route to a higher score is a higher sub-score", () => {
+    // Guardrail. A bare agreement and a verified one still share one anchor, and
+    // there is no separate bonus path, so the extra credit has to be earned in
+    // the discovery dimensions the grader must justify from the transcript.
+    assert.equal(closeOutcomeAnchor("client_agreed"), 85);
+    const bare = rubric({ needsDiscovery: 80, naturalClose: 80 });
+    const verified = rubric({ needsDiscovery: 88, naturalClose: 88 });
+    assert.ok(
+      computeConsultingOverall(verified, "client_agreed") >
+        computeConsultingOverall(bare, "client_agreed"),
+    );
+  });
+});
+
+// Rule 11. The live failure: "you needed to talk about financing earlier in the
+// conversation" written about a transcript in which the rep asked about budget,
+// cash-versus-financing, and a trade-in a few turns in. Two defects in one
+// sentence: an unchecked claim, and advice with no real moment attached.
+describe("TIMING_FEEDBACK_RULES - transcript-grounded timing claims (Rule 11)", () => {
+  test("the claim must be checked against the trainee's own turns before it is made", () => {
+    assert.match(TIMING_FEEDBACK_RULES, /BEFORE you say a topic was missing or late/);
+    assert.match(TIMING_FEEDBACK_RULES, /timing pre-check/);
+  });
+
+  test("a topic raised early is off limits as a timing criticism, hedges included", () => {
+    assert.match(TIMING_FEEDBACK_RULES, /If it was raised EARLY, its timing is not a coaching point/);
+    assert.match(TIMING_FEEDBACK_RULES, /do not soften the same claim into a hedge/);
+  });
+
+  test("legitimate timing feedback must attach to a real customer moment", () => {
+    assert.match(TIMING_FEEDBACK_RULES, /attach the suggestion to a specific real moment the CUSTOMER created/);
+    assert.match(TIMING_FEEDBACK_RULES, /"earlier in the conversation" is not acceptable/);
+    assert.match(TIMING_FEEDBACK_RULES, /Never invent one/);
+  });
+
+});
+
+describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", () => {
+  function capture() {
+    let seen = "";
+    let key = "";
+    const responder: ScoreResponder = async (input, promptCacheKey) => {
+      seen = input;
+      key = promptCacheKey;
+      return JSON.stringify({
+        needsDiscovery: 80,
+        objectionPrevention: 80,
+        trustBuilding: 80,
+        naturalClose: 80,
+        relationshipContinuity: 80,
+        closeOutcome: "client_agreed",
+        feedback: "ok",
+      });
+    };
+    return { responder, input: () => seen, cacheKey: () => key };
+  }
+
+  // The reported scenario: the customer names wanting more comfort and the rep
+  // asks about budget, cash-versus-financing, and a trade-in on the next turn.
+  const comfortThenBudget = [
+    turn("consultant", "What brings you in today?"),
+    turn("customer", "I want something with more comfort for my commute."),
+    turn("consultant", "What does your budget look like, and are you paying cash or financing? Any trade-in?"),
+    turn("customer", "Financing, around twenty five thousand, and yes I have a trade-in."),
+    turn("consultant", "Based on what you've told me, I'd recommend the midsize sedan."),
+    turn("customer", "That sounds right, that's exactly what we need."),
+  ];
+
+  test("the consulting rubric is told financing was already covered, and covered early", async () => {
+    const cap = capture();
+    await scoreTranscript(comfortThenBudget, "beginner", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.ok(cap.input().includes(TIMING_FEEDBACK_RULES));
+    assert.match(cap.input(), /TIMING PRE-CHECK/);
+    assert.match(cap.input(), /ALREADY COVERED, and covered early/);
+    assert.match(cap.input(), /The CONSULTANT raised it themselves at turn 3 of 6/);
+
+    // The old instruction told the grader to explain why raising budget/financing
+    // earlier helps whenever the topic appeared, with nothing gating it on the
+    // topic having actually been late. That is what produced the false claim.
+    assert.match(cap.input(), /do not write anything about the TIMING of a topic/);
+    assert.match(
+      cap.input(),
+      /if it was raised early, credit that and say nothing about when it happened/,
+    );
+  });
+
+  test("the pre-check follows the transcript and stays out of the cacheable prefix", async () => {
+    const cap = capture();
+    await scoreTranscript(comfortThenBudget, "beginner", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    const input = cap.input();
+    assert.ok(input.indexOf("[1] CONSULTANT:") < input.indexOf("TIMING PRE-CHECK"));
+
+    // Per-session facts must not fragment the prompt cache: two different
+    // transcripts at the same track/difficulty still route to one cache key.
+    const other = capture();
+    await scoreTranscript(
+      [turn("consultant", "What brings you in?"), turn("customer", "Just looking.")],
+      "beginner",
+      "consulting",
+      null,
+      { responder: other.responder, cache: makeInMemoryCache() },
+    );
+    assert.equal(other.cacheKey(), cap.cacheKey());
+    assert.ok(!other.input().includes("ALREADY COVERED"));
+  });
+
+  test("leadership scoring is unchanged: no money-topic pre-check", async () => {
+    const cap = capture();
+    await scoreTranscript(comfortThenBudget, "beginner", "leadership", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.ok(!cap.input().includes("TIMING PRE-CHECK"));
   });
 });
 
