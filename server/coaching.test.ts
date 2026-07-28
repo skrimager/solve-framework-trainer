@@ -16,6 +16,7 @@ import {
   ACCEPTED_SOLUTION_RULES,
   GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
+  TIMING_FEEDBACK_RULES,
   TRANSCRIPT_FIDELITY_RULES,
 } from "./llm";
 import type { TranscriptMessage } from "@shared/schema";
@@ -75,6 +76,71 @@ describe("COACHING_SYSTEM prompt content", () => {
     assert.ok(COACHING_SYSTEM.includes(GRACEFUL_RELEASE_RULES));
     assert.match(COACHING_SYSTEM, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
     assert.match(COACHING_SYSTEM, /REFERRING A GENUINELY OUT-OF-SCOPE TECHNICAL QUESTION/);
+  });
+});
+
+// Rule 11. The live failure was in the Coach's voice: it told a trainee they
+// needed to talk about financing earlier on a transcript where they had asked
+// about budget, cash-versus-financing, and a trade-in three turns in. The Coach
+// needs both halves of the fix: the rule that timing claims must be checked, and
+// the per-attempt pre-check that says what this transcript actually contains.
+describe("COACHING_SYSTEM - transcript-grounded timing feedback (Rule 11)", () => {
+  test("inherits the shared timing-feedback rules", () => {
+    assert.ok(COACHING_SYSTEM.includes(TIMING_FEEDBACK_RULES));
+  });
+
+  test("is told the rubric feedback it inherits can be wrong, and not to defend it", () => {
+    assert.match(COACHING_SYSTEM, /timing pre-check/);
+    assert.match(COACHING_SYSTEM, /Never restate a timing claim the pre-check contradicts/);
+  });
+});
+
+describe("buildCoachingStablePrefix - the timing pre-check (Rule 11)", () => {
+  // The reported scenario: comfort remark, then budget / cash-vs-financing /
+  // trade-in on the very next turn.
+  const COMFORT_THEN_BUDGET: TranscriptMessage[] = [
+    { role: "consultant", content: "What brings you in today?", timestamp: "t1" },
+    { role: "customer", content: "I want something with more comfort for my commute.", timestamp: "t2" },
+    {
+      role: "consultant",
+      content: "What does your budget look like, and are you paying cash or financing? Any trade-in?",
+      timestamp: "t3",
+    },
+    { role: "customer", content: "Financing, around twenty five thousand, and yes a trade-in.", timestamp: "t4" },
+  ];
+
+  function prefix(transcript: TranscriptMessage[], feedback: string) {
+    return buildCoachingStablePrefix({
+      track: "consulting",
+      feedback,
+      rubricScoresJson: null,
+      overallScore: 84,
+      transcript,
+      thread: [],
+      question: "I did ask about financing though, right at the start?",
+    });
+  }
+
+  test("an early budget ask is stated as covered, so the Coach cannot say it came too late", () => {
+    // The wrong feedback the trainee actually received is passed in, because the
+    // Coach reads it as context and must not repeat it.
+    const built = prefix(
+      COMFORT_THEN_BUDGET,
+      "You needed to talk about financing earlier in the conversation.",
+    );
+    assert.match(built, /TIMING PRE-CHECK/);
+    assert.match(built, /ALREADY COVERED, and covered early/);
+    assert.match(built, /The TRAINEE raised it themselves at turn 3 of 4/);
+  });
+
+  test("the pre-check sits after the transcript it was derived from", () => {
+    const built = prefix(COMFORT_THEN_BUDGET, "Good start.");
+    assert.ok(built.indexOf("[3] TRAINEE:") < built.indexOf("TIMING PRE-CHECK"));
+  });
+
+  test("a session with no transcript gets no pre-check block", () => {
+    const built = prefix([], "Good start.");
+    assert.ok(!built.includes("TIMING PRE-CHECK"));
   });
 });
 

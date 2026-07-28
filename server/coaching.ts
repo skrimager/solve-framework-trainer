@@ -5,10 +5,12 @@ import {
   ACCEPTED_SOLUTION_RULES,
   GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
+  TIMING_FEEDBACK_RULES,
   TRANSCRIPT_FIDELITY_RULES,
   renderTranscriptForScoring,
   transcriptHeaderForScoring,
 } from "./llm";
+import { buildTimingGroundingBlock } from "./feedbackGrounding";
 
 // Reuses the exact same OpenAI client setup as server/llm.ts: a default
 // `new OpenAI()` that reads OPENAI_API_KEY from the environment (or, in the dev
@@ -58,6 +60,8 @@ ${SPEAKER_ATTRIBUTION_RULES}
 
 ${TRANSCRIPT_FIDELITY_RULES}
 
+${TIMING_FEEDBACK_RULES}
+
 ${ACCEPTED_SOLUTION_RULES}
 
 ${GRACEFUL_RELEASE_RULES}
@@ -65,6 +69,7 @@ ${GRACEFUL_RELEASE_RULES}
 Using the transcript (important, be judgment-based):
 - You have the trainee's actual scenario transcript available below. Use it CONDITIONALLY. When the trainee's question is about what they actually said or how they could have phrased something ("what did I say", "how could I have asked that", "give me a better way to word X", before/after rewrites), quote or closely paraphrase the specific lines from their transcript and offer a concrete rewrite.
 - When the question is general ("why does discovery matter", "what does trust-building mean"), answer from the framework and their feedback. Do NOT force transcript quotes in where they don't help.
+- The rubric feedback above was written by the scorer, not by you, and it can contain a claim the transcript does not support. When the trainee pushes back on one ("I did ask about that, and early"), check the transcript and the timing pre-check before you answer. If they are right, say so plainly, drop the point, and coach them on something real instead of defending the feedback. Never restate a timing claim the pre-check contradicts, even to soften it.
 
 Recognizing when to redirect (important — use your own judgment, no rigid counter):
 - You are not limited in how many questions you'll answer, but watch for the conversation losing value. If the trainee is re-asking something you've already covered (even reworded), or the thread has run long without new substance, or they seem to be looking for reassurance rather than a new insight, gently say so and redirect: the fastest way to improve now is to run another practice scenario and apply this live, rather than keep talking it through. Suggest that warmly, in your own words — don't lecture, and don't refuse to answer, just steer them toward practicing.`;
@@ -90,13 +95,21 @@ export function buildCoachingStablePrefix(params: CoachingPromptParams): string 
     overallScore !== null ? `Overall score: ${overallScore}/100.` : "Overall score: (not scored).";
   const rubricLine = rubricScoresJson ? `Per-dimension scores (JSON): ${rubricScoresJson}` : "";
 
+  // What the transcript actually contains on the topics the Coach gives timing
+  // advice about, so a "you should have raised that earlier" answer cannot
+  // contradict the trainee's own conversation. Empty for an empty transcript.
+  const timingGrounding = buildTimingGroundingBlock(transcript, "TRAINEE");
+
   return [
     COACHING_SYSTEM,
     `This was a ${trackLabel} scenario.`,
     `${scoresLine}${rubricLine ? `\n${rubricLine}` : ""}`,
     `Rubric feedback the trainee already saw:\n${feedback || "(no narrative feedback recorded)"}`,
     `The trainee's scenario transcript (reference it only when the question calls for it):\n${transcriptText}`,
-  ].join("\n\n");
+    timingGrounding,
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
 }
 
 export function buildCoachingPrompt(params: CoachingPromptParams): string {

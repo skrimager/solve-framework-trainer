@@ -43,7 +43,7 @@ const TOPIC_LABEL: Record<DeflectableTopic, string> = {
 // Lexical markers for each topic. Matched case-insensitively against whole words
 // so "finance" does not fire on "financially independent" style near-misses any
 // more than necessary.
-const TOPIC_PATTERNS: Record<DeflectableTopic, RegExp[]> = {
+export const TOPIC_PATTERNS: Record<DeflectableTopic, RegExp[]> = {
   warranty: [/\bwarrant(?:y|ies)\b/i, /\bservice contract\b/i, /\bextended coverage\b/i, /\bservice plan\b/i],
   financing: [/\bfinanc(?:e|ing|ed)\b/i, /\bapr\b/i, /\binterest rate\b/i, /\bcredit (?:score|check|approval)\b/i, /\blender\b/i, /\bpre-?approv/i],
   loanTerms: [/\bloan\b/i, /\bterm length\b/i, /\bmonth (?:term|loan)\b/i, /\b\d{2}\s*month(?:s)?\b/i, /\bamortiz/i, /\bpayoff\b/i],
@@ -138,7 +138,7 @@ const SOLUTION_ACCEPTED_PATTERNS: RegExp[] = [
 // customer. Acceptance only means something once one of these has happened, so
 // "that works for me" in answer to a discovery question is never mistaken for
 // accepting a solution that was never proposed.
-const PROPOSAL_MARKERS: RegExp[] = [
+export const PROPOSAL_MARKERS: RegExp[] = [
   /\bi(?:'d| would) recommend\b/i,
   /\bi recommend\b/i,
   /\bmy recommendation\b/i,
