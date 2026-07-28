@@ -12,6 +12,11 @@ import {
   getCoachingReply,
   type CoachingResponder,
 } from "./coaching";
+import {
+  ACCEPTED_SOLUTION_RULES,
+  SPEAKER_ATTRIBUTION_RULES,
+  TRANSCRIPT_FIDELITY_RULES,
+} from "./llm";
 import type { TranscriptMessage } from "@shared/schema";
 
 const TRANSCRIPT: TranscriptMessage[] = [
@@ -49,6 +54,48 @@ describe("COACHING_SYSTEM prompt content", () => {
     assert.ok(lower.includes("quote"));
     // General questions should be answered from the framework without forcing quotes.
     assert.ok(lower.includes("do not force transcript quotes"));
+  });
+
+  // Part B. The Coach reads the same transcript the rubric scorer does, so it
+  // inherits the same attribution and accepted-solution discipline; otherwise the
+  // rubric could get it right and the follow-up chat could still tell the trainee
+  // they asked a question the customer asked.
+  test("inherits the shared speaker-attribution, fidelity, and accepted-solution rules", () => {
+    assert.ok(COACHING_SYSTEM.includes(SPEAKER_ATTRIBUTION_RULES));
+    assert.ok(COACHING_SYSTEM.includes(TRANSCRIPT_FIDELITY_RULES));
+    assert.ok(COACHING_SYSTEM.includes(ACCEPTED_SOLUTION_RULES));
+  });
+});
+
+describe("coaching transcript rendering (Rule 9)", () => {
+  test("turns are numbered and explicitly labeled CUSTOMER / TRAINEE", () => {
+    const prefix = buildCoachingStablePrefix({
+      track: "consulting",
+      feedback: "f",
+      rubricScoresJson: null,
+      overallScore: null,
+      transcript: [
+        { role: "customer", content: "How do I know this will hold up?", timestamp: "t1" },
+        { role: "consultant", content: "That's a fair thing to want.", timestamp: "t2" },
+      ],
+      thread: [],
+      question: "q",
+    });
+    assert.ok(prefix.includes("[1] CUSTOMER: How do I know this will hold up?"));
+    assert.ok(prefix.includes("[2] TRAINEE: That's a fair thing to want."));
+  });
+
+  test("an empty transcript still reads as an empty transcript, not as a phantom turn", () => {
+    const prefix = buildCoachingStablePrefix({
+      track: "consulting",
+      feedback: "f",
+      rubricScoresJson: null,
+      overallScore: null,
+      transcript: [],
+      thread: [],
+      question: "q",
+    });
+    assert.ok(prefix.includes("(no transcript recorded)"));
   });
 });
 
