@@ -57,6 +57,34 @@ const CLASSIFY_TABLE: Array<{ text: string; expected: TurnCompleteness; note: st
   { text: "no thanks", expected: "complete", note: "closer 'thanks'" },
   { text: "sounds good", expected: "complete", note: "closer 'good'" },
 
+  // Bug 2: mid-sentence punctuation the recognizer emits while the speaker is
+  // still going. A trailing comma/dash/colon is an explicit continuation marker.
+  { text: "so the first thing,", expected: "incomplete", note: "trailing comma" },
+  { text: "there are two problems:", expected: "incomplete", note: "trailing colon" },
+  { text: "it was fine at first;", expected: "incomplete", note: "trailing semicolon" },
+  { text: "the payment was okay -", expected: "incomplete", note: "trailing hyphen" },
+
+  // Bug 2: words that open something not yet said. A breath pause in a long rep
+  // sentence very often lands on one of these.
+  { text: "the part I care about most is how", expected: "incomplete", note: "interrogative 'how'" },
+  { text: "I want to understand what", expected: "incomplete", note: "interrogative 'what'" },
+  { text: "and then there was that", expected: "incomplete", note: "demonstrative 'that'" },
+  { text: "we looked at a few of those", expected: "incomplete", note: "demonstrative 'those'" },
+  { text: "the mileage is probably", expected: "incomplete", note: "hedge 'probably'" },
+  { text: "safety matters to me more", expected: "incomplete", note: "comparative 'more'" },
+  { text: "I have not really", expected: "incomplete", note: "adverb 'really'" },
+
+  // Bug 2: a long stretch with no terminal punctuation and no sentence-final word
+  // is far likelier to be mid-thought than finished, so a pause there must not
+  // auto-send half a sentence.
+  {
+    text:
+      "so what I am hearing is that the commute is the real issue here and the fuel cost " +
+      "on the truck has been adding up on you every single month",
+    expected: "incomplete",
+    note: "long unpunctuated stretch still in progress",
+  },
+
   // Genuinely ambiguous: no strong trailing signal either way.
   { text: "I would like the blue one", expected: "neutral", note: "ends on a content word" },
   { text: "so I think the price is fair", expected: "neutral", note: "leading 'so' does not count" },
@@ -79,13 +107,13 @@ describe("recommendSilenceMs", () => {
   test("complete utterance waits less than the base", () => {
     const ms = recommendSilenceMs("Yes, that works for me.");
     assert.ok(ms < DEFAULT_SILENCE_MS, `expected < ${DEFAULT_SILENCE_MS}, got ${ms}`);
-    assert.equal(ms, 900);
+    assert.equal(ms, 1000);
   });
 
   test("incomplete utterance waits more than the base", () => {
     const ms = recommendSilenceMs("I think the main thing is");
     assert.ok(ms > DEFAULT_SILENCE_MS, `expected > ${DEFAULT_SILENCE_MS}, got ${ms}`);
-    assert.equal(ms, 2550);
+    assert.equal(ms, 4250);
   });
 
   test("scales around a custom base", () => {
@@ -95,13 +123,23 @@ describe("recommendSilenceMs", () => {
   });
 
   test("clamps to the minimum wait", () => {
-    // 800 * 0.6 = 480, clamped up to the 600ms floor.
+    // 800 * 0.4 = 320, clamped up to the 600ms floor.
     assert.equal(recommendSilenceMs("okay.", 800), 600);
   });
 
   test("clamps to the maximum wait", () => {
-    // 2200 * 1.7 = 3740, clamped down to the 3500ms ceiling.
-    assert.equal(recommendSilenceMs("and", 2200), 3500);
+    // 4000 * 1.7 = 6800, clamped down to the 5000ms ceiling.
+    assert.equal(recommendSilenceMs("and", 4000), 5000);
+  });
+
+  test("the default base is long enough to ride over an ordinary breath pause", () => {
+    // Bug 2: the neutral wait is what actually cut reps off mid sentence, because
+    // a pause inside a long sentence often lands on a word the classifier can read
+    // neither as finished nor unfinished.
+    assert.ok(
+      DEFAULT_SILENCE_MS >= 2000,
+      `the ambiguous wait must ride over a breath pause, got ${DEFAULT_SILENCE_MS}`,
+    );
   });
 });
 
