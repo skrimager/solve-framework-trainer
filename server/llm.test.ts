@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildCustomerReplyPrompt,
   buildCustomerReplyStablePrefix,
+  buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
   computeScoreCacheHash,
   scoreTranscript,
@@ -66,6 +67,188 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
   test("handles an empty transcript with a sensible placeholder", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, [], "beginner");
     assert.ok(prompt.includes("The consultant is about to greet you"));
+  });
+});
+
+describe("CONVERSATION_REALISM_RULES - state awareness and forward motion", () => {
+  const rules = CONVERSATION_REALISM_RULES.toLowerCase();
+
+  test("forbids repeating a line verbatim or lightly reworded, with no unmet-want loophole", () => {
+    assert.ok(rules.includes("never repeat yourself"));
+    assert.ok(rules.includes("lightly reworded"));
+    // The old rules allowed re-raising a concern whenever the consultant's last
+    // reply "failed to address it", which the model used as license to re-issue
+    // the opening demand verbatim. That escape hatch must be gone.
+    assert.ok(!rules.includes("unless the consultant's most recent reply"));
+  });
+
+  test("requires reacting to the consultant's last move before anything else", () => {
+    assert.ok(rules.includes("react, then advance"));
+    assert.ok(rules.includes("most recent message"));
+    assert.ok(rules.includes("only make sense if the consultant's last message had not happened"));
+  });
+
+  test("requires every turn to advance the conversation somewhere new", () => {
+    assert.ok(rules.includes("has not been yet"));
+    assert.ok(rules.includes("never leave the conversation exactly where you found it"));
+  });
+
+  test("covers the state the customer must not contradict", () => {
+    // A promise to fetch something is pending, not a fresh reason to re-demand it.
+    assert.ok(rules.includes("go get you a number"));
+    assert.ok(rules.includes("how long that usually takes"));
+    // A number already given cannot be asked for again.
+    assert.ok(rules.includes("already been given to you"));
+    assert.ok(rules.includes("do not ask for it again"));
+    // A question asked must be acknowledged.
+    assert.ok(rules.includes("never behave as though no question was asked"));
+    // An alternative or budget question must be answered on its own terms.
+    assert.ok(rules.includes("respond to that specific thing"));
+  });
+
+  test("reinterprets persona 'stay firm' instructions as being about the want, not the wording", () => {
+    // Nearly every scenario core ends with a failure branch telling the customer
+    // to stay fixed on / keep asking about their opening demand. Those phrases
+    // must be neutralized here or they keep producing verbatim loops.
+    assert.ok(rules.includes("stay firm"));
+    assert.ok(rules.includes("stay fixed on"));
+    assert.ok(rules.includes("keep asking"));
+    assert.ok(rules.includes("keep steering back"));
+    assert.ok(rules.includes("it never means reusing the same sentence"));
+  });
+
+  test("preserves the tough-customer behaviors that make the drill worth doing", () => {
+    assert.ok(rules.includes("being difficult is good"));
+    assert.ok(rules.includes("escalating impatience in new words"));
+    assert.ok(rules.includes("is that real or is that a stall?"));
+    // Threatening to leave and accepting an honest referral are both wins to keep.
+    assert.ok(rules.includes("about to leave"));
+    assert.ok(rules.includes("refers you elsewhere"));
+    // Reward a consultant who is doing everything right.
+    assert.ok(rules.includes("do not stonewall someone who is doing everything right"));
+  });
+});
+
+describe("buildTurnStateBlock", () => {
+  test("is empty before the conversation has started", () => {
+    assert.equal(buildTurnStateBlock([]), "");
+  });
+
+  test("pins the consultant's most recent message as the thing being replied to", () => {
+    const block = buildTurnStateBlock([
+      msg("customer", "Just tell me your best out-the-door price."),
+      msg("consultant", "Let me message my manager right now to get the real number."),
+    ]);
+    assert.ok(block.includes("most recent message"));
+    assert.ok(block.includes("Let me message my manager right now to get the real number."));
+  });
+
+  test("uses the LAST consultant message, not an earlier one", () => {
+    const block = buildTurnStateBlock([
+      msg("consultant", "What are you driving now?"),
+      msg("customer", "A truck."),
+      msg("consultant", "Here comes my manager now."),
+    ]);
+    const latestIdx = block.indexOf("Here comes my manager now.");
+    assert.ok(latestIdx >= 0);
+    assert.ok(!block.includes("What are you driving now?"));
+  });
+
+  test("lists every line the customer has already said as off limits", () => {
+    const block = buildTurnStateBlock([
+      msg("customer", "Just tell me your best out-the-door price."),
+      msg("consultant", "Happy to get that for you."),
+      msg("customer", "How long's that usually take?"),
+      msg("consultant", "About a minute."),
+    ]);
+    assert.ok(block.includes("ALREADY said"));
+    assert.ok(block.includes("do not reword any of them"));
+    assert.ok(block.includes('"Just tell me your best out-the-door price."'));
+    assert.ok(block.includes(`"How long's that usually take?"`));
+  });
+
+  test("ignores the empty customer placeholder a streamed turn is about to fill", () => {
+    const block = buildTurnStateBlock([
+      msg("customer", "Just tell me your best out-the-door price."),
+      msg("consultant", "Let me get that number."),
+      msg("customer", ""),
+    ]);
+    assert.ok(!block.includes('- ""'));
+  });
+
+  test("sits in the volatile tail so the cacheable stable prefix is unchanged", () => {
+    const transcript = [
+      msg("customer", "Just tell me your best out-the-door price."),
+      msg("consultant", "Let me get that number."),
+    ];
+    const stable = buildCustomerReplyStablePrefix(PERSONA, "beginner");
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "beginner");
+    assert.ok(prompt.startsWith(stable));
+    assert.ok(!stable.includes("Where this conversation stands"));
+    assert.ok(prompt.indexOf("Conversation so far:") < prompt.indexOf("Where this conversation stands"));
+  });
+});
+
+// The exact repro from the auto-sales price-shopper bug report: the customer
+// re-demanded the out-the-door price after the consultant had promised to fetch
+// it, and again after it had already been quoted. The model call itself is not
+// exercised here, but every turn of that conversation is walked through to assert
+// the prompt now carries the two facts that make the looping reply impossible to
+// justify: what the consultant just did, and that the demand line is spent.
+describe("buildCustomerReplyPrompt - auto-sales price-shopper repro", () => {
+  const LOOP_LINE = "I just want your best out-the-door price.";
+  const conversation = [
+    msg("customer", LOOP_LINE),
+    msg(
+      "consultant",
+      "I'm happy to get you the out-the-door price. Let me message my manager right now to get the real number.",
+    ),
+    msg("customer", "Alright, appreciate that. How long's that usually take?"),
+    msg("consultant", "Should be a minute. While we wait, you mentioned your last car gave you trouble, what happened?"),
+    msg("customer", "It's a long story. I'd really just like that number when your manager gets back."),
+    msg("consultant", "That's exactly why I asked. Here comes my manager now."),
+    msg("customer", "Okay good, what'd he say?"),
+    msg(
+      "consultant",
+      "He came back at $15,875 out the door. Given what you told me, does that work against what you had budgeted?",
+    ),
+  ];
+
+  function promptAfter(turns: number): string {
+    return buildCustomerReplyPrompt(PERSONA, conversation.slice(0, turns), "beginner");
+  }
+
+  test("turn 1: the pending price promise is the last move, and the demand line is spent", () => {
+    const prompt = promptAfter(2);
+    assert.ok(prompt.includes("Let me message my manager right now to get the real number."));
+    assert.ok(prompt.includes(`"${LOOP_LINE}"`));
+    assert.ok(prompt.includes("Do not say any of these again"));
+  });
+
+  test("turn 2: the discovery question is the last move while the price is still pending", () => {
+    const prompt = promptAfter(4);
+    assert.ok(prompt.includes("you mentioned your last car gave you trouble, what happened?"));
+    // Both of the customer's earlier lines are now off limits.
+    assert.ok(prompt.includes(`"${LOOP_LINE}"`));
+    assert.ok(prompt.includes(`"Alright, appreciate that. How long's that usually take?"`));
+  });
+
+  test("turn 4: after the price is quoted, the last move is the number plus a budget question", () => {
+    const prompt = promptAfter(8);
+    assert.ok(prompt.includes("$15,875"));
+    assert.ok(prompt.includes("does that work against what you had budgeted?"));
+    // The failure the bug report called out: re-demanding the price after it was
+    // given. Every customer line so far, including the demand, is now barred.
+    for (const said of conversation.filter((m) => m.role === "customer")) {
+      assert.ok(prompt.includes(`"${said.content}"`), `should bar reuse of: ${said.content}`);
+    }
+  });
+
+  test("the full history is present on every turn, not just the latest exchange", () => {
+    const prompt = promptAfter(8);
+    for (const turn of conversation) {
+      assert.ok(prompt.includes(turn.content), `history should include: ${turn.content}`);
+    }
   });
 });
 

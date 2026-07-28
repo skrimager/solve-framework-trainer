@@ -37,6 +37,23 @@ export const DEMO_V2_ALL_SLUGS: string[] = [
   ...DEMO_V2_SLUGS.real_estate,
 ];
 
+// The free demo always runs at Beginner, no matter what the scenario row says.
+// A brand-new visitor gets exactly one session, and that first impression has to
+// be encouraging rather than punishing. Pinning it here at request time (instead
+// of relying on the six rows being seeded "beginner") means an admin edit, a
+// partial reseed, or any future difficulty picker can never quietly hand someone
+// an Advanced conversation on their first try. The paid/trainee flow in
+// server/routes.ts is untouched and still honors the scenario's own difficulty.
+export const DEMO_V2_DIFFICULTY = "beginner";
+
+// The scenario the demo should actually run: the stored row with difficulty
+// forced to Beginner. Applied at every point the demo loads a scenario, so the
+// difficulty the customer is generated at and the difficulty the session is
+// scored at are always the same value and can never drift apart.
+export function demoV2Scenario<T extends { difficulty: string }>(scenario: T): T {
+  return { ...scenario, difficulty: DEMO_V2_DIFFICULTY };
+}
+
 export function industryForSlug(slug: string): DemoV2IndustryKey | null {
   if (DEMO_V2_SLUGS.auto.includes(slug)) return "auto";
   if (DEMO_V2_SLUGS.real_estate.includes(slug)) return "real_estate";

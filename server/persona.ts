@@ -121,7 +121,7 @@ export function buildPersonaVariantSection(selected: SelectedPersonaVariant): st
   }
   if (selected.objections.length > 0) {
     lines.push(
-      "- Concerns that are on your mind this time. Raise them naturally, in your own words, at roughly the point noted, and ONLY if the consultant has not already put them to rest. Do not list them all at once, and do not invent extra ones:"
+      "- Concerns that are on your mind this time. These are notes about what is bothering you, not lines to recite: raise each one at most ONCE, in your own words at that moment, at roughly the point noted, and ONLY if the consultant has not already put it to rest. Never repeat one you have already raised. Do not list them all at once, and do not invent extra ones:"
     );
     for (const obj of selected.objections) {
       lines.push(`  - ${obj.text} (bring this up ${POSITION_HINT[obj.position]})`);

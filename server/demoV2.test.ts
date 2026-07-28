@@ -15,6 +15,8 @@ import {
   DEMO_V2_INDUSTRIES,
   DEMO_V2_SLUGS,
   DEMO_V2_ALL_SLUGS,
+  DEMO_V2_DIFFICULTY,
+  demoV2Scenario,
   industryForSlug,
   isDemoV2Industry,
   pickNextV2Scenario,
@@ -867,6 +869,27 @@ describe("demo v2 streamed replies", () => {
     const res = await fetch(`${baseUrl}/api/demo/session/1/turn-stream/not-a-real-msg`);
     assert.equal(res.status, 404);
   });
+
+  // The end-to-end half of the forced-Beginner guarantee: a scenario row that has
+  // drifted off "beginner" must still generate the customer at Beginner, because
+  // this is a first-time visitor's single free session. Asserted on the value the
+  // shared streamer actually receives, over a real HTTP turn.
+  test("a scenario row that drifted to advanced still generates the customer at beginner", async () => {
+    scenarioRows[0].difficulty = "advanced";
+    let seenDifficulty: unknown;
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        seenDifficulty = args[2];
+        (args[5] as (s: string, i: number) => void)("Fine.", 0);
+        return "Fine.";
+      },
+      synthesize: async () => Buffer.from("audio"),
+    });
+    const { replyStreamUrl } = await sendVoiceTurn();
+    await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
+    assert.equal(seenDifficulty, "beginner");
+    assert.equal(seenDifficulty, DEMO_V2_DIFFICULTY);
+  });
 });
 
 // ===========================================================================
@@ -1034,5 +1057,62 @@ describe("demo v2 scoring parity with a real beginner session", () => {
     const expectation = closeExpectationForTransactionType(reRow.transactionType);
     const score = computeConsultingOverall(excellent, "client_agreed", "beginner", expectation);
     assert.ok(score >= ADVANCE_THRESHOLD, `expected >= ${ADVANCE_THRESHOLD}, got ${score}`);
+  });
+});
+
+// ===========================================================================
+// The free demo always starts on Beginner
+// ===========================================================================
+// The demo is a first-time visitor's single impression of the product, so it has
+// to be encouraging rather than punishing. The six rows are seeded "beginner",
+// but a seed value is intent, not a guarantee: an admin edit, a partial reseed,
+// or a future difficulty picker could all serve something harder. These cover the
+// runtime pin that makes Beginner an actual guarantee for the demo path.
+
+describe("demo v2 forced beginner difficulty", () => {
+  const autoRow = scenarios.find((s) => s.slug === "demo-v2-auto-1")!;
+
+  test("the demo's difficulty is beginner", () => {
+    assert.equal(DEMO_V2_DIFFICULTY, "beginner");
+  });
+
+  test("a row at any other difficulty is served to the demo as beginner", () => {
+    for (const drifted of ["intermediate", "advanced", "expert", ""]) {
+      assert.equal(demoV2Scenario({ difficulty: drifted }).difficulty, "beginner", drifted);
+    }
+  });
+
+  test("difficulty is the only field changed", () => {
+    const drifted = { ...autoRow, difficulty: "advanced" } as Scenario;
+    const served = demoV2Scenario(drifted);
+    assert.deepEqual({ ...served, difficulty: null }, { ...drifted, difficulty: null });
+  });
+
+  test("the stored row is left alone", () => {
+    const drifted = { ...autoRow, difficulty: "advanced" } as Scenario;
+    demoV2Scenario(drifted);
+    assert.equal(drifted.difficulty, "advanced");
+  });
+
+  // Playing at one difficulty and scoring at another would be the worst of both,
+  // so the scored difficulty is the same forced value the conversation ran at.
+  test("the difficulty the demo scores at is the one it played at", async () => {
+    const served = demoV2Scenario({ ...autoRow, difficulty: "advanced" } as Scenario);
+    const responder = responderReturning(GENUINE_SUBSCORES);
+    const asServed = await scoreTranscript(
+      GENUINE_TRANSCRIPT,
+      served.difficulty,
+      scenarioTrack(served.track),
+      served.transactionType,
+      { responder, cache: makeInMemoryCache() },
+    );
+    const asBeginner = await scoreTranscript(
+      GENUINE_TRANSCRIPT,
+      "beginner",
+      scenarioTrack(autoRow.track),
+      autoRow.transactionType,
+      { responder, cache: makeInMemoryCache() },
+    );
+    assert.deepEqual(asServed, asBeginner);
   });
 });
