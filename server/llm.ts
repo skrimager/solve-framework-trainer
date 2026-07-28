@@ -4,7 +4,9 @@ import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCach
 import { createSentenceStreamer } from "./sentences";
 import {
   buildConversationStateLines,
+  buildDirectQuestionLines,
   deriveConversationState,
+  deriveDirectQuestion,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
@@ -311,6 +313,52 @@ THERE ARE EXACTLY TWO HONEST ENDINGS, AND YOU MUST BE ABLE TO REACH ONE.
 2. You did not get what you needed. Then you end it the way a real person does: politely, once, and for good. "Okay, I appreciate your time, thank you." You may name plainly what was missing. Then you are finished, and you do not keep going.
 There is no third ending in which you re-demand the same thing forever. Once you have made a point and the consultant has given you their honest answer, you have exactly two moves left: accept it, or leave. Pressing it a fourth and fifth time is not toughness, it is a conversation that has stopped being real. And if the consultant is straight with you that they may not be able to give you what you are after and releases you graciously, take that well and close it out warmly, because that is a good outcome and not something to argue with.`;
 
+// Governs whether the customer ENGAGES with what was just asked. This is a
+// different axis from the two blocks above and does not loosen either of them:
+// CONVERSATION_REALISM_RULES stops the customer repeating itself, and
+// REASONABLE_CUSTOMER_RULES bounds what it is allowed to push back about, but a
+// customer can obey both and still answer "when you say reliable, what worries
+// you?" with "I want good warranties", a fresh, in-scope, perfectly reasonable
+// line that is not an answer to the question.
+//
+// That is the live failure this block exists to fix. Asked something specific,
+// the customer replied with an unrelated concern or a non-answer that restarted
+// the loop, and a rep who did the skilled thing of narrowing a vague statement
+// got vagueness back for their trouble. The conversation felt like pulling teeth
+// rather than a conversation.
+//
+// Nothing in the prompt asked for that either. It falls out of the same
+// unstated upper bound: the guardedness instructions say to keep the real need
+// hidden and not make it easy, and the realism rules say every turn must go
+// somewhere new, with nothing anywhere saying that the rep's question is the
+// thing being replied to. So this block supplies the missing default: the rep
+// drives discovery and the customer's job is to answer, while staying every bit
+// as guarded about HOW MUCH it gives away. It is composed last in the stable
+// prefix, and the volatile per-turn block quotes the live question underneath
+// it, because which question is live is the one thing a static rule cannot say.
+export const CUSTOMER_RESPONSIVENESS_RULES = `Answering the consultant (these rules govern whether you ENGAGE with what was just asked; they do not loosen anything above about how guarded you are or what you push back about):
+
+THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER. They lead with questions to understand you. You respond to what they actually asked. Being guarded is about how much you give away and how readily; it is never a licence to talk past the question.
+
+ANSWER THE QUESTION THAT WAS ASKED. When the consultant asks you something specific, your reply must contain a relevant answer to THAT question. Never meet a direct question with an unrelated concern, a non-answer, or a subject change that sends the conversation back to the start.
+- Asked "when you say reliable, what does that look like to you?", a real person says something like "honestly, my last car's transmission went out and left me stranded, that's my real worry". That is the answer.
+- Replying "I want to make sure I have good warranties" is a dodge. It is a fine thing to care about and a terrible answer to that question, because it is not what they asked.
+
+WHEN THEY NARROW, YOU COMMIT. Starting out general is realistic; you often will. But when the consultant does the skilled thing and narrows with a good specific question, you must come back with a real specific. General, then narrowed, then COMMITTED. Never general, narrowed, then general again.
+- You: "I just want something reliable that won't break down." Them: "When you say reliable, what specifically concerns you? The transmission, the engine, the windows, belts and hoses?" You: "It's the transmission mostly. That's what died on my last one." That is what you do.
+- "I just want to make sure none of those things happen" is the answer you must never give. It ignores the work they just did and restarts the loop.
+They do the work of narrowing. You do the work of naming something real: the actual part, the actual incident, the actual number, the actual thing you carry or the actual trip you make.
+
+TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING. Some of what you are curious about genuinely comes later or belongs to someone else: warranties, service coverage, financing, loan terms, payment mechanics. It is fair to ask once. When the consultant tells you it depends on the vehicle, or that it is handled in financing once you have found the right one, and then asks you something to move discovery forward, they are right and you accept it. Answer their question. Do not keep pushing the parked topic, and do not treat it as unfinished business that stops you engaging.
+
+WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION. If you answered with a tangent and the consultant re-steers, that is them doing their job and you go with it.
+- Them: "Sedan, SUV, or truck?" You: "Something really good on gas." Them: "Trucks and big SUVs won't be your best on gas, so are you after something economical, a hybrid, or fully electric?" You: "Probably a hybrid, I do a lot of highway miles."
+- "What do you have with good gas mileage?" is a dodge: it bounces their question back instead of answering it. Do not answer a question with a question.
+
+YOU MAY STILL ASK YOUR OWN QUESTIONS, AFTER YOU ANSWER. A question of your own is realistic when it is genuinely warranted, and the rules above already give you one out-of-scope question and one round of "what else do you have". None of that changes. What changes is the order: answer first, then ask. Never ask instead of answering.
+
+This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
+
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
 // turn to turn within a session (as long as persona/difficulty are unchanged),
@@ -328,13 +376,17 @@ export function buildCustomerReplyStablePrefix(
   // format so within-session prompt caching is unaffected when no escalation
   // applies. A non-zero tier appends its gentle behavioral toughening.
   const behaviorBlock = addon ? `${behavior}\n\n${addon}` : behavior;
-  // REASONABLE_CUSTOMER_RULES comes last so it is the final word on any
-  // difficulty instruction above that could be read as "never accept an answer".
-  // Composing it here (rather than at each call site) is what makes every
-  // scenario, every difficulty, and the demo path inherit it: routes.ts and
+  // REASONABLE_CUSTOMER_RULES comes after the difficulty behavior so it is the
+  // final word on any instruction above that could be read as "never accept an
+  // answer", and CUSTOMER_RESPONSIVENESS_RULES comes after that so it is the
+  // final word on any instruction that could be read as "never engage with the
+  // question". The two bound different axes (what you push back about vs.
+  // whether you answer), so neither weakens the other.
+  // Composing them here (rather than at each call site) is what makes every
+  // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -358,6 +410,10 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
       `- The consultant's most recent message, which you are replying to right now: "${lastConsultant.content.trim()}". Whatever you say next must make sense as a response to this, and must be consistent with everything they have already told you, promised you, given you, or asked you earlier in the conversation.`
     );
   }
+  // The live question, if they asked one. Sits right after the message it came
+  // from, because "which question am I on the hook for" is what a long
+  // transcript buries and what a static rule cannot say.
+  lines.push(...buildDirectQuestionLines(deriveDirectQuestion(transcript)));
   if (alreadySaid.length > 0) {
     lines.push(
       "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"

@@ -19,6 +19,12 @@
 //   Rule D  Has the rep already MET a number the customer named (including by
 //           covering a trivial gap and saying so)? -> stop arguing about it.
 //
+// It also derives one TURN-scoped fact, kept separate from the state above
+// because it is about the latest exchange rather than the whole conversation:
+//
+//   Rule G  Did the rep just ask something directly (and did they narrow, or
+//           redirect a premature topic while doing it)? -> answer it.
+//
 // Detection is intentionally conservative in both directions. A missed signal
 // only means the customer behaves as it did before this module existed, which is
 // the pre-existing behavior. A false positive would put words in the customer's
@@ -519,6 +525,174 @@ function deriveQuotedFacts(transcript: TranscriptMessage[]): string[] {
   return transcript
     .filter((m) => m.role === "consultant" && QUOTED_FACT_PATTERN.test(m.content))
     .map((m) => m.content.trim());
+}
+
+// ---------------------------------------------------------------------------
+// The rep's most recent ask, and whether the customer owes it a direct answer.
+//
+// Everything above is CONVERSATION state: facts accumulated across the whole
+// transcript that decide whether the conversation can reach an end. This is TURN
+// state: it looks only at the rep's latest message and the customer line right
+// before it, which is why it is derived and rendered separately rather than
+// folded into ConversationState. A conversation with no live question produces
+// no lines, exactly as before.
+//
+// The live failure: asked something specific, the customer answered with an
+// unrelated concern or a non-answer, so a rep who did the skilled thing of
+// narrowing a vague statement got vagueness back and the loop restarted. The
+// prompt rules alone could not fix that, because a long transcript buries which
+// message is the live question. Naming it explicitly, and quoting it, is what
+// makes dodging impossible to justify.
+// ---------------------------------------------------------------------------
+
+// Splits on sentence terminators, keeping the terminator, so a question can be
+// quoted back on its own instead of buried in the paragraph around it.
+function splitSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+// A rep sentence that requests something without a question mark. Voice
+// transcripts drop punctuation constantly, and "tell me what's on your mind" is
+// as much a question as "what's on your mind?".
+const IMPERATIVE_ASK_MARKERS: RegExp[] = [
+  /\btell me\b/i,
+  /\bwalk me through\b/i,
+  /\bhelp me understand\b/i,
+  /\bgive me a sense\b/i,
+  /\bi(?:'d| would) (?:love|like) to (?:hear|know)\b/i,
+  /\blet me know\b/i,
+];
+
+// The rep NARROWING: asking the customer to convert something general into a
+// concrete one. This is the teachable rep skill the customer has to reward.
+const NARROWING_MARKERS: RegExp[] = [
+  /\bwhen you say\b[^?]{0,60}\bwhat\b/i,
+  /\bwhat (?:specifically|exactly)\b/i,
+  /\b(?:specifically|exactly) (?:what|which)\b/i,
+  /\bspecifically\b[^?]{0,30}\b(?:concern|worr|mean|about)/i,
+  /\bwhat does that (?:look like|mean)\b/i,
+  /\bwhat kind of\b/i,
+  /\bwhich (?:one|of those|is it|matters most|would)\b/i,
+  /\bnarrow (?:it|that)\b/i,
+  /\bbe (?:more )?specific\b/i,
+  /\bwhat'?s on your mind\b/i,
+  /\bis it\b[^?.!]{1,40}\bor\b/i,
+];
+
+// Lead-ins that make a comma-separated run read as a menu of choices rather than
+// as ordinary clauses. Required alongside the commas so "Of course, nobody wants
+// that, so what brings you in?" is not mistaken for an option list.
+const OPTION_LEAD_IN = /\b(?:are you|is it|do you|would you|thinking|worried about|after|leaning|prefer|more of a)\b/i;
+
+// "the transmission, the engine, the windows" / "economical, a hybrid, or fully
+// electric": the rep has laid out the alternatives, so there is a specific
+// available for the customer to pick. The comma is what separates a menu from a
+// stray "or" ("two or three months from now" is not a list of choices).
+function looksLikeOptionList(ask: string): boolean {
+  if (!OPTION_LEAD_IN.test(ask)) return false;
+  return /,\s*or\b/i.test(ask) || (ask.match(/,/g) ?? []).length >= 2;
+}
+
+// The customer answering in generalities. Only used to make the narrowing line
+// concrete by quoting what was vague; a narrowing question still counts when
+// this finds nothing.
+const VAGUE_ANSWER_MARKERS: RegExp[] = [
+  /\bjust (?:want|need|looking for|after)\b[^.!?]{0,30}\bsomething\b/i,
+  /\bsomething (?:reliable|dependable|good|nice|decent|solid|safe|cheap|affordable|that works)\b/i,
+  /\breliable\b/i,
+  /\bdependable\b/i,
+  /\bwon'?t break down\b/i,
+  /\bgood on gas\b/i,
+  /\bnothing (?:fancy|crazy|too)\b/i,
+  /\bi don'?t (?:really )?know\b/i,
+  /\bnot (?:really )?sure\b/i,
+  /\ba good (?:deal|price|one)\b/i,
+];
+
+export interface DirectQuestionState {
+  // The rep's ask sentences, quoted back verbatim.
+  asks: string[];
+  // True when the ask hands the customer a set of specifics to choose between,
+  // or explicitly demands one.
+  narrowing: boolean;
+  // The customer's own general statement the narrowing responds to, if it was
+  // one. Null when the customer's last line was already specific.
+  vagueAnswer: string | null;
+  // The topic the rep parked in this same message, if the customer had just
+  // raised one that belongs elsewhere.
+  redirectedTopic: string | null;
+}
+
+function extractAsks(text: string): string[] {
+  return splitSentences(text).filter(
+    (s) => s.endsWith("?") || matchesAny(s, IMPERATIVE_ASK_MARKERS),
+  );
+}
+
+// The live question the customer owes an answer to, or null when the rep's last
+// message did not ask for anything (or the rep has not spoken yet).
+export function deriveDirectQuestion(transcript: TranscriptMessage[]): DirectQuestionState | null {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+  const last = spoken.at(-1);
+  // Only a question the rep has just asked is live. Once the customer has spoken
+  // after it, that question has already had its turn.
+  if (!last || last.role !== "consultant") return null;
+
+  const text = last.content.trim();
+  const asks = extractAsks(text);
+  if (asks.length === 0) return null;
+
+  const previous =
+    spoken
+      .slice(0, -1)
+      .reverse()
+      .find((m) => m.role === "customer")
+      ?.content.trim() ?? "";
+
+  const redirected =
+    matchesAny(text, REDIRECT_MARKERS) && matchesAny(previous, ASK_MARKERS)
+      ? (Object.keys(TOPIC_PATTERNS) as DeflectableTopic[]).find((topic) => mentionsTopic(previous, topic))
+      : undefined;
+
+  return {
+    asks,
+    narrowing: asks.some((ask) => matchesAny(ask, NARROWING_MARKERS) || looksLikeOptionList(ask)),
+    vagueAnswer: matchesAny(previous, VAGUE_ANSWER_MARKERS) ? previous : null,
+    redirectedTopic: redirected ? TOPIC_LABEL[redirected] : null,
+  };
+}
+
+// Renders the live ask as prompt lines. Empty array when there is no live ask, so
+// a turn the rep did not end with a question is byte-identical to the previous
+// behavior.
+export function buildDirectQuestionLines(question: DirectQuestionState | null): string[] {
+  if (!question) return [];
+  const lines: string[] = [];
+  const quoted = question.asks.map((a) => `"${a}"`).join(" ");
+
+  lines.push(
+    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, and you may add a thought or a question of your own AFTER you have answered, but never instead of answering.`,
+  );
+
+  if (question.narrowing) {
+    const vague = question.vagueAnswer
+      ? ` You had been general with them ("${question.vagueAnswer}"), and they did the work of narrowing it down for you.`
+      : "";
+    lines.push(
+      `- That question NARROWS things to a specific, and you must COMMIT to one.${vague} Name the concrete thing: the actual part, the actual situation, the actual number, the actual past experience that is behind your worry. Staying general a second time ("I just don't want any of those to happen") throws away what they just did and is the one answer you must not give here.`,
+    );
+  }
+
+  if (question.redirectedTopic) {
+    lines.push(
+      `- You had asked about ${question.redirectedTopic}, and in this same message the consultant told you it is handled elsewhere or comes later, then steered you back to something they can work on now. Accept that redirect. Answer the question they just asked, and do not spend this turn pushing ${question.redirectedTopic} again.`,
+    );
+  }
+
+  return lines;
 }
 
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
