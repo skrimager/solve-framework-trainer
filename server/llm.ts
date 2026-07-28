@@ -198,17 +198,50 @@ export function escalationAddon(tier: number): string {
 // Conversation-progression rules layered onto every customer reply. Without
 // these the model tends to restate the same objection in slightly reworded form
 // turn after turn (and, when asked to clarify, paraphrase itself instead of
-// giving new information), which destroys the realism of the roleplay. These
-// rules make the simulated customer track what they've already said, add NEW
-// detail when pressed, and move on once a concern has actually been addressed.
+// giving new information), which destroys the realism of the roleplay.
+//
+// Two things had to be spelled out here. An earlier "unless the consultant's
+// most recent reply failed to address it" carve-out read as license to re-issue
+// the opening demand verbatim whenever the want was still unmet, and promising
+// to fetch a price does not meet the want, so the persona looped forever. And
+// many scenario cores end with a failure branch telling the customer to "stay
+// fixed on price" / "keep asking" / "keep steering back" without saying HOW to
+// vary that firmness, which verbatim repetition trivially satisfies. So the
+// carve-out is gone and those persona phrases are explicitly reinterpreted as
+// being about the underlying WANT rather than the wording.
 // Correctness/realism is deliberately prioritized over token economy here.
-export const CONVERSATION_REALISM_RULES = `Conversation realism (follow on EVERY turn — this is critical):
-- You are a real person in a live, moving conversation, not a script on a loop. Keep the conversation moving FORWARD.
-- Keep a running mental note of every concern, objection, question, or need you have ALREADY raised earlier in this conversation. Do NOT bring up a concern you have already voiced a second time — not even reworded, rephrased, or from a slightly different angle — UNLESS the consultant's most recent reply genuinely failed to address it. Restating the same point over and over makes you sound like a broken record and is never how a real person talks.
-- When the consultant asks you to clarify, explain, or say more about something, respond with GENUINELY NEW, specific information: a concrete number, a dollar amount, a timeframe, a name, a specific past experience, or a fresh reason. NEVER just paraphrase or restate the same sentence you already said. Real people add detail and context when asked; they do not repeat themselves.
-- The moment the consultant has adequately addressed, answered, or eased a concern, briefly acknowledge it in your own words (e.g. "Okay, that actually makes sense" or "Alright, that helps") and MOVE ON — raise your next underlying concern, ask a question of your own, or let the conversation advance to a new topic. Do not keep relitigating a point that has already been handled.
-- It is realistic to hold firm on a concern the consultant has NOT actually resolved — but express that by adding a new angle, a new detail, or a pointed follow-up question, not by repeating the same statement.
-- Keep each reply short and conversational — usually one to three sentences, the way people actually speak out loud.`;
+export const CONVERSATION_REALISM_RULES = `Conversation realism (follow on EVERY turn, this is critical, and it overrides anything in your persona that could be read as permission to repeat yourself):
+
+BEFORE YOU WRITE ANYTHING, re-read the conversation so far and take stock of where it actually stands:
+- What did the consultant just say or do in their most recent message? That is what you are replying to.
+- What have you already asked for, complained about, or objected to, and which of those has the consultant now answered, promised to handle, or gone off to work on for you?
+- What have you already been GIVEN (a price, a number, a date, an answer, an option)? You already know it, so you can never ask for it again as though you had not heard it.
+- Did the consultant ask you a question, offer you an alternative, or put a trade-off in front of you?
+Your reply must be consistent with all of that. Never say something that would only make sense if the consultant's last message had not happened.
+
+REACT, THEN ADVANCE. Every turn must do both:
+1. React to the consultant's actual last move, even briefly, before anything else.
+2. Take the conversation somewhere it has not been yet: soften slightly, get impatient in a NEW way, follow up on something that is pending, raise a different concern, engage with the number or option in front of you, answer or dodge their question, or signal you are close to walking. Never leave the conversation exactly where you found it.
+
+NEVER REPEAT YOURSELF. Do not say a sentence you have already said in this conversation, and do not re-issue an objection you have already made in the same words or in a lightly reworded version of them. Repeating your own line back is the least realistic thing you can do, and it is never acceptable no matter how firm, skeptical, or frustrated you are.
+- If something you want is STILL unmet, that is realistic, but you must express it in a NEW way that reflects where the conversation now is. If the consultant said they would go get you a number, ask whether it has come back yet or how long that usually takes. Do not demand the number again from scratch.
+- If a number, price, or answer has already been given to you, react to THAT (it is too high, you need to think, you want to know what is in it, you counter it). Do not ask for it again.
+- If the consultant asked you something, acknowledge that they asked. Answer it, answer part of it, or set it aside the way a real person does ("that's a long story, but..."). Never behave as though no question was asked.
+- If the consultant offered an alternative, asked about your budget, or named a trade-off, respond to THAT specific thing, not to your original demand.
+
+BEING DIFFICULT IS GOOD, STALLING IN PLACE IS NOT. Staying skeptical, guarded, impatient, or unimpressed is realistic and wanted. Any instruction in your persona to "stay firm", "stay fixed on" something, "keep asking", or "keep steering back" refers to what you still WANT. It never means reusing the same sentence. Show continued firmness with a fresh angle instead:
+- escalating impatience in new words every time ("how long is that going to take?", then "I'm kind of in a hurry here", then "if you can just tell me you can beat that number, I'll stick around")
+- calling out the stall directly ("every place tells me they'll go check with their manager, is that real or is that a stall?")
+- a new detail, a specific number, or a pointed follow-up question that raises the pressure
+- warning that you are about to leave or call somewhere else, if the consultant really is giving you nothing. That is realistic and allowed.
+- if the consultant is honest with you and refers you elsewhere because they cannot be what you need, take that gracefully. It is a legitimate way for the conversation to end, not something to fight.
+And when the consultant does something genuinely good (asks you a real question while something of yours is pending, stays calm under pressure, gives you a straight answer), let it land and open up a little more than you did the turn before. Do not stonewall someone who is doing everything right.
+
+When the consultant asks you to clarify, explain, or say more about something, respond with GENUINELY NEW, specific information: a concrete number, a dollar amount, a timeframe, a name, a specific past experience, or a fresh reason. Never just paraphrase or restate a sentence you already said.
+
+The moment the consultant has adequately addressed, answered, or eased a concern, briefly acknowledge it in your own words ("Okay, that actually makes sense", "Alright, that helps") and MOVE ON to your next underlying concern or a question of your own. Do not relitigate a point that has already been handled.
+
+Keep each reply short and conversational, usually one to three sentences, the way people actually speak out loud.`;
 
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
@@ -228,6 +261,38 @@ export function buildCustomerReplyStablePrefix(
   // applies. A non-zero tier appends its gentle behavioral toughening.
   const behaviorBlock = addon ? `${behavior}\n\n${addon}` : behavior;
   return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}`;
+}
+
+// The per-turn state reminder appended after the transcript. The full history is
+// already in the prompt, but a long transcript buries the two facts that decide
+// whether a reply loops: what the consultant just did, and which lines the
+// customer has already used. Restating them explicitly right before the output
+// instruction is what stops the model from answering turn one on turn four.
+// Deliberately derived only from the transcript's own structure (no semantic
+// guessing about whether a price was quoted), so it cannot be wrong about the
+// state it asserts. Lives in the VOLATILE tail of the prompt, after the
+// transcript, so the cacheable stable prefix is unaffected.
+export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
+  const lastConsultant = [...transcript].reverse().find((m) => m.role === "consultant");
+  const alreadySaid = transcript
+    .filter((m) => m.role === "customer" && m.content.trim().length > 0)
+    .map((m) => m.content.trim());
+
+  const lines: string[] = [];
+  if (lastConsultant) {
+    lines.push(
+      `- The consultant's most recent message, which you are replying to right now: "${lastConsultant.content.trim()}". Whatever you say next must make sense as a response to this, and must be consistent with everything they have already told you, promised you, given you, or asked you earlier in the conversation.`
+    );
+  }
+  if (alreadySaid.length > 0) {
+    lines.push(
+      "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"
+    );
+    for (const said of alreadySaid) lines.push(`  - "${said}"`);
+  }
+  if (lines.length === 0) return "";
+
+  return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
 }
 
 // Builds the full prompt sent to the model for the customer's next reply. Kept
@@ -252,7 +317,8 @@ export function buildCustomerReplyPrompt(
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
-  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\nRespond with your next line as the customer, in character, following the conversation realism rules above. Output ONLY the spoken line, no labels or narration.`;
+  const stateBlock = buildTurnStateBlock(transcript);
+  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";
   return `${stablePrefix}\n\n${variantBlock}${volatile}`;
