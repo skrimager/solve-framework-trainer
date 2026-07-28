@@ -1,7 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { getVoiceForScenario, getVoiceInstructionsForScenario, PERSONA_VOICES } from "./voices";
+import {
+  getVoiceForScenario,
+  getVoiceInstructionsForScenario,
+  NATURAL_DELIVERY_INSTRUCTIONS,
+  PERSONA_VOICES,
+  PERSONA_VOICE_INSTRUCTIONS,
+} from "./voices";
 
 describe("getVoiceForScenario", () => {
   test("returns the curated voice when it agrees with gender", () => {
@@ -60,21 +66,33 @@ describe("getVoiceInstructionsForScenario", () => {
     assert.match(instructions!, /20-year-old/i);
   });
 
-  test("returns undefined for scenarios with no curated age/tone steer", () => {
-    assert.equal(getVoiceInstructionsForScenario("auto-sales-skeptical-negotiator"), undefined);
-    assert.equal(getVoiceInstructionsForScenario(undefined), undefined);
-    assert.equal(getVoiceInstructionsForScenario(null), undefined);
+  test("the curated steer is layered ON TOP of the universal natural-delivery steer", () => {
+    const instructions = getVoiceInstructionsForScenario("auto-sales-first-car-college-student");
+    assert.ok(instructions.startsWith(NATURAL_DELIVERY_INSTRUCTIONS));
+    assert.match(instructions, /20-year-old/i);
+  });
+
+  test("scenarios with no curated steer still get the universal natural delivery", () => {
+    // Bug 3: every persona, not just the four curated ones, must be steered away
+    // from the model's default announcer-like read.
+    assert.equal(
+      getVoiceInstructionsForScenario("auto-sales-skeptical-negotiator"),
+      NATURAL_DELIVERY_INSTRUCTIONS,
+    );
+    assert.equal(getVoiceInstructionsForScenario(undefined), NATURAL_DELIVERY_INSTRUCTIONS);
+    assert.equal(getVoiceInstructionsForScenario(null), NATURAL_DELIVERY_INSTRUCTIONS);
+  });
+
+  test("the universal steer says nothing about age, gender, or personality", () => {
+    // It is composed with per-persona steers, so it must not contradict them or
+    // the gender the avatar shows.
+    assert.doesNotMatch(NATURAL_DELIVERY_INSTRUCTIONS, /\b(male|female|man|woman|he|she|year-old)\b/i);
   });
 
   test("every scenario with curated instructions also has a curated voice entry", () => {
     // Sanity guard: instructions map keys should be a subset of the voice map,
     // otherwise a typo'd slug would silently do nothing.
-    const instructionsKeys = Object.keys(
-      Object.fromEntries(
-        Object.entries(PERSONA_VOICES).filter(([slug]) => getVoiceInstructionsForScenario(slug) !== undefined),
-      ),
-    );
-    for (const slug of instructionsKeys) {
+    for (const slug of Object.keys(PERSONA_VOICE_INSTRUCTIONS)) {
       assert.ok(PERSONA_VOICES[slug], `expected ${slug} to have a curated voice entry`);
     }
   });
