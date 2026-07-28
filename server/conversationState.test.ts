@@ -6,7 +6,9 @@ import {
   DEFLECTION_STOP_THRESHOLD,
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
+  buildDirectQuestionLines,
   deriveConversationState,
+  deriveDirectQuestion,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
 } from "./conversationState";
@@ -377,5 +379,168 @@ describe("six-point checklist scenario (deterministic)", () => {
   test("check 6: the price she was quoted is carried forward as already answered", () => {
     const rendered = buildConversationStateLines(deriveConversationState(TRANSCRIPT)).join("\n");
     assert.match(rendered, /\$19,800/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule G: the rep's live question. Turn-scoped, so it is derived and rendered
+// separately from the cross-turn conversation state above.
+// ---------------------------------------------------------------------------
+
+function questionLines(...lines: string[]): string {
+  return buildDirectQuestionLines(deriveDirectQuestion(t(...lines))).join("\n");
+}
+
+describe("Rule G: identifying the question the customer owes an answer to", () => {
+  test("every ask in a multi-sentence rep message is pulled out and quoted", () => {
+    const q = deriveDirectQuestion(
+      t(
+        "c: I just want something reliable.",
+        "r: Of course. But when you say reliable, what specifically concerns you? Tell me what's on your mind.",
+      ),
+    );
+    assert.ok(q);
+    assert.deepEqual(q!.asks, [
+      "But when you say reliable, what specifically concerns you?",
+      "Tell me what's on your mind.",
+    ]);
+    // The lead-in sentence is not an ask and is left out of the quote.
+    assert.ok(!q!.asks.some((a) => a.includes("Of course")));
+  });
+
+  test("an imperative ask counts even with no question mark (the voice path drops them)", () => {
+    const q = deriveDirectQuestion(t("r: Walk me through what a normal week looks like for you."));
+    assert.ok(q);
+    assert.equal(q!.narrowing, false);
+  });
+
+  test("a rep message that asks nothing produces no lines", () => {
+    assert.equal(deriveDirectQuestion(t("c: Hi.", "r: Nice to meet you, I'm Sam.")), null);
+    assert.deepEqual(buildDirectQuestionLines(null), []);
+  });
+
+  test("a question the customer has already replied to is no longer live", () => {
+    assert.equal(deriveDirectQuestion(t("r: What brings you in today?", "c: Just looking around.")), null);
+  });
+
+  test("an empty streamed placeholder does not retire the live question", () => {
+    const q = deriveDirectQuestion(t("r: What brings you in today?", "c: "));
+    assert.ok(q, "the placeholder the streamed turn is about to fill is not an answer");
+  });
+
+  test("the rendered line names the ask and forbids dodging or bouncing it back", () => {
+    const rendered = questionLines("r: What are you driving now?");
+    assert.match(rendered, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(rendered, /"What are you driving now\?"/);
+    assert.match(rendered, /unrelated concern, a non-answer, or a change of subject/);
+    assert.match(rendered, /do not bounce the question back/);
+    // Guardrail: answering is required, guardedness is not surrendered.
+    assert.match(rendered, /still be guarded about how much you give them/);
+    assert.match(rendered, /AFTER you have answered/);
+  });
+});
+
+describe("Rule G: narrowing questions demand a committed specific", () => {
+  test("an explicit 'what specifically' narrows", () => {
+    assert.equal(deriveDirectQuestion(t("r: When you say reliable, what specifically worries you?"))!.narrowing, true);
+  });
+
+  test("an option list narrows", () => {
+    assert.equal(deriveDirectQuestion(t("r: Are you thinking sedan, SUV, or truck?"))!.narrowing, true);
+    assert.equal(deriveDirectQuestion(t("r: Is it the transmission or the engine?"))!.narrowing, true);
+  });
+
+  test("a plain open question is not a narrowing", () => {
+    assert.equal(deriveDirectQuestion(t("r: What brings you in today?"))!.narrowing, false);
+  });
+
+  test("a stray 'or' is not an option list", () => {
+    const q = deriveDirectQuestion(
+      t("r: So picture yourself two or three months from now, what are you driving?"),
+    );
+    assert.equal(q!.narrowing, false, "'two or three months' is not a menu of choices");
+  });
+
+  test("the vague line the narrowing responds to is quoted back", () => {
+    const q = deriveDirectQuestion(
+      t("c: Something really good on gas.", "r: Are you after something economical, a hybrid, or fully electric?"),
+    );
+    assert.equal(q!.vagueAnswer, "Something really good on gas.");
+    assert.match(questionLines(
+      "c: Something really good on gas.",
+      "r: Are you after something economical, a hybrid, or fully electric?",
+    ), /You had been general with them/);
+  });
+
+  test("a customer who was already specific is not accused of being vague", () => {
+    const q = deriveDirectQuestion(
+      t("c: My last transmission blew at 80,000 miles.", "r: Which matters most, the mileage or the service history?"),
+    );
+    assert.ok(q!.narrowing);
+    assert.equal(q!.vagueAnswer, null);
+  });
+
+  test("the narrowing line demands a concrete commit and names the answer it forbids", () => {
+    const rendered = questionLines(
+      "c: I just want something reliable.",
+      "r: When you say reliable, what specifically concerns you?",
+    );
+    assert.match(rendered, /NARROWS things to a specific, and you must COMMIT to one/);
+    assert.match(rendered, /the actual part, the actual situation/);
+    assert.match(rendered, /Staying general a second time/);
+  });
+});
+
+describe("Rule G: a redirected premature question is accepted, not re-pushed", () => {
+  test("a redirect plus a discovery question in one message is recognized", () => {
+    const q = deriveDirectQuestion(
+      t(
+        "c: What warranties does it come with?",
+        "r: Warranties are handled in financing once we've found your car. Let's find the right vehicle first. What are you driving today?",
+      ),
+    );
+    assert.ok(q);
+    assert.equal(q!.redirectedTopic, "warranty or service coverage");
+  });
+
+  test("the rendered line tells the customer to accept it and answer instead", () => {
+    const rendered = questionLines(
+      "c: How does financing work here?",
+      "r: The finance team handles all of that once we know the vehicle. So what do you need this thing to do for you?",
+    );
+    assert.match(rendered, /Accept that redirect/);
+    assert.match(rendered, /do not spend this turn pushing financing, credit, or lender questions again/);
+  });
+
+  test("a redirect with no premature question behind it is not attributed to the customer", () => {
+    const q = deriveDirectQuestion(
+      t("c: I need it by the end of the month.", "r: Let's first nail down what you actually need. What's the drive like?"),
+    );
+    assert.equal(q!.redirectedTopic, null);
+  });
+
+  test("an ordinary question carries no redirect line at all", () => {
+    assert.doesNotMatch(questionLines("r: What brings you in today?"), /Accept that redirect/);
+  });
+});
+
+describe("Rule G: derivation is pure and additive", () => {
+  test("the same transcript yields the same lines", () => {
+    const transcript = t("c: I just want something reliable.", "r: What specifically worries you, the engine, the transmission, the brakes?");
+    assert.deepEqual(
+      buildDirectQuestionLines(deriveDirectQuestion(transcript)),
+      buildDirectQuestionLines(deriveDirectQuestion(transcript)),
+    );
+  });
+
+  test("it does not disturb the cross-turn conversation state", () => {
+    // The PR #87 state derivation is untouched: a plain discovery question still
+    // produces no conversation-state lines.
+    assert.deepEqual(
+      buildConversationStateLines(
+        deriveConversationState(t("c: I need something reliable.", "r: What does your commute look like?")),
+      ),
+      [],
+    );
   });
 });

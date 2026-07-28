@@ -1701,3 +1701,230 @@ describe("worked example (spec): auto scenario, $14,000 budget", () => {
     assert.match(GRACEFUL_RELEASE_RULES, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
   });
 });
+
+// ===========================================================================
+// PART 1 of the "customer answers, coach cites the moment" spec: the AI customer
+// dodged the rep's direct questions. Two layers are asserted here: the static
+// CUSTOMER_RESPONSIVENESS_RULES in the cacheable prefix, and the deterministic
+// per-turn line that quotes the live question into the volatile tail.
+// ===========================================================================
+
+import { CUSTOMER_RESPONSIVENESS_RULES } from "./llm";
+import { deriveDirectQuestion } from "./conversationState";
+
+describe("CUSTOMER_RESPONSIVENESS_RULES - reaches every customer prompt", () => {
+  test("it is embedded in the customer prompt at every difficulty", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced"]) {
+      assert.ok(
+        buildCustomerReplyPrompt(PERSONA, [], difficulty).includes(CUSTOMER_RESPONSIVENESS_RULES),
+        `${difficulty} must inherit the responsiveness rules`,
+      );
+    }
+  });
+
+  test("it survives escalation and an unrecognized difficulty (no silent bypass)", () => {
+    for (const tier of [0, 1, 2]) {
+      assert.ok(buildCustomerReplyPrompt(PERSONA, [], "advanced", tier).includes(CUSTOMER_RESPONSIVENESS_RULES));
+    }
+    assert.ok(buildCustomerReplyPrompt(PERSONA, [], "nonsense-level").includes(CUSTOMER_RESPONSIVENESS_RULES));
+  });
+
+  test("it lives in the cacheable stable prefix, not the volatile tail", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.includes(CUSTOMER_RESPONSIVENESS_RULES));
+    const prompt = buildCustomerReplyPrompt(PERSONA, [turn("consultant", "Hi there.")], "advanced", 2);
+    assert.ok(prompt.indexOf(CUSTOMER_RESPONSIVENESS_RULES) < prompt.indexOf("Conversation so far:"));
+  });
+
+  test("it composes AFTER PR #88's reasonableness rules rather than replacing them", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.includes(REASONABLE_CUSTOMER_RULES), "PR #88's block must still be there in full");
+    assert.ok(
+      prefix.indexOf(REASONABLE_CUSTOMER_RULES) < prefix.indexOf(CUSTOMER_RESPONSIVENESS_RULES),
+      "the responsiveness layer is the third and last layer of the stack",
+    );
+    assert.ok(prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES));
+  });
+});
+
+describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("core rule: the rep drives discovery and answering is the default job", () => {
+    assert.match(rules, /THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER/);
+    assert.match(rules, /never a licence to talk past the question/);
+  });
+
+  test("Rule 1: a direct question gets a relevant answer, not an unrelated concern", () => {
+    assert.match(rules, /ANSWER THE QUESTION THAT WAS ASKED/);
+    assert.match(rules, /a subject change that sends the conversation back to the start/);
+    // The spec's own bad example is named so the model cannot mistake it for a fine reply.
+    assert.match(rules, /I want to make sure I have good warranties/);
+    assert.match(rules, /It is a fine thing to care about and a terrible answer to that question/);
+  });
+
+  test("Rule 2: general, then narrowed, then COMMITTED", () => {
+    assert.match(rules, /WHEN THEY NARROW, YOU COMMIT/);
+    assert.match(rules, /Never general, narrowed, then general again/);
+    assert.match(rules, /It's the transmission mostly/);
+    assert.match(rules, /I just want to make sure none of those things happen/);
+  });
+
+  test("Rule 3: a premature question is redirected once and the customer returns to answering", () => {
+    assert.match(rules, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
+    assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics/);
+    assert.match(rules, /Do not keep pushing the parked topic/);
+  });
+
+  test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
+    assert.match(rules, /WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION/);
+    assert.match(rules, /Probably a hybrid, I do a lot of highway miles/);
+    assert.match(rules, /Do not answer a question with a question/);
+  });
+
+  test("guardrail: difficulty is preserved and PR #88's own outs are explicitly kept", () => {
+    assert.match(rules, /This makes you no easier to sell to/);
+    assert.match(rules, /still guarded, still skeptical, still slow to hand over your real motivation/);
+    // PR #88's Rule A out-of-scope question and the one alternatives round survive.
+    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
+    assert.match(rules, /None of that changes/);
+    assert.match(rules, /answer first, then ask/);
+  });
+
+  test("guardrail: the difficulty, escalation, and reasonableness text is untouched", () => {
+    const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.match(advanced, /Push back hard on price and value/);
+    assert.match(advanced, /Do not make it easy/);
+    assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
+    assert.match(advanced, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
+    assert.match(escalationAddon(2), /tougher objection/i);
+  });
+});
+
+describe("buildTurnStateBlock - the live question is pinned into the volatile tail", () => {
+  test("the question is quoted and answering it is demanded", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need something for my commute."),
+      turn("consultant", "How long is that commute each way?"),
+    ]);
+    assert.match(block, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(block, /"How long is that commute each way\?"/);
+  });
+
+  test("a rep turn that asks nothing adds no question line", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need something for my commute."),
+      turn("consultant", "That makes sense, a lot of people are in the same spot."),
+    ]);
+    assert.doesNotMatch(block, /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+
+  test("it stays out of the cacheable prefix", () => {
+    const transcript = [turn("consultant", "What are you driving now?")];
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "intermediate");
+    assert.ok(prompt.startsWith(prefix));
+    assert.doesNotMatch(prefix, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+});
+
+// The spec's first worked example, verbatim. This is the teachable rep skill:
+// the customer starts general, the rep narrows, and the customer must reward it
+// with a real specific instead of restarting the loop.
+describe("worked example (spec): the reliability narrowing", () => {
+  const VAGUE = "I just want something reliable that won't break down.";
+  const NARROWING =
+    "Of course, nobody wants a car that breaks down. But when you say reliable, what specifically concerns you? Are you worried about the transmission going out, the engine, the windows not working, belts and hoses? Tell me what's on your mind.";
+  const GOOD = "It's the transmission mostly. That's what died on my last one.";
+  const BAD = "I just want to make sure none of those things happen.";
+
+  const AT_THE_NARROWING = [turn("customer", VAGUE), turn("consultant", NARROWING)];
+
+  test("the narrowing is recognized as one, and the vague line it answers is captured", () => {
+    const q = deriveDirectQuestion(AT_THE_NARROWING);
+    assert.ok(q, "the rep's narrowing must be seen as a live question");
+    assert.equal(q!.narrowing, true);
+    assert.equal(q!.vagueAnswer, VAGUE);
+    assert.ok(q!.asks.some((a) => a.includes("what specifically concerns you")));
+    assert.ok(q!.asks.some((a) => a.includes("belts and hoses")));
+  });
+
+  test("the customer's prompt for this turn demands a committed specific", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_NARROWING, "advanced", 2);
+    assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(prompt, /belts and hoses/);
+    assert.match(prompt, /NARROWS things to a specific, and you must COMMIT to one/);
+    assert.match(prompt, new RegExp(escapeForRegExp(VAGUE)));
+    assert.match(prompt, /Staying general a second time/);
+    // The whole three-layer stack is in force on this turn.
+    assert.ok(prompt.includes(CONVERSATION_REALISM_RULES));
+    assert.ok(prompt.includes(REASONABLE_CUSTOMER_RULES));
+    assert.ok(prompt.includes(CUSTOMER_RESPONSIVENESS_RULES));
+  });
+
+  test("the BAD reply is the exact shape both layers name and forbid", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_NARROWING, "advanced", 2);
+    assert.match(prompt, /I just want to make sure none of those things happen/, "the static rules name it");
+    assert.match(prompt, /I just don't want any of those to happen/, "the per-turn line names its shape too");
+    assert.ok(
+      BAD.startsWith("I just want to make sure none of those"),
+      "sanity: the forbidden reply in the spec is the one quoted in the rules",
+    );
+  });
+
+  test("once the customer commits, the question is spent and stops being re-demanded", () => {
+    const answered = [...AT_THE_NARROWING, turn("customer", GOOD)];
+    assert.equal(deriveDirectQuestion(answered), null);
+    assert.doesNotMatch(buildTurnStateBlock(answered), /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+});
+
+// The spec's second worked example, verbatim: a premature warranty question is
+// redirected once, and the customer must come back to answering discovery.
+describe("worked example (spec): the premature warranty question", () => {
+  const PREMATURE = "What warranties does it come with?";
+  const REDIRECT =
+    "Great question, and warranties differ by vehicle, age, mileage, some have factory warranty left, some don't, and they're handled in financing once we've found your car. Let's find the right vehicle first. So picture yourself two or three months from now, what are you driving?";
+
+  const AT_THE_REDIRECT = [turn("customer", PREMATURE), turn("consultant", REDIRECT)];
+
+  test("the redirect and the discovery question in the same message are both seen", () => {
+    const q = deriveDirectQuestion(AT_THE_REDIRECT);
+    assert.ok(q);
+    assert.equal(q!.redirectedTopic, "warranty or service coverage");
+    assert.deepEqual(q!.asks, ["So picture yourself two or three months from now, what are you driving?"]);
+  });
+
+  test("the customer's prompt tells it to accept the redirect and answer the vehicle question", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_REDIRECT, "advanced", 2);
+    assert.match(prompt, /what are you driving\?/);
+    assert.match(prompt, /Accept that redirect/);
+    assert.match(prompt, /do not spend this turn pushing warranty or service coverage again/);
+    assert.match(prompt, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
+  });
+
+  test("PR #87's one-more-ask allowance is preserved, it is just not this turn's move", () => {
+    // Composition check: the deflection rule still says the topic may come back
+    // once, so the fix narrows the customer's move on THIS turn without closing a
+    // topic the rep has only redirected a single time.
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_REDIRECT, "advanced", 2);
+    assert.match(prompt, /You may raise it at most ONE more time/);
+    assert.doesNotMatch(prompt, /That topic is CLOSED/);
+  });
+
+  test("a second redirect still closes the topic for good (PR #87 unchanged)", () => {
+    const twice = [
+      ...AT_THE_REDIRECT,
+      turn("customer", "Sure, but is there any warranty left on it at all?"),
+      turn("consultant", "The warranty specialist covers that. Let's first nail down the vehicle. What's the drive like?"),
+    ];
+    const prompt = buildCustomerReplyPrompt(PERSONA, twice, "advanced", 2);
+    assert.match(prompt, /That topic is CLOSED/);
+    assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+});
+
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
