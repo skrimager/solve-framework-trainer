@@ -1408,3 +1408,296 @@ describe("TTS_SPEED (Bug 3: robotic delivery)", () => {
     assert.equal(TTS_SPEED, 1.0);
   });
 });
+
+// ===========================================================================
+// "Customer must be reasonable" (this PR). Rules A-F.
+//
+// The failure these cover is not that the customer was tough, it is that it was
+// impossible: it demanded engineering internals, demanded guarantees nobody can
+// give, argued a two-cent gap on a $14,000 budget the rep had already covered,
+// and never reached an ending. The customer-side fix is a single prompt block
+// composed into the SHARED stable prefix; the scoring-side fix is a single block
+// composed into the shared rubric. These tests assert both, plus the anchors and
+// caps that must NOT have moved.
+// ===========================================================================
+
+import { GRACEFUL_RELEASE_RULES, REASONABLE_CUSTOMER_RULES } from "./llm";
+import { deriveConversationState, hasCustomerAcceptedProposal } from "./conversationState";
+
+describe("REASONABLE_CUSTOMER_RULES - reaches every customer prompt", () => {
+  test("it is embedded in the customer prompt at every difficulty", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced"]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty);
+      assert.ok(
+        prompt.includes(REASONABLE_CUSTOMER_RULES),
+        `${difficulty} must inherit the reasonable-customer rules`,
+      );
+    }
+  });
+
+  test("it survives escalation, which is exactly when the customer got unwinnable", () => {
+    for (const tier of [0, 1, 2]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], "advanced", tier);
+      assert.ok(prompt.includes(REASONABLE_CUSTOMER_RULES), `tier ${tier} must inherit it`);
+    }
+  });
+
+  test("an unrecognized difficulty still inherits it (no silent bypass)", () => {
+    assert.ok(
+      buildCustomerReplyPrompt(PERSONA, [], "nonsense-level").includes(REASONABLE_CUSTOMER_RULES),
+    );
+  });
+
+  test("it lives in the cacheable stable prefix, not the volatile tail", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.includes(REASONABLE_CUSTOMER_RULES));
+    const prompt = buildCustomerReplyPrompt(PERSONA, [turn("consultant", "Hi there.")], "advanced", 2);
+    assert.ok(prompt.indexOf(REASONABLE_CUSTOMER_RULES) < prompt.indexOf("Conversation so far:"));
+  });
+
+  test("it comes AFTER the difficulty behavior and the realism rules, so it is the final word", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(
+      prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES),
+      "the reasonableness bound must be read last to override 'do not make it easy'",
+    );
+    assert.match(REASONABLE_CUSTOMER_RULES, /take precedence over any instruction above/i);
+  });
+});
+
+describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
+  const rules = REASONABLE_CUSTOMER_RULES;
+
+  test("Rule A: an honest referral to the right expert is the correct answer and must be accepted", () => {
+    assert.match(rules, /STAY INSIDE WHAT THIS PERSON CAN ANSWER/);
+    assert.match(rules, /mechanic/i);
+    assert.match(rules, /that is the CORRECT answer/);
+    assert.match(rules, /never re-ask it in different words/i);
+    assert.match(rules, /never treat an honest referral as a dodge/i);
+  });
+
+  test("Rule B: impossible guarantees are out, honest reassurance plus the warranty path is in", () => {
+    assert.match(rules, /DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE/);
+    assert.match(rules, /Nothing is guaranteed never to fail/i);
+    assert.match(rules, /warranty, service coverage, or guarantee options/i);
+    assert.match(rules, /your worry HAS been addressed/);
+  });
+
+  test("Rule C: an invited specific must be answerable, and is finished once answered", () => {
+    assert.match(rules, /WHEN THEY INVITE SPECIFICS, NAME AN ANSWERABLE ONE/);
+    assert.match(rules, /Do not answer with an interrogation they cannot pass/);
+    assert.match(rules, /that specific is FINISHED/);
+    assert.match(rules, /Do not re-ask it harder/);
+  });
+
+  test("Rule D (prompt half): a met number is settled, including a covered trivial gap", () => {
+    assert.match(rules, /WHEN THEY MEET WHAT YOU ASKED FOR, SAY SO/);
+    assert.match(rules, /two-cent gap on a fourteen-thousand-dollar number/i);
+    assert.match(rules, /Haggling over a rounding error/i);
+  });
+
+  test("Rule E: exactly two honest endings, and no third looping one", () => {
+    assert.match(rules, /THERE ARE EXACTLY TWO HONEST ENDINGS/);
+    assert.match(rules, /You got what you needed/);
+    assert.match(rules, /You did not get what you needed/);
+    assert.match(rules, /no third ending in which you re-demand the same thing forever/i);
+    assert.match(rules, /releases you graciously, take that well/i);
+  });
+
+  test("guardrail: toughness is preserved in words, not just spirit", () => {
+    // The block must not read as "be agreeable". It has to keep the customer
+    // guarded and route pressure into the persona's real worry, which is HARDER
+    // to answer than a technicality, not easier.
+    assert.match(rules, /Being hard to satisfy is realistic and wanted/);
+    assert.match(rules, /Stay guarded, stay skeptical, make the consultant earn it/);
+    assert.match(rules, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
+    assert.match(rules, /stronger pressure, not weaker/);
+  });
+
+  test("guardrail: the difficulty and escalation instructions themselves are untouched", () => {
+    // The fix is additive. If it had been implemented by softening these, a hard
+    // customer would have stopped being hard.
+    const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 0);
+    assert.match(advanced, /Push back hard on price and value/);
+    assert.match(advanced, /Do not make it easy/);
+    assert.match(escalationAddon(2), /tougher objection/i);
+  });
+});
+
+describe("GRACEFUL_RELEASE_RULES - Rule F, scoring recognition", () => {
+  test("a graceful release is classified as graceful_referral, not a missing ending", () => {
+    assert.match(GRACEFUL_RELEASE_RULES, /RELEASING A CUSTOMER YOU CANNOT HONESTLY SERVE IS A WIN/);
+    assert.match(GRACEFUL_RELEASE_RULES, /graceful_referral/);
+    assert.match(GRACEFUL_RELEASE_RULES, /Do NOT classify it as "handoff_no_commitment" or "none"/);
+  });
+
+  test("declining an impossible promise is scored as a correct answer, not a gap", () => {
+    assert.match(GRACEFUL_RELEASE_RULES, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
+    assert.match(GRACEFUL_RELEASE_RULES, /Never deduct for refusing to make a promise no honest person could make/);
+  });
+
+  test("referring an out-of-scope technical question is scored as a correct answer", () => {
+    assert.match(GRACEFUL_RELEASE_RULES, /REFERRING A GENUINELY OUT-OF-SCOPE TECHNICAL QUESTION/);
+    assert.match(GRACEFUL_RELEASE_RULES, /Do not read it as dodging/);
+  });
+
+  test("the consultant is never criticized merely for not closing an impossible customer", () => {
+    assert.match(GRACEFUL_RELEASE_RULES, /not closing/i);
+  });
+
+  test("guardrail: it explicitly refuses to lower any bar", () => {
+    assert.match(GRACEFUL_RELEASE_RULES, /None of this lowers any bar/i);
+    assert.match(GRACEFUL_RELEASE_RULES, /has NOT earned this reading/);
+  });
+
+  test("guardrail: no anchor, gate, or cap moved", () => {
+    // Rule F is a RECOGNITION fix. The numbers that decide whether a referral was
+    // earned are the ones PR #87 shipped, unchanged.
+    assert.equal(closeOutcomeAnchor("graceful_referral"), 85);
+    assert.equal(REFERRAL_MIN_EFFORT_THRESHOLD, 70);
+    assert.equal(PREMATURE_REFERRAL_CAP, 55);
+    assert.equal(SOFT_CLOSE_CAP, 55);
+    assert.equal(WEAK_PROCESS_CAP, 64);
+    assert.equal(CONSTRAINED_DEFERRAL_CAP, 72);
+  });
+
+  test("guardrail: a lazy referral is still capped, so Rule F cannot be gamed", () => {
+    const lazy = computeConsultingOverall(
+      rubric({ needsDiscovery: 40, objectionPrevention: 40, trustBuilding: 45, naturalClose: 40, relationshipContinuity: 45 }),
+      "graceful_referral",
+      "intermediate",
+    );
+    assert.ok(lazy <= PREMATURE_REFERRAL_CAP, `a referral with no discovery effort must stay capped, got ${lazy}`);
+  });
+
+  test("an EARNED release still scores high, which is the point of Rule F", () => {
+    const earned = computeConsultingOverall(
+      rubric({ needsDiscovery: 88, objectionPrevention: 85, trustBuilding: 90, naturalClose: 80, relationshipContinuity: 88 }),
+      "graceful_referral",
+      "intermediate",
+    );
+    assert.ok(earned >= 80, `a competent graceful release must score high, got ${earned}`);
+  });
+
+  test("it reaches the consulting rubric prompt the scorer actually sees", async () => {
+    let seen = "";
+    const responder: ScoreResponder = async (input) => {
+      seen = input;
+      return JSON.stringify({
+        needsDiscovery: 8,
+        objectionPrevention: 8,
+        trustBuilding: 8,
+        naturalClose: 8,
+        relationshipContinuity: 8,
+        closeOutcome: "graceful_referral",
+        feedback: "ok",
+      });
+    };
+    await scoreTranscript(
+      [
+        turn("consultant", "What are you hoping this solves for you?"),
+        turn("customer", "Guarantee me the engine will never fail."),
+        turn("consultant", "I can't promise that honestly. I don't think I'm the best fit here."),
+      ],
+      "advanced",
+      "consulting",
+      null,
+      { responder, cache: makeInMemoryCache() },
+    );
+    assert.ok(seen.includes(GRACEFUL_RELEASE_RULES));
+  });
+});
+
+describe("detectCloseIntent - a graceful RELEASE ends the session too", () => {
+  // These phrasings inverted the word order the old "best fit" patterns expected,
+  // so the worked example's release never tripped the end-and-score checkpoint and
+  // the session silently stayed open, which is itself a way the conversation could
+  // never end.
+  test("release phrasings are recognized", () => {
+    assert.equal(
+      detectCloseIntent("I'd rather you go find what fits you best, and if that changes, come see me."),
+      true,
+    );
+    assert.equal(detectCloseIntent("Go find something that works for you better."), true);
+    assert.equal(
+      detectCloseIntent("I might not be able to give you the guarantee you're after."),
+      true,
+    );
+    assert.equal(detectCloseIntent("Come back to me if anything changes."), true);
+  });
+
+  test("ordinary discovery is still not a close", () => {
+    assert.equal(detectCloseIntent("What would you need this to do for you?"), false);
+    assert.equal(detectCloseIntent("Tell me what went wrong with the last one."), false);
+    assert.equal(detectCloseIntent("Does that work for you so far?"), false);
+  });
+});
+
+// The spec's worked example, end to end at the deterministic layer: the auto
+// scenario with a $14,000 budget met at $14,000.02 with the two cents covered, an
+// engine-internals question that should get a mechanic referral, and a "how do I
+// know it won't break down" question that should get honest reassurance plus the
+// warranty path.
+describe("worked example (spec): auto scenario, $14,000 budget", () => {
+  const TRANSCRIPT = [
+    turn("consultant", "What brings you in today?"),
+    turn("customer", "I need something reliable. My budget is $14,000 and I can't go over that."),
+    turn("consultant", "Understood. What went wrong with the last one?"),
+    turn("customer", "It left me stranded twice. What are the internal engine tolerances on this one?"),
+    turn(
+      "consultant",
+      "Honestly, that's a question for our mechanic, and I'll walk you back and have him go through it with you. What I can tell you is it's newer, lower miles, and it passed our inspection.",
+    ),
+    turn("customer", "Okay. But how do I know it won't break down on me?"),
+    turn(
+      "consultant",
+      "I can't promise you no car ever breaks, and I won't pretend otherwise. What I can tell you is this one is in far better shape than what you had, and the warranty is how you protect yourself against a surprise repair bill.",
+    ),
+    turn("customer", "That's fair."),
+    turn(
+      "consultant",
+      "Based on everything you've told me, I'd recommend this one. Out the door with tax, tag, and title it's $14,000.02, and I'll cover the two cents, so you're right at your number.",
+    ),
+    turn("customer", "Then that works for me. Let's do it."),
+  ];
+
+  test("success test 1 (deterministic): the two-cent gap is recognized as the budget being MET", () => {
+    const state = deriveConversationState(TRANSCRIPT);
+    assert.ok(state.metNeed, "the met budget must be detected");
+    assert.equal(state.metNeed!.statedAmount, 14000);
+    assert.equal(state.metNeed!.quotedAmount, 14000.02);
+    assert.equal(state.metNeed!.gapClosed, true);
+  });
+
+  test("success test 1 (deterministic): the customer is told, in its own prompt, that the need is met", () => {
+    const block = buildTurnStateBlock(TRANSCRIPT);
+    assert.match(block, /THAT NEED IS MET/);
+    assert.match(block, /do not haggle over the remainder/);
+    assert.match(block, /never say or suggest that they missed your number/);
+  });
+
+  test("success tests 2 and 3 (prompt-level): the referral and the guarantee rules are in force this turn", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, TRANSCRIPT, "advanced", 2);
+    assert.ok(prompt.includes(REASONABLE_CUSTOMER_RULES));
+    assert.match(prompt, /STAY INSIDE WHAT THIS PERSON CAN ANSWER/);
+    assert.match(prompt, /DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE/);
+    assert.match(prompt, /THAT NEED IS MET/);
+  });
+
+  test("success test 4 (deterministic): the acceptance is recognized, so the conversation can end", () => {
+    assert.equal(hasCustomerAcceptedProposal(TRANSCRIPT), true);
+    assert.match(buildTurnStateBlock(TRANSCRIPT), /ALREADY said the proposed solution fits/);
+  });
+
+  test("success test 5 (prompt-level): the polite non-looping exit exists as a second ending", () => {
+    assert.match(REASONABLE_CUSTOMER_RULES, /I appreciate your time, thank you/);
+    assert.match(REASONABLE_CUSTOMER_RULES, /no third ending/i);
+  });
+
+  test("success test 6 (deterministic): a rep who releases this customer instead is scored as a win", () => {
+    const release = "I might not be able to give you the guarantee you're after, so go find what fits you best.";
+    assert.equal(detectCloseIntent(release), true, "the release must trip the end-and-score checkpoint");
+    assert.equal(closeOutcomeAnchor("graceful_referral"), 85);
+    assert.match(GRACEFUL_RELEASE_RULES, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
+  });
+});

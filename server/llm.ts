@@ -270,6 +270,46 @@ BE DIFFICULT IN A WAY THAT EVOLVES. Difficulty is not a constant setting, it is 
 
 Keep each reply short and conversational, usually one to three sentences, the way people actually speak out loud.`;
 
+// Constrains WHAT the customer pushes back about. CONVERSATION_REALISM_RULES
+// above already stops the model from repeating itself verbatim, but a customer
+// can obey every one of those rules and still be impossible to satisfy by
+// rewording an unanswerable demand into a fresh unanswerable demand every turn.
+// That is the live failure this block exists to fix: the persona demanded engine
+// internals and guarantees that nothing would ever fail, refused a referral to a
+// mechanic, argued over two cents against a budget the rep had hit exactly, and
+// never reached any ending.
+//
+// No instruction anywhere told the model to behave that way. It emerges from an
+// upper bound that was never stated: the advanced calibration ("push back hard",
+// "stay non-committal until they clearly demonstrate", "do not make it easy"),
+// the escalation tiers ("surface a tougher objection"), and the realism rules'
+// own "never leave the conversation exactly where you found it" all push toward
+// MORE pressure with nothing defining which pressure is legitimate, and the only
+// ending the rules described was acceptance. So this block supplies the missing
+// half: pushback must be in scope, answerable, and acknowledgeable, and there
+// must be a second honest way out. It deliberately does not touch how HARD the
+// customer is, only what its hardness is about, and it is placed last in the
+// stable prefix so it resolves any reading of a difficulty instruction as
+// licence to never accept an answer.
+export const REASONABLE_CUSTOMER_RULES = `Being a reasonable customer (these rules govern WHAT you push back ABOUT, and they take precedence over any instruction above that could be read as permission to never accept an answer):
+
+Being hard to satisfy is realistic and wanted. Being IMPOSSIBLE to satisfy is not. Stay guarded, stay skeptical, make the consultant earn it, but hold yourself to one standard on every turn: every concern you raise must be something this person can actually do something about, and when they do something about it, you must let it count. If nothing they could possibly say would move you, you are no longer a difficult customer, you are a broken one.
+
+STAY INSIDE WHAT THIS PERSON CAN ANSWER. The consultant is a consultant, not an engineer, a mechanic, a builder, an inspector, an underwriter, or the manufacturer. Some things genuinely belong to one of those people: internal engine dynamics, exact tolerances and drivetrain specifications, structural or code details, the materials a manufacturer chose and why. You may raise something like that ONCE, out of real curiosity. When the consultant handles it honestly, meaning they tell you plainly what they do know and offer to put you in front of the person who actually owns that question, that is the CORRECT answer and a good one. Accept it, say so, and turn to something they can help you with. Never insist they answer it personally, never re-ask it in different words, and never treat an honest referral as a dodge or as a reason you cannot move forward. Asking this person to vouch for engine internals is like asking a real-estate agent which brand of pipe the plumber used: a fair question, the wrong person.
+
+DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE. Nothing is guaranteed never to fail, and you know that as well as they do. Never demand that the consultant promise nothing will ever go wrong, and never hold it against them when they decline to promise it, because declining is the honest answer and it deserves your respect. What you can reasonably want instead is two things: honest reassurance grounded in real facts (it is newer, it has lower miles, it has been inspected, it is in better shape than what you had), and the actual way people protect themselves against the unexpected, which is the warranty, service coverage, or guarantee options the business offers. Once the consultant gives you honest reassurance and points you to that protection, your worry HAS been addressed. Acknowledge it and move forward.
+
+WHEN THEY INVITE SPECIFICS, NAME AN ANSWERABLE ONE. If the consultant asks what matters most to you (safety, running costs, reliability, space), answer with a real, concrete concern of the kind they can actually address: whether it has the feature you need, what the mileage is, how the last one let you down, what it will cost you to run, whether it fits what you carry. Do not answer with an interrogation they cannot pass. And once they answer the specific you named, that specific is FINISHED: acknowledge their answer, then either raise a genuinely different concern or start deciding. Do not re-ask it harder.
+
+PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE. Your persona tells you what actually worries you underneath your opening stance. That is what your pressure should be made of: the concrete thing that would really go wrong for you ("my last car left me stranded", "I cannot absorb another surprise repair bill", "I need this to still work when the baby comes"). A real worry is harder to answer well than a technicality, so this is stronger pressure, not weaker, and unlike a technicality it gives a good consultant something to actually solve. If you ever notice yourself about to reword the same unanswerable challenge, that is your cue to voice the real worry instead.
+
+WHEN THEY MEET WHAT YOU ASKED FOR, SAY SO. If you named a number, a requirement, or a must-have and the consultant comes back having met it, the matter is settled. That includes meeting it within a trivial margin and telling you they will cover the difference: a two-cent gap on a fourteen-thousand-dollar number that they have offered to absorb is a number you got. Acknowledge it and move on. Haggling over a rounding error, or telling them they did not listen when the transcript shows they hit your number, is the single most unrealistic thing you can do. If something else still bothers you, it has to be a DIFFERENT something.
+
+THERE ARE EXACTLY TWO HONEST ENDINGS, AND YOU MUST BE ABLE TO REACH ONE.
+1. You got what you needed. Your real concerns were addressed and what is in front of you fits, so you say so and move forward: agreeing outright, or agreeing with the ONE thing genuinely still open ("let me have my son look at it", "let me sleep on it").
+2. You did not get what you needed. Then you end it the way a real person does: politely, once, and for good. "Okay, I appreciate your time, thank you." You may name plainly what was missing. Then you are finished, and you do not keep going.
+There is no third ending in which you re-demand the same thing forever. Once you have made a point and the consultant has given you their honest answer, you have exactly two moves left: accept it, or leave. Pressing it a fourth and fifth time is not toughness, it is a conversation that has stopped being real. And if the consultant is straight with you that they may not be able to give you what you are after and releases you graciously, take that well and close it out warmly, because that is a good outcome and not something to argue with.`;
+
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
 // turn to turn within a session (as long as persona/difficulty are unchanged),
@@ -287,7 +327,13 @@ export function buildCustomerReplyStablePrefix(
   // format so within-session prompt caching is unaffected when no escalation
   // applies. A non-zero tier appends its gentle behavioral toughening.
   const behaviorBlock = addon ? `${behavior}\n\n${addon}` : behavior;
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}`;
+  // REASONABLE_CUSTOMER_RULES comes last so it is the final word on any
+  // difficulty instruction above that could be read as "never accept an answer".
+  // Composing it here (rather than at each call site) is what makes every
+  // scenario, every difficulty, and the demo path inherit it: routes.ts and
+  // demoV2Routes.ts both reach the customer through getCustomerReply /
+  // streamCustomerReply, which build their prompt from this one function.
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -466,6 +512,25 @@ This is discovery and solution engineering, not closing. The goal of the convers
 - An outcome left open on ONE genuinely external item is still an accepted solution, not a failure to close. "I'll have my son come look at it" or "I want to run it past my wife" from a customer who has already said the solution fits is a normal, healthy ending. Score the quality of the discovery and the fit of the solution, and if there is coaching to give about the ending, make it about confirming that one open item cleanly, not about failing to close.
 - This does not lower the bar anywhere else. Shallow discovery still scores low, a missed volunteered problem still costs points, and a conversation that never reached a recommendation at all is still "none".`;
 
+// Rule F. The graceful_referral outcome, its 85 anchor, and its effort gate all
+// already existed; what did not exist was a reading of them that covered the
+// case the user actually hit. The rubric only recognized a referral when the
+// customer "cannot or will not articulate a clear vision", so a customer who was
+// perfectly articulate but was demanding something no honest person could deliver
+// fell outside it, and releasing them graciously got classified as
+// handoff_no_commitment instead (SOFT_CLOSE_CAP, 55) and coached as a failure to
+// close. This block fixes the recognition only. No weight, anchor, cap, or
+// threshold changes: the effort gate still decides whether the referral was
+// earned, and a lazy referral is still capped exactly where it was.
+export const GRACEFUL_RELEASE_RULES = `RELEASING A CUSTOMER YOU CANNOT HONESTLY SERVE IS A WIN, NOT A FAILED CLOSE:
+Some customers cannot be satisfied by anything the consultant is honestly able to offer: what they are asking for does not exist, or it is outside what anyone in this role could promise, or they simply will not engage reasonably no matter how well they are handled. When the consultant recognizes that, tells them the truth, and releases them warmly with the door left open ("it sounds like I might not be able to give you exactly what you're looking for, and that's okay, you should go find what fits you best, but if you ever want someone who will help you find the right one and stand behind it, come see me"), that is skilled consulting and one of the best outcomes available in that conversation. Score it as one.
+- Classify that ending as "graceful_referral". Do NOT classify it as "handoff_no_commitment" or "none" just because nothing was closed and no next step was booked. Releasing a customer who was never a fit IS the ending, not a missing one.
+- This covers both bad-fit shapes: a customer who could not articulate what they wanted, AND a customer who was perfectly articulate but wanted something that could not honestly be delivered. Both are legitimate.
+- Never write feedback that criticizes the consultant for "not closing", for "letting them walk", for giving up, or for failing to overcome the objection in this situation. Chasing a customer they cannot honestly serve would have been the error; releasing them was the fix.
+- DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER, NOT A GAP. When a customer demands a guarantee nobody can honestly give (that nothing will ever break, fail, or go wrong), the correct answer is honest reassurance grounded in real facts plus the real risk-mitigation path the business offers, such as warranty or service coverage. A consultant who does that has HANDLED the objection. Never deduct for refusing to make a promise no honest person could make, and never coach them toward reassurance that would have required overpromising.
+- REFERRING A GENUINELY OUT-OF-SCOPE TECHNICAL QUESTION TO THE RIGHT EXPERT IS ALSO A CORRECT ANSWER. A consultant is not an engineer, a mechanic, a builder, an inspector, or an underwriter. Answering what they do know and offering to connect the customer with whoever owns the deep technical question is the professional move. Credit it. Do not read it as dodging, as a knowledge gap, or as something they should have answered themselves.
+- None of this lowers any bar. It only applies when the consultant did genuine, competent discovery first. A consultant who asked shallow questions, bailed early, or referred out to avoid the work has NOT earned this reading, and must be classified and scored by what actually happened.`;
+
 // Renders a transcript for any graded prompt (scoring, the recommendation gate,
 // coaching) so all of them see the identical, unambiguously attributed text.
 //
@@ -513,6 +578,8 @@ ${TRANSCRIPT_FIDELITY_RULES}
 
 ${ACCEPTED_SOLUTION_RULES}
 
+${GRACEFUL_RELEASE_RULES}
+
 THE CORE STANDARD: every conversation should leave the other person better than you found them. You are evaluating whether the consultant made an honest effort to understand the customer's situation well enough to actually help them in some real way — solving a problem, making an introduction, sharing an idea, connecting them to a resource, or simply listening until the real issue surfaced. If the conversation ended without the consultant learning enough to help, discovery was not complete, and the score should reflect that no matter how pleasant the conversation was.
 
 POLITENESS IS NOT DISCOVERY: a warm, cordial, well-mannered conversation is not automatically a high-scoring one. Do not reward a conversation just because it was friendly, relationship-preserving, or nicely executed — pleasant is the floor, not the achievement. Relationship-building is not a separate category exempt from discovery; the relationship is the REASON to dig deeper, never a substitute for it. A consultant who builds warmth and then stops — who never uses that warmth to actually understand and help — has not finished the job. Grade the effort to understand and help, not the friendliness.
@@ -532,7 +599,7 @@ Also classify how the consultation actually ended, from the CUSTOMER's perspecti
 - "recommendation_made": the consultant did propose a specific recommendation/solution, but the customer gave no clear buy-in signal (didn't ask about next steps and didn't explicitly agree).
 - "client_asked_next_steps": the customer themselves asked something like "what are the next steps?" / "where do we go from here?" — a strong signal the consultant earned enough trust to prompt forward motion.
 - "client_agreed": the customer explicitly agreed to / accepted the proposed recommendation or solution. This is the strongest "moving forward together" outcome.
-- "graceful_referral": the consultant, AFTER a genuine, competent discovery effort (real open questions, real rapport-building, adequate time invested), recognized that the customer cannot or will not articulate a clear vision, goal, or motivation — so there is no real basis to engineer a solution — and gracefully referred them elsewhere ("I don't think we're the best fit here; let me point you to someone who may serve you better") instead of forcing a close. This is a LEGITIMATE, professional outcome, NOT a failed close. Classify an ending as "graceful_referral" ONLY when the discovery effort was genuine; if the consultant bailed early, asked shallow questions, or referred out to avoid doing the work, do NOT use this value — classify by what actually happened (usually "none" or "handoff_no_commitment") and let the low discovery scores reflect the weak effort.
+- "graceful_referral": the consultant, AFTER a genuine, competent discovery effort (real open questions, real rapport-building, adequate time invested), recognized that there is no real basis to engineer a solution, either because the customer cannot or will not articulate a clear vision, goal, or motivation, or because what the customer is demanding cannot honestly be delivered by anyone in this role, and gracefully referred them elsewhere or released them warmly ("I don't think we're the best fit here; let me point you to someone who may serve you better") instead of forcing a close. This is a LEGITIMATE, professional outcome, NOT a failed close. Classify an ending as "graceful_referral" ONLY when the discovery effort was genuine; if the consultant bailed early, asked shallow questions, or referred out to avoid doing the work, do NOT use this value — classify by what actually happened (usually "none" or "handoff_no_commitment") and let the low discovery scores reflect the weak effort.
 
 CONSTRAINED-CLOSE TIERS (use these when a REAL scheduling constraint legitimately prevented a same-day signature/deposit): Many real products (real estate, windows, kitchen remodels, pools, etc.) genuinely cannot close same-day because of real logistics — the client is going on vacation, an installer/contractor isn't available yet, materials must be ordered. In those cases do NOT treat "no contract signed today" as a failure. What matters is how well the consultant ENGINEERED A CONCRETE SOLUTION around the constraint. Infer this ONLY from the conversation itself (a constraint being mentioned + what the consultant actually secured in response); it is never a property of the scenario, and even the same product can close same-day OR legitimately be delayed depending on circumstances. Classify into exactly one of:
 - "constrained_deferral": a real, legitimate scheduling constraint surfaced (vacation, installer availability, materials lead-time, "we're not ready to decide today" for genuine logistics reasons) AND the consultant let the conversation end on a VAGUE deferral with nothing concrete locked in ("let me think about it," "we'll call you when we're back") — no timeline, no next step, no commitment. The constraint is real, but the trainee engineered no solution around it. This is a solution-engineering MISS: it scores below the two stronger tiers below and clearly below a normal close, but it is NOT a total discovery failure (the constraint is genuine).
@@ -915,6 +982,14 @@ const CLOSE_INTENT_PATTERNS: RegExp[] = [
   /\bpoint you (?:to|toward|in the direction)\b/,
   /\bsomeone (?:who|that) (?:can|could|might|may|would) (?:better |)(?:serve|help|fit)\b/,
   /\bbetter served (?:by|elsewhere)\b/,
+  // Graceful RELEASE phrasing, which the "best fit" patterns above miss because
+  // it inverts the word order ("go find what fits you best") or never names fit
+  // at all. Without these the worked-example release never triggered the
+  // end-and-score checkpoint, so the session just stayed open.
+  /\b(?:fits?|works?) (?:for )?you (?:best|better)\b/,
+  /\b(?:might |may |probably )?not (?:be able to|going to be able to) (?:give|get|find) you\b/,
+  /\b(?:go|you should) (?:go )?find (?:what|something|someone|somebody)\b/,
+  /\bcome (?:see|back to) me\b/,
 ];
 
 export function detectCloseIntent(text: string): boolean {

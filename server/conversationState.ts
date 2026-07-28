@@ -16,6 +16,8 @@
 //   Rule 5  Has the customer already had its one "what else do you have" round?
 //   Rule 6  Has the customer already accepted a proposed solution? -> the
 //           conversation is allowed to conclude instead of growing new demands.
+//   Rule D  Has the rep already MET a number the customer named (including by
+//           covering a trivial gap and saying so)? -> stop arguing about it.
 //
 // Detection is intentionally conservative in both directions. A missed signal
 // only means the customer behaves as it did before this module existed, which is
@@ -166,6 +168,199 @@ function mentionsTopic(text: string, topic: DeflectableTopic): boolean {
   return matchesAny(text, TOPIC_PATTERNS[topic]);
 }
 
+// ---------------------------------------------------------------------------
+// Rule D: recognizing that a number the customer named has been MET.
+//
+// The live failure: the customer said $14,000, the rep came back at $14,000.02
+// and offered to cover the two cents, and the customer kept arguing that its
+// budget had not been respected. deriveQuotedFacts already told the customer it
+// knew the figure, but nothing compared that figure against what the customer
+// had ASKED for, so a met need was indistinguishable from an unmet one.
+//
+// Comparison is done on parsed amounts rather than left to the model, so the
+// state block can only ever assert "met" about a number pair the transcript
+// actually contains.
+// ---------------------------------------------------------------------------
+
+// Written-out numbers, needed because a voice transcript frequently renders
+// "fourteen thousand" rather than "$14,000".
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90,
+};
+
+// Word-number sources, built from the map above so the two cannot drift. Longest
+// alternatives first so "nineteen" is never matched as "nine".
+const WORD_KEYS_BY_LENGTH = Object.keys(WORD_NUMBERS).sort((a, b) => b.length - a.length);
+const TENS_WORDS = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+const ONES_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+// "twenty five" / "twenty-five" as a compound, or any single word-number.
+const WORD_NUMBER_SOURCE =
+  `(?:(?:${TENS_WORDS.join("|")})[\\s-](?:${ONES_WORDS.join("|")})|${WORD_KEYS_BY_LENGTH.join("|")})`;
+
+// What may FOLLOW an amount and disqualify it from being a comparable total.
+// Applied to the text after the match rather than as a lookahead: a lookahead
+// lets the engine backtrack the captured digits to make itself succeed, which is
+// how "$450 a month" was parsed as 45.
+//
+// A per-month figure is a payment, not a purchase total.
+const PER_MONTH_TAIL = /^(?:\s*(?:a|per|\/)\s*month\b|\s*monthly\b|\s*\/\s*mo\b)/i;
+// A unit that proves the quantity is not money at all, so "22 thousand miles"
+// and "two thousand square feet" never enter the comparison.
+const NON_MONEY_TAIL =
+  /^\s*(?:miles?|mpg|square|sq|feet|ft|months?|weeks?|days?|years?|hours?|pounds?|lbs|acres?|bedrooms?|baths?)\b/i;
+
+// Each money form, with the multiplier its capture carries and the trailing text
+// that disqualifies it.
+const MONEY_PATTERNS: { pattern: RegExp; scale: number; rejectTails: RegExp[] }[] = [
+  { pattern: /\$\s?([\d,]+(?:\.\d{1,2})?)/g, scale: 1, rejectTails: [PER_MONTH_TAIL] },
+  {
+    pattern: /\b([\d,]+(?:\.\d{1,2})?)\s*(?:dollars|bucks)\b/gi,
+    scale: 1,
+    rejectTails: [PER_MONTH_TAIL],
+  },
+  // "fourteen thousand", "14 thousand", "14k", "fourteen grand", "twenty five grand".
+  {
+    pattern: new RegExp(String.raw`\b(${WORD_NUMBER_SOURCE}|[\d,]+(?:\.\d+)?)\s*(?:thousand|grand|k)\b`, "gi"),
+    scale: 1000,
+    rejectTails: [PER_MONTH_TAIL, NON_MONEY_TAIL],
+  },
+];
+
+function parseNumberToken(raw: string): number | null {
+  const cleaned = raw.trim().toLowerCase();
+  if (/^[\d,]+(?:\.\d+)?$/.test(cleaned)) {
+    const n = Number(cleaned.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+  let total = 0;
+  for (const word of cleaned.split(/[\s-]+/)) {
+    const value = WORD_NUMBERS[word];
+    if (value === undefined) return null;
+    total += value;
+  }
+  return total > 0 ? total : null;
+}
+
+// Every money amount a line names, in dollars. Non-money quantities and monthly
+// payments are excluded.
+export function parseMoneyAmounts(text: string): number[] {
+  const amounts: number[] = [];
+  for (const { pattern, scale, rejectTails } of MONEY_PATTERNS) {
+    // These patterns are module-level and shared, so lastIndex is reset up front.
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const tail = text.slice(match.index + match[0].length);
+      if (rejectTails.some((re) => re.test(tail))) continue;
+      const n = parseNumberToken(match[1]);
+      if (n !== null) amounts.push(n * scale);
+    }
+  }
+  return amounts;
+}
+
+// A customer line that names a number as a target or a ceiling, rather than just
+// mentioning one in passing.
+const BUDGET_STATEMENT_MARKERS: RegExp[] = [
+  /\bmy budget\b/i,
+  /\bbudget (?:is|of|around|at|would be)\b/i,
+  /\b(?:can'?t|cannot|can not|won'?t|not going to) (?:go|spend|do|be) (?:over|above|past|beyond|more than|higher than)\b/i,
+  /\b(?:keep|keeping|stay|staying|come in|be) (?:it |them )?(?:under|below|at or under|within|inside)\b/i,
+  /\b(?:no|not) more than\b/i,
+  /\bmax(?:imum)?\b/i,
+  /\bceiling\b/i,
+  /\bthat'?s (?:my|the) (?:limit|max|number|ceiling|budget)\b/i,
+  /\ball i(?:'ve| have)? (?:got|can do|can swing)\b/i,
+  /\bi (?:told|said) you\b.{0,30}\bbudget\b/i,
+  /\bneed(?:s)? to (?:be|come in|land) (?:at|under|below)\b/i,
+  /\blooking to (?:spend|stay)\b/i,
+  /\bup to\b/i,
+];
+
+// The rep explicitly absorbing a small remainder, which is what turns a
+// near-miss into a met number.
+const GAP_CLOSING_MARKERS: RegExp[] = [
+  /\b(?:i'?ll|i will|we'?ll|we will|let me|let us) (?:just )?(?:cover|eat|absorb|waive|pick up|take care of|knock off|comp)\b/i,
+  /\bcover the (?:difference|gap|rest|remainder|two cents|change)\b/i,
+  /\bon (?:me|us|the house)\b/i,
+  /\bcall it even\b/i,
+  /\b(?:round|rounding) (?:that|it) (?:down|off)\b/i,
+  /\bdon'?t worry about the\b/i,
+  /\bthat(?:'s| is) my treat\b/i,
+];
+
+// How far over a stated number still counts as trivially met when the rep says
+// they will absorb it: half a percent of what the customer asked for ($70 on a
+// $14,000 budget). Anything larger is a real gap the customer is entitled to
+// keep pressing on, so difficulty is untouched.
+export const TRIVIAL_GAP_FRACTION = 0.005;
+// A quote must be in the same ballpark as the stated number to be comparable to
+// it at all. Without this floor a $500 deposit or a $99 fee would satisfy a
+// $14,000 budget simply by being smaller than it.
+export const COMPARABLE_QUOTE_FRACTION = 0.5;
+
+export interface MetNeedState {
+  // The customer's own line naming the number.
+  statement: string;
+  statedAmount: number;
+  // The rep's line that met it.
+  quote: string;
+  quotedAmount: number;
+  // True when the quote came in slightly over and the rep said they would
+  // absorb the remainder.
+  gapClosed: boolean;
+}
+
+function formatAmount(amount: number): string {
+  return `$${amount.toLocaleString("en-US", {
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+// The most recent number the customer named as a target/ceiling, matched against
+// the most recent rep quote that satisfies it. Returns null unless the
+// transcript contains both, so a conversation where the budget genuinely has not
+// been met produces no state line and the customer keeps pressing exactly as
+// before.
+function deriveMetNeed(transcript: TranscriptMessage[]): MetNeedState | null {
+  let statement: string | null = null;
+  let statedAmount = 0;
+  let met: MetNeedState | null = null;
+
+  for (const m of transcript) {
+    const text = m.content.trim();
+    if (!text) continue;
+
+    if (m.role === "customer") {
+      if (!matchesAny(text, BUDGET_STATEMENT_MARKERS)) continue;
+      const amounts = parseMoneyAmounts(text);
+      if (amounts.length === 0) continue;
+      // The largest amount in the line is the ceiling, which makes a range
+      // ("twelve to fourteen thousand") resolve to the number that matters.
+      statement = text;
+      statedAmount = Math.max(...amounts);
+      met = null;
+      continue;
+    }
+
+    if (!statement) continue;
+    const closesGap = matchesAny(text, GAP_CLOSING_MARKERS);
+    for (const quotedAmount of parseMoneyAmounts(text)) {
+      if (quotedAmount < statedAmount * COMPARABLE_QUOTE_FRACTION) continue;
+      const over = quotedAmount - statedAmount;
+      const meetsIt = over <= 0 || (closesGap && over <= statedAmount * TRIVIAL_GAP_FRACTION);
+      if (!meetsIt) continue;
+      met = { statement, statedAmount, quote: text, quotedAmount, gapClosed: over > 0 };
+    }
+  }
+
+  return met;
+}
+
 export interface DeflectedTopicState {
   topic: DeflectableTopic;
   label: string;
@@ -194,6 +389,8 @@ export interface ConversationState {
   acceptedSolutionLine: string | null;
   // Concrete figures the rep has already provided.
   quotedFacts: string[];
+  // A number the customer named that the rep has since met, if any.
+  metNeed: MetNeedState | null;
 }
 
 // Counts, per topic, how many times the rep redirected it. A redirect only
@@ -332,6 +529,7 @@ export function deriveConversationState(transcript: TranscriptMessage[]): Conver
     alternativesRoundSpent: isAlternativesRoundSpent(transcript),
     acceptedSolutionLine: deriveAcceptedSolutionLine(transcript),
     quotedFacts: deriveQuotedFacts(transcript),
+    metNeed: deriveMetNeed(transcript),
   };
 }
 
@@ -369,6 +567,16 @@ export function buildConversationStateLines(state: ConversationState): string[] 
   if (state.acceptedSolutionLine) {
     lines.push(
       `- You have ALREADY said the proposed solution fits you ("${state.acceptedSolutionLine}"). That means this conversation is allowed to end, and your job now is to let it. Do not invent a new requirement, a new objection, or a new demand in order to keep it going. Wrap up the way a real person does: confirm what you understood, raise at most the ONE thing that is genuinely still open for you if there is one (for example that another person still has to see it), and let the consultant close things out.`
+    );
+  }
+
+  if (state.metNeed) {
+    const { statement, statedAmount, quote, quotedAmount, gapClosed } = state.metNeed;
+    const gapNote = gapClosed
+      ? ` It came in at ${formatAmount(quotedAmount)}, a difference of ${formatAmount(quotedAmount - statedAmount)}, and they said they would absorb that themselves, so you are at your number.`
+      : ` It came in at ${formatAmount(quotedAmount)}, which is inside the number you gave them.`;
+    lines.push(
+      `- You told the consultant your number ("${statement}", which is ${formatAmount(statedAmount)}), and they have now come back with it: "${quote}".${gapNote} THAT NEED IS MET. Acknowledge it plainly and move forward. Do not argue about it, do not haggle over the remainder, and never say or suggest that they missed your number or did not listen, because they did exactly what you asked. If something still bothers you, it has to be a genuinely DIFFERENT concern, not this one.`
     );
   }
 

@@ -4,9 +4,11 @@ import assert from "node:assert/strict";
 import type { TranscriptMessage } from "@shared/schema";
 import {
   DEFLECTION_STOP_THRESHOLD,
+  TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
   deriveConversationState,
   hasCustomerAcceptedProposal,
+  parseMoneyAmounts,
 } from "./conversationState";
 
 // Terse transcript builder: "c: ..." is the customer, "r: ..." is the rep.
@@ -180,6 +182,121 @@ describe("Rules 6 and 8: an accepted solution makes the conversation endable", (
       "c: Maybe. I'll think about it.",
     );
     assert.equal(hasCustomerAcceptedProposal(transcript), false);
+  });
+});
+
+describe("Rule D: a number the rep has met is recognized as met", () => {
+  test("a quote at or under the stated budget is recognized", () => {
+    const state = deriveConversationState(
+      t(
+        "c: My budget is $14,000 and I can't go over that.",
+        "r: Out the door that one lands at $13,750.",
+      ),
+    );
+    assert.ok(state.metNeed, "expected the met budget to be detected");
+    assert.equal(state.metNeed!.statedAmount, 14000);
+    assert.equal(state.metNeed!.quotedAmount, 13750);
+    assert.equal(state.metNeed!.gapClosed, false);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /THAT NEED IS MET/);
+    assert.match(rendered, /inside the number you gave them/);
+    assert.match(rendered, /never say or suggest that they missed your number/);
+  });
+
+  test("a trivial overage the rep explicitly absorbs is recognized as met", () => {
+    const state = deriveConversationState(
+      t(
+        "c: My budget is $14,000 and I can't go over that.",
+        "r: With tax, tag, and title it's $14,000.02, and I'll cover the two cents, so you're at your number.",
+      ),
+    );
+    assert.ok(state.metNeed, "the two-cent gap must not read as an unmet budget");
+    assert.equal(state.metNeed!.statedAmount, 14000);
+    assert.equal(state.metNeed!.quotedAmount, 14000.02);
+    assert.equal(state.metNeed!.gapClosed, true);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /THAT NEED IS MET/);
+    assert.match(rendered, /\$0\.02/);
+    assert.match(rendered, /absorb that themselves/);
+    assert.match(rendered, /do not haggle over the remainder/);
+  });
+
+  test("a spoken budget and a spoken quote work the same way (voice path)", () => {
+    const state = deriveConversationState(
+      t(
+        "c: I need to stay under fourteen thousand.",
+        "r: It comes to thirteen thousand nine hundred, so that's under where you needed to be.",
+      ),
+    );
+    assert.ok(state.metNeed);
+    assert.equal(state.metNeed!.statedAmount, 14000);
+  });
+
+  test("a real overage the rep did NOT close leaves the customer free to press", () => {
+    const state = deriveConversationState(
+      t("c: My budget is $14,000, that's my limit.", "r: The best I can do on that one is $16,500."),
+    );
+    assert.equal(state.metNeed, null);
+    assert.doesNotMatch(buildConversationStateLines(state).join("\n"), /THAT NEED IS MET/);
+  });
+
+  test("a gap far bigger than trivial is not met even when the rep offers to absorb it", () => {
+    const state = deriveConversationState(
+      t(
+        "c: My budget is $14,000 and I can't go over that.",
+        "r: It's $15,200 but I'll cover some of the difference.",
+      ),
+    );
+    assert.equal(state.metNeed, null, "a $1,200 gap is a real objection, not a rounding error");
+    assert.ok(
+      15200 - 14000 > 14000 * TRIVIAL_GAP_FRACTION,
+      "sanity: the gap must exceed the trivial threshold",
+    );
+  });
+
+  test("a small unrelated figure does not satisfy a large stated budget", () => {
+    const state = deriveConversationState(
+      t("c: My budget is $14,000 max.", "r: We could start with a $500 deposit today."),
+    );
+    assert.equal(state.metNeed, null);
+  });
+
+  test("a later, higher budget statement supersedes an earlier met one", () => {
+    const state = deriveConversationState(
+      t(
+        "c: My budget is $14,000.",
+        "r: That one is $13,900.",
+        "c: Actually my real ceiling is $20,000, and I can't go over that.",
+      ),
+    );
+    assert.equal(state.metNeed, null, "the new number has not been quoted against yet");
+  });
+
+  test("a number with no budget framing is not treated as a stated need", () => {
+    const state = deriveConversationState(
+      t("c: The last one I owned cost $14,000.", "r: This one is $13,000."),
+    );
+    assert.equal(state.metNeed, null);
+  });
+
+  describe("parseMoneyAmounts", () => {
+    test("reads digits, decimals, word numbers, and shorthand", () => {
+      assert.deepEqual(parseMoneyAmounts("$14,000"), [14000]);
+      assert.deepEqual(parseMoneyAmounts("$14,000.02"), [14000.02]);
+      assert.deepEqual(parseMoneyAmounts("fourteen thousand"), [14000]);
+      assert.deepEqual(parseMoneyAmounts("14k"), [14000]);
+      assert.deepEqual(parseMoneyAmounts("twenty five grand"), [25000]);
+      assert.deepEqual(parseMoneyAmounts("2000 dollars"), [2000]);
+    });
+
+    test("ignores quantities that are not a total price", () => {
+      assert.deepEqual(parseMoneyAmounts("22,000 miles"), []);
+      assert.deepEqual(parseMoneyAmounts("22 thousand miles"), []);
+      assert.deepEqual(parseMoneyAmounts("$450 a month"), []);
+      assert.deepEqual(parseMoneyAmounts("$450 monthly"), []);
+      assert.deepEqual(parseMoneyAmounts("2,000 square feet"), []);
+      assert.deepEqual(parseMoneyAmounts("no numbers here at all"), []);
+    });
   });
 });
 

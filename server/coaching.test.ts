@@ -14,6 +14,7 @@ import {
 } from "./coaching";
 import {
   ACCEPTED_SOLUTION_RULES,
+  GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
   TRANSCRIPT_FIDELITY_RULES,
 } from "./llm";
@@ -64,6 +65,16 @@ describe("COACHING_SYSTEM prompt content", () => {
     assert.ok(COACHING_SYSTEM.includes(SPEAKER_ATTRIBUTION_RULES));
     assert.ok(COACHING_SYSTEM.includes(TRANSCRIPT_FIDELITY_RULES));
     assert.ok(COACHING_SYSTEM.includes(ACCEPTED_SOLUTION_RULES));
+  });
+
+  // Rule F. The rubric score and the follow-up chat have to agree. If the rubric
+  // credits a graceful release but the Coach then tells the trainee they should
+  // have pushed harder for a close, the trainee is coached back into the exact
+  // behavior the rubric penalizes.
+  test("inherits the graceful-release recognition so the Coach agrees with the rubric", () => {
+    assert.ok(COACHING_SYSTEM.includes(GRACEFUL_RELEASE_RULES));
+    assert.match(COACHING_SYSTEM, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
+    assert.match(COACHING_SYSTEM, /REFERRING A GENUINELY OUT-OF-SCOPE TECHNICAL QUESTION/);
   });
 });
 
