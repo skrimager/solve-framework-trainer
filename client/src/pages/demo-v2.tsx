@@ -29,6 +29,12 @@ import {
   PAID_RETURN_NOTICE,
   PAY_PER_SESSION_OPTION,
 } from "@/lib/demoPaywall";
+import {
+  SOLVE_STEPS,
+  WELCOME_FIRST,
+  WELCOME_REPEAT,
+  type WelcomeVariant,
+} from "@/lib/demoWelcome";
 import { hashToSearch } from "@/lib/hashLocation";
 import {
   Volume2,
@@ -71,7 +77,14 @@ function isLeadershipRubric(r: Record<string, number>): r is LeadershipRubricSco
   return "activeListening" in r;
 }
 
-type Step = "landing" | "email" | "code" | "industry" | "roleplay" | "results";
+type Step =
+  | "landing"
+  | "email"
+  | "code"
+  | "industry"
+  | "welcome"
+  | "roleplay"
+  | "results";
 
 // Brand palette (shared with the rest of the app).
 const ORANGE = "#E06D00";
@@ -175,8 +188,15 @@ export default function DemoV2() {
           <IndustryStep
             onChoose={(key) => {
               setIndustry(key);
-              setStep("roleplay");
+              setStep("welcome");
             }}
+          />
+        )}
+
+        {step === "welcome" && (
+          <WelcomeStep
+            variant={paidReturn ? "repeat" : "first"}
+            onContinue={() => setStep("roleplay")}
           />
         )}
 
@@ -522,6 +542,87 @@ function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
       >
         Meet my customer
       </Button>
+    </div>
+  );
+}
+
+// The instructions screen between the industry choice and the roleplay. Most
+// visitors arrive on a forwarded link and have never seen the marketing site, so
+// this is where the exercise gets framed before they meet the customer.
+function WelcomeStep({
+  variant,
+  onContinue,
+}: {
+  variant: WelcomeVariant;
+  onContinue: () => void;
+}) {
+  const copy = variant === "repeat" ? WELCOME_REPEAT : WELCOME_FIRST;
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-semibold" data-testid="text-demo-v2-welcome-headline">
+        {copy.headline}
+      </h2>
+
+      {variant === "repeat" ? (
+        <p className="text-sm text-muted-foreground" data-testid="text-demo-v2-welcome-body">
+          {WELCOME_REPEAT.body}
+        </p>
+      ) : (
+        <div className="space-y-5" data-testid="text-demo-v2-welcome-body">
+          <p className="text-foreground">{WELCOME_FIRST.intro}</p>
+
+          <div className="space-y-3">
+            <p className="font-medium">{WELCOME_FIRST.methodLead}</p>
+            <ul className="space-y-2 text-sm" data-testid="list-demo-v2-welcome-solve-steps">
+              {SOLVE_STEPS.map((solveStep) => (
+                <li key={solveStep.letter} className="flex items-start gap-2.5">
+                  <span
+                    className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: ORANGE }}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    <span className="font-semibold">
+                      {solveStep.letter}. {solveStep.label}.
+                    </span>{" "}
+                    {solveStep.body}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-sm text-muted-foreground">{WELCOME_FIRST.goal}</p>
+          <p className="text-sm text-muted-foreground">{WELCOME_FIRST.coach}</p>
+          <p className="text-sm text-muted-foreground">{WELCOME_FIRST.why}</p>
+
+          <div className="space-y-1">
+            <p className="font-medium">{WELCOME_FIRST.inputHeading}</p>
+            <p className="text-sm text-muted-foreground">{WELCOME_FIRST.inputBody}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Button
+          size="lg"
+          // Orange fill with navy text. sidebar-primary-foreground is the theme's
+          // navy-on-orange pairing and stays navy in dark mode, where the default
+          // primary token flips to orange.
+          className="text-sidebar-primary-foreground"
+          style={{ backgroundColor: ORANGE }}
+          onClick={onContinue}
+          data-testid="button-demo-v2-welcome-continue"
+        >
+          {copy.buttonLabel}
+        </Button>
+        {variant === "first" && (
+          <p className="text-sm text-muted-foreground" data-testid="text-demo-v2-welcome-footnote">
+            {WELCOME_FIRST.footnote}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
