@@ -39,6 +39,7 @@ import { isStripeConfigured } from "./stripe";
 import {
   DEMO_V2_INDUSTRIES,
   DEMO_V2_SLUGS,
+  demoV2Scenario,
   industryForSlug,
   isDemoV2Industry,
   pickNextV2Scenario,
@@ -55,7 +56,7 @@ import { deriveStalledStep } from "./realConversations";
 import { personaCoreFor, sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { historyForTurn, runReplyStream } from "./turnStream";
-import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type TranscriptMessage } from "@shared/schema";
+import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type Scenario, type TranscriptMessage } from "@shared/schema";
 
 // The pieces of server/routes.ts that v2 needs are module-private there (a
 // RateLimiter instance, the proxy-aware IP reader, the TTS streamer). They are
@@ -115,6 +116,15 @@ export async function loadDemoV2Pool(): Promise<DemoV2ScenarioOption[]> {
     pool.push({ id: scenario.id, slug, industry });
   }
   return pool;
+}
+
+// Every scenario a demo session actually runs on is loaded through here, so the
+// demo can never see a difficulty other than Beginner (see demoV2Scenario). The
+// pool loader above deliberately does not use it: it only reads id and slug to
+// build picker candidates, and never runs a conversation.
+async function loadDemoScenario(id: number): Promise<Scenario | undefined> {
+  const scenario = await storage.getScenario(id);
+  return scenario ? demoV2Scenario(scenario) : undefined;
 }
 
 export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
@@ -204,7 +214,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     } catch {
       return res.status(500).json({ message: "Demo is temporarily unavailable." });
     }
-    const scenario = await storage.getScenario(choice.id);
+    const scenario = await loadDemoScenario(choice.id);
     if (!scenario) return res.status(500).json({ message: "Demo is temporarily unavailable." });
 
     // sessionsUsed counts FREE sessions only, so a paid session must leave it
@@ -313,7 +323,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       if (!session || session.signupId !== signup.id) {
         return res.status(404).json({ message: "Session not found" });
       }
-      const scenario = await storage.getScenario(session.scenarioId);
+      const scenario = await loadDemoScenario(session.scenarioId);
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
       const voiceUnlocked = isVoiceUnlockedForDemo(session.paidSessionId, signup.email);
@@ -384,7 +394,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
     const msg = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
     if (!msg) return res.status(404).end();
-    const scenario = await storage.getScenario(session.scenarioId);
+    const scenario = await loadDemoScenario(session.scenarioId);
     if (!scenario) return res.status(404).end();
     await streamMessageAudio(res, {
       msgId: req.params.msgId,
@@ -411,7 +421,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
     const transcript: TranscriptMessage[] = JSON.parse(session.transcript);
     const placeholder = transcript.find((m) => m.msgId === req.params.msgId && m.role === "customer");
     if (!placeholder) return res.status(404).end();
-    const scenario = await storage.getScenario(session.scenarioId);
+    const scenario = await loadDemoScenario(session.scenarioId);
     if (!scenario) return res.status(404).end();
     await runReplyStream(res, {
       msgId: req.params.msgId,
@@ -450,7 +460,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
         }
       }
 
-      const scenario = await storage.getScenario(session.scenarioId);
+      const scenario = await loadDemoScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
       const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
       const updated = await storage.updateDemoSession(session.id, {
