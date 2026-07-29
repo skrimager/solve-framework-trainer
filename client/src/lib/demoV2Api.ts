@@ -1,6 +1,5 @@
-// Thin client for the public demo API (/api/demo/*). Kept separate from the
-// retired demoApi.ts rather than merged into it, so the retired single-scenario
-// client can stay in the repo for reference without this one depending on it.
+// Thin client for the public demo API (/api/demo/*). This is the only demo
+// client; the retired single-scenario demoApi.ts it replaced has been removed.
 //
 // Three endpoints are flow-agnostic and are still served by server/routes.ts
 // directly: the email code pair (/api/demo/request-code, /api/demo/verify), which

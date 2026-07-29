@@ -1,8 +1,7 @@
-// Demo v2 page. Same structural components and styling as the original demo page
-// but a different shape of flow: the visitor picks an industry, runs their one
-// free conversation, and then lands on the membership / pay-per-session fork.
-// Copied and adapted from client/src/pages/demo.tsx rather than importing from
-// it, so the original demo cannot be broken by changes here.
+// Demo v2 page, the only demo page: the visitor picks an industry, runs their one
+// free conversation, and then lands on the membership / pay-per-session fork. It
+// began as a copy of the original single-scenario demo page, which has since been
+// removed.
 import { useState, useRef, useEffect } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

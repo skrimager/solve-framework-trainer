@@ -23,7 +23,6 @@ import { unsubscribeFooter, normalizeUnsubEmail } from "./unsubscribe";
 // Offsets from verify time, in days. Step 1 goes out immediately; the two
 // follow-ups are day 1 and day 3.
 export const DEMO_DRIP_STEP_OFFSET_DAYS: Record<number, number> = { 1: 0, 2: 1, 3: 3 };
-export const DEMO_DRIP_STEPS = [1, 2, 3] as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
