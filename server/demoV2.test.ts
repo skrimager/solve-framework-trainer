@@ -653,9 +653,11 @@ describe("demo v2 endpoints", () => {
 // server/turnStream.test.ts for the real path's own pin).
 
 describe("demo v2 streamed replies", () => {
-  // Allowlisted, so its sessions have voice; the other address never does.
+  // Both stream: voice is unconditional now. STREAM_EMAIL is kept allowlisted
+  // for other tests in this suite that expect unlimited sessions; ORDINARY_EMAIL
+  // has no allowlist entry and no purchase, and still gets voice.
   const STREAM_EMAIL = "wadeskrimager@icloud.com";
-  const LOCKED_EMAIL = "streamer@example.com";
+  const ORDINARY_EMAIL = "streamer@example.com";
   let server: Server;
   let baseUrl: string;
   let signups: DemoSignup[];
@@ -687,7 +689,7 @@ describe("demo v2 streamed replies", () => {
       } as DemoSignup,
       {
         id: 2,
-        email: normalizeEmail(LOCKED_EMAIL),
+        email: normalizeEmail(ORDINARY_EMAIL),
         verified: true,
         sessionsUsed: MAX_DEMO_SESSIONS,
       } as DemoSignup,
@@ -708,8 +710,9 @@ describe("demo v2 streamed replies", () => {
         track: "consulting",
       } as unknown as Scenario,
     ];
-    // Session 1 belongs to the allowlisted email and streams; session 2 belongs
-    // to an ordinary visitor and must stay text-only.
+    // Session 1 belongs to the allowlisted email; session 2 belongs to an
+    // ordinary visitor with no purchase. Both stream, since voice is
+    // unconditional now.
     sessions = [
       {
         id: 1,
@@ -845,24 +848,34 @@ describe("demo v2 streamed replies", () => {
     assert.match(raw, /event: done/);
   });
 
-  // Streaming rides on the voice gate, so a session that has not unlocked voice
-  // must stay on the blocking text path rather than being handed a stream it is
-  // not allowed to consume. The reply itself needs a live model, which the suite
-  // deliberately does not have, so this asserts the branch and not the reply.
-  test("a turn with voice locked never opens a stream", async () => {
+  // Voice used to be paid-only, so an ordinary (non-allowlisted, unpurchased)
+  // session had to stay on the blocking text path. Voice is unconditional now,
+  // so this session must stream too, exactly like the allowlisted one above.
+  // The reply itself needs a live model, which the suite deliberately does not
+  // have, so this asserts the branch and not the reply content.
+  test("an ordinary (non-allowlisted, unpurchased) session also streams now that voice is unconditional", async () => {
     const res = await post("/api/demo/session/2/message", {
-      token: signDemoToken(LOCKED_EMAIL),
+      token: signDemoToken(ORDINARY_EMAIL),
       content: "What's it for?",
       withAudio: true,
       stream: true,
     });
-    assert.equal((await res.json()).replyStreamUrl, undefined);
-    assert.ok(!transcriptOf(2).some((m) => m.audioStatus === "pending"));
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.replyStreamUrl, `/api/demo/session/2/turn-stream/${body.streamMsgId}`);
+    assert.ok(transcriptOf(2).some((m) => m.audioStatus === "pending"));
   });
 
-  test("the stream endpoint refuses a session whose voice is still locked", async () => {
-    const res = await fetch(`${baseUrl}/api/demo/session/2/turn-stream/anything`);
-    assert.equal(res.status, 403);
+  test("the stream endpoint serves an ordinary session's stream, not just the allowlisted one", async () => {
+    const startRes = await post("/api/demo/session/2/message", {
+      token: signDemoToken(ORDINARY_EMAIL),
+      content: "What's it for?",
+      withAudio: true,
+      stream: true,
+    });
+    const { replyStreamUrl } = await startRes.json();
+    const res = await fetch(`${baseUrl}${replyStreamUrl}`);
+    assert.equal(res.status, 200);
   });
 
   test("the stream endpoint 404s on an unknown message id", async () => {

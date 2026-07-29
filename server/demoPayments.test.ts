@@ -561,7 +561,7 @@ describe("demo paid-session endpoints", () => {
     });
   });
 
-  test("the free session still gets no voice", async () => {
+  test("the free session gets voice too -- it's the one shot to show the real product", async () => {
     const signup = verifiedSignup("free@example.com", 0);
     const res = await post("/api/demo/session", {
       token: signDemoToken(signup.email),
@@ -569,8 +569,8 @@ describe("demo paid-session endpoints", () => {
     });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.voiceEnabled, false);
-    assert.ok(!demoSessions[0].paidSessionId, "the free session must not be linked to a credit");
+    assert.equal(body.voiceEnabled, true);
+    assert.ok(!demoSessions[0].paidSessionId, "the free session must still not be linked to a credit");
     assert.equal(signup.sessionsUsed, 1);
   });
 });
