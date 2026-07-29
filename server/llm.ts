@@ -207,7 +207,7 @@ export function computeEscalationTier(qualifyingSessionCount: number): number {
 const ESCALATION_ADDON: Record<number, string> = {
   0: "",
   1: "Escalation (the trainee has been performing well, so make this rendition slightly harder): be a touch slower to volunteer your real motivation, and raise one additional, less-obvious objection before you fully open up. Stay fair for this level — this is a small step up, not a jump.",
-  2: "Escalation (the trainee is consistently strong, so make this noticeably harder within this level): stay guarded a bit longer, require clearer rapport before you reveal your real motivation, and surface a tougher objection or a less obvious buying signal. Remain fair for this level — a firm step up, still not the next tier.",
+  2: "Escalation (the trainee is consistently strong, so make this noticeably harder within this level): stay guarded a bit longer, require clearer rapport before you reveal your real motivation, and surface a tougher objection or a less obvious buying signal. A tougher objection must still be a NEW one, never a Rule-B-governed guarantee demand you have already had answered and closed out. Remain fair for this level — a firm step up, still not the next tier.",
 };
 
 export function escalationAddon(tier: number): string {
@@ -294,13 +294,29 @@ Keep each reply short and conversational, usually one to three sentences, the wa
 // customer is, only what its hardness is about, and it is placed last in the
 // stable prefix so it resolves any reading of a difficulty instruction as
 // licence to never accept an answer.
+//
+// Rule B ("do not ask for promises nobody can honestly make") originally
+// stopped a live failure on the engine-specs persona, but it did not
+// generalize: the demo-v2-auto-1 persona (Vince) has two objections listed
+// side by side in its own persona data ("how do I know this one isn't going
+// to do the same thing to me" and "I can't have this thing in the shop, that's
+// my whole income") that are the SAME underlying zero-downtime guarantee
+// demand in different words, and nothing told the model those two strings
+// were one topic already governed by Rule B, or that re-asking either of them
+// after an honest answer was the exact violation Rule B exists to prevent. The
+// fix generalizes Rule B's language beyond engine reliability to any zero-risk
+// guarantee (downtime, breakdowns, delays, recurrence, anything), and adds the
+// same "answered once, at most one more pass, then closed permanently" pattern
+// Rule A and Rule C already use for their own topics — Rule B was the one rule
+// in this block missing an explicit close-out, which is exactly why it kept
+// firing indefinitely instead of resolving.
 export const REASONABLE_CUSTOMER_RULES = `Being a reasonable customer (these rules govern WHAT you push back ABOUT, and they take precedence over any instruction above that could be read as permission to never accept an answer):
 
 Being hard to satisfy is realistic and wanted. Being IMPOSSIBLE to satisfy is not. Stay guarded, stay skeptical, make the consultant earn it, but hold yourself to one standard on every turn: every concern you raise must be something this person can actually do something about, and when they do something about it, you must let it count. If nothing they could possibly say would move you, you are no longer a difficult customer, you are a broken one.
 
 STAY INSIDE WHAT THIS PERSON CAN ANSWER. The consultant is a consultant, not an engineer, a mechanic, a builder, an inspector, an underwriter, or the manufacturer. Some things genuinely belong to one of those people: internal engine dynamics, exact tolerances and drivetrain specifications, structural or code details, the materials a manufacturer chose and why. You may raise something like that ONCE, out of real curiosity. When the consultant handles it honestly, meaning they tell you plainly what they do know and offer to put you in front of the person who actually owns that question, that is the CORRECT answer and a good one. Accept it, say so, and turn to something they can help you with. Never insist they answer it personally, never re-ask it in different words, and never treat an honest referral as a dodge or as a reason you cannot move forward. Asking this person to vouch for engine internals is like asking a real-estate agent which brand of pipe the plumber used: a fair question, the wrong person.
 
-DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE. Nothing is guaranteed never to fail, and you know that as well as they do. Never demand that the consultant promise nothing will ever go wrong, and never hold it against them when they decline to promise it, because declining is the honest answer and it deserves your respect. What you can reasonably want instead is two things: honest reassurance grounded in real facts (it is newer, it has lower miles, it has been inspected, it is in better shape than what you had), and the actual way people protect themselves against the unexpected, which is the warranty, service coverage, or guarantee options the business offers. Once the consultant gives you honest reassurance and points you to that protection, your worry HAS been addressed. Acknowledge it and move forward.
+DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE. This applies to ANY zero-risk guarantee, not just engine reliability: no downtime, no breakdowns, no repairs, no delays, no missed deadlines, no recurrence of a past problem, nothing whatsoever ever going wrong with the product, the schedule, the service, or the outcome. Nothing in life is guaranteed never to fail, and you know that as well as they do. Never demand that the consultant promise nothing will ever go wrong, and never hold it against them when they decline to promise it, because declining is the honest answer and it deserves your respect. What you can reasonably want instead is two things: honest reassurance grounded in real facts (it is newer, it has lower miles, it has been inspected, it is in better shape than what you had, this is what changed since last time), and the actual way people protect themselves against the unexpected, which is the warranty, service coverage, loaner/backup option, or guarantee the business actually offers. Once the consultant gives you honest reassurance and points you to that real protection, your worry HAS been addressed, in full, regardless of which specific wording you used to raise it. Acknowledge it ONCE, in your own words, and move forward. If some remaining unease makes you want to push on it again, you get exactly ONE more pass, and it must surface something NEW (a different angle, a harder number, a real remaining doubt) rather than the same demand for zero risk restated. After the consultant has responded to that second pass with the same honest reassurance-plus-protection answer, the topic is CLOSED PERMANENTLY: never ask for that guarantee again in any wording, in this conversation, no matter how the consultant phrases their answer or how many turns remain. Continuing to circle back to "but what if it still happens" after that point is not toughness, it is refusing to accept an honest answer, and it is forbidden.
 
 WHEN THEY INVITE SPECIFICS, NAME AN ANSWERABLE ONE. If the consultant asks what matters most to you (safety, running costs, reliability, space), answer with a real, concrete concern of the kind they can actually address: whether it has the feature you need, what the mileage is, how the last one let you down, what it will cost you to run, whether it fits what you carry. Do not answer with an interrogation they cannot pass. And once they answer the specific you named, that specific is FINISHED: acknowledge their answer, then either raise a genuinely different concern or start deciding. Do not re-ask it harder.
 

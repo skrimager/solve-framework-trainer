@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   voiceTransition,
+  shouldResetDraftForEffect,
   type VoiceState,
   type VoiceEvent,
   type VoiceContext,
@@ -111,16 +112,44 @@ describe("voiceTransition - failing safe (no silent dead ends)", () => {
     assert.deepEqual(r.effects, []);
   });
 
-  test("spontaneous recognition end while listening restarts the mic", () => {
+  test("spontaneous recognition end while listening resumes without wiping the draft", () => {
+    // RECOGNITION_ENDED while listening covers two real causes: the speaker
+    // genuinely paused (mobile fires onend spontaneously), or Chrome's own
+    // internal session-length cap killed capture mid-utterance. RESUME_LISTENING
+    // (not START_LISTENING) is what tells the hook to keep the draft instead of
+    // discarding whatever the speaker already said — see voiceMachine.ts.
     const r = run("listening", { type: "RECOGNITION_ENDED" });
     assert.equal(r.state, "listening");
-    assert.deepEqual(r.effects, ["START_LISTENING"]);
+    assert.deepEqual(r.effects, ["RESUME_LISTENING"]);
   });
 
   test("recognition end with no support falls back to the user", () => {
     const r = run("listening", { type: "RECOGNITION_ENDED" }, UNSUPPORTED);
     assert.equal(r.state, "awaiting_user");
     assert.deepEqual(r.effects, []);
+  });
+});
+
+// This is the fix for the mid-speech voice cutoff bug: Chrome's own
+// SpeechRecognition enforces an internal, non-configurable session-length
+// limit (commonly ~60s) that fires onend mid-utterance with zero silence
+// involved. Before this fix, every restart hardcoded fresh=true and wiped
+// whatever the speaker had already said. shouldResetDraftForEffect is what
+// the hook now consults instead of hardcoding the reset, so a browser-forced
+// restart resumes the same draft rather than discarding it.
+describe("shouldResetDraftForEffect - draft preservation on browser-forced restarts", () => {
+  test("START_LISTENING resets the draft (a genuinely new utterance)", () => {
+    assert.equal(shouldResetDraftForEffect("START_LISTENING"), true);
+  });
+
+  test("RESUME_LISTENING preserves the draft (browser killed capture mid-turn)", () => {
+    assert.equal(shouldResetDraftForEffect("RESUME_LISTENING"), false);
+  });
+
+  test("STOP_LISTENING/PLAY_AUDIO/STOP_AUDIO are non-listening effects and default safe (reset)", () => {
+    assert.equal(shouldResetDraftForEffect("STOP_LISTENING"), true);
+    assert.equal(shouldResetDraftForEffect("PLAY_AUDIO"), true);
+    assert.equal(shouldResetDraftForEffect("STOP_AUDIO"), true);
   });
 });
 
@@ -184,21 +213,25 @@ describe("voiceTransition - mobile silent-start recovery", () => {
     assert.deepEqual(resume.effects, ["START_LISTENING"]);
   });
 
-  test("every resumed turn re-issues START_LISTENING (fresh instance per turn)", () => {
+  test("genuinely new turns re-issue START_LISTENING (fresh instance, fresh draft)", () => {
     for (const trigger of [
       { type: "AUDIO_ENDED" } as VoiceEvent,
       { type: "REPLY_NO_AUDIO" } as VoiceEvent,
-      { type: "RECOGNITION_ENDED" } as VoiceEvent,
     ]) {
       const from: VoiceState =
-        trigger.type === "AUDIO_ENDED"
-          ? "ai_speaking"
-          : trigger.type === "REPLY_NO_AUDIO"
-            ? "processing"
-            : "listening";
+        trigger.type === "AUDIO_ENDED" ? "ai_speaking" : "processing";
       const r = run(from, trigger);
       assert.equal(r.state, "listening");
       assert.deepEqual(r.effects, ["START_LISTENING"]);
     }
+  });
+
+  test("a browser-forced end mid-turn re-issues RESUME_LISTENING, not START_LISTENING", () => {
+    // This is the one restart path that must NOT reset the draft: the speaker
+    // may still be mid-sentence when the browser kills the recognition session.
+    const r = run("listening", { type: "RECOGNITION_ENDED" });
+    assert.equal(r.state, "listening");
+    assert.deepEqual(r.effects, ["RESUME_LISTENING"]);
+    assert.notDeepEqual(r.effects, ["START_LISTENING"]);
   });
 });

@@ -1625,9 +1625,29 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
 
   test("Rule B: impossible guarantees are out, honest reassurance plus the warranty path is in", () => {
     assert.match(rules, /DO NOT ASK FOR PROMISES NOBODY CAN HONESTLY MAKE/);
-    assert.match(rules, /Nothing is guaranteed never to fail/i);
-    assert.match(rules, /warranty, service coverage, or guarantee options/i);
-    assert.match(rules, /your worry HAS been addressed/);
+    assert.match(rules, /Nothing in life is guaranteed never to fail/i);
+    assert.match(rules, /warranty, service coverage, loaner\/backup option, or guarantee/i);
+    assert.match(rules, /your worry HAS been addressed, in full, regardless of which specific wording/);
+  });
+
+  test("Rule B generalizes beyond engine reliability to any zero-risk demand (downtime, breakdowns, delays, recurrence)", () => {
+    // This is the fix for the Vince transcript: "my business won't suffer
+    // downtime" and "my car won't need repairs" are the same demand in
+    // different words, not two different topics, and Rule B's text must say
+    // so explicitly rather than only ever mentioning engines.
+    assert.match(rules, /ANY zero-risk guarantee, not just engine reliability/);
+    assert.match(rules, /no downtime, no breakdowns, no repairs, no delays, no missed deadlines, no recurrence/i);
+  });
+
+  test("Rule B closes after at most one more pass, matching Rule A/C's close-out pattern", () => {
+    // Rules A and C already have an explicit "answered, so stop asking"
+    // mechanic ("never re-ask it in different words", "that specific is
+    // FINISHED"). Rule B was missing the equivalent, which is why a customer
+    // could keep re-demanding a guarantee in new words forever. This asserts
+    // the same shape now exists on Rule B specifically.
+    assert.match(rules, /you get exactly ONE more pass/);
+    assert.match(rules, /the topic is CLOSED PERMANENTLY: never ask for that guarantee again in any wording/);
+    assert.match(rules, /refusing to accept an honest answer, and it is forbidden/);
   });
 
   test("Rule C: an invited specific must be answerable, and is finished once answered", () => {
@@ -1668,6 +1688,15 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
     assert.match(advanced, /Push back hard on price and value/);
     assert.match(advanced, /Do not make it easy/);
     assert.match(escalationAddon(2), /tougher objection/i);
+  });
+
+  test("tier 2 escalation cannot be satisfied by re-raising a Rule-B-closed guarantee demand", () => {
+    // Tier 2 escalation ("surface a tougher objection") had no exception for
+    // topics REASONABLE_CUSTOMER_RULES already resolved, so escalation could
+    // read as license to re-raise a guarantee demand in a new wording to
+    // satisfy "tougher". This asserts the explicit carve-out exists.
+    assert.match(escalationAddon(2), /must still be a NEW one/);
+    assert.match(escalationAddon(2), /never a Rule-B-governed guarantee demand you have already had answered and closed out/);
   });
 });
 

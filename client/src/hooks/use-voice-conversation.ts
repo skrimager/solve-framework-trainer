@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { voiceTransition, type VoiceState, type VoiceEvent, type VoiceEffect } from "@/lib/voiceMachine";
+import { voiceTransition, shouldResetDraftForEffect, type VoiceState, type VoiceEvent, type VoiceEffect } from "@/lib/voiceMachine";
 import { recommendSilenceMs, DEFAULT_SILENCE_MS } from "@/lib/turnDetection";
 import { AUDIO_TAIL_GUARD_MS, isLikelyEchoOfCustomer } from "@/lib/echoGuard";
 import type { TranscriptMessage } from "@shared/schema";
@@ -486,7 +486,13 @@ export function useVoiceConversation({
     (effect: VoiceEffect, audioUrl?: string) => {
       switch (effect) {
         case "START_LISTENING":
-          startRecognition(true);
+        case "RESUME_LISTENING":
+          // shouldResetDraftForEffect is the single source of truth for which
+          // listening effect wipes the draft: START_LISTENING (genuinely new
+          // utterance) does, RESUME_LISTENING (browser killed recognition
+          // mid-turn — see voiceMachine.ts) does not, so words already spoken
+          // are never discarded.
+          startRecognition(shouldResetDraftForEffect(effect));
           break;
         case "STOP_LISTENING":
           stopRecognition();
