@@ -146,11 +146,21 @@ export const PERSONA_VOICE_INSTRUCTIONS: Record<string, string> = {
 // word. That is what made the customer sound robotic. Real speech is uneven -- it
 // leans on the word that carries the meaning, runs some phrases together,
 // breathes at clause boundaries, and lets pitch fall at the end of a statement.
-// This block asks for exactly that, and it says nothing about age, gender,
-// personality, or mood so it can never conflict with a per-persona steer or with
-// the gender the avatar shows.
+// This block asks for exactly that, and it says nothing about age, gender, or
+// personality, so it can never conflict with a per-persona steer or with the
+// gender the avatar shows.
+//
+// It does take one explicit position on mood: hold a flat, even emotional
+// register regardless of what the line's content says. Without this,
+// gpt-4o-mini-tts infers vocal emotion from the semantic content of the
+// customer's line -- if the LLM writes a line that reads as frustrated or
+// excited, the model renders it that way, which is what caused customer
+// audio to swing between angry, excited, and monotone across a single
+// session even though nothing here ever asked for that. This line overrides
+// that inference without touching anything else in the steer, and it applies
+// uniformly to every persona so no scenario is spared the swings.
 export const NATURAL_DELIVERY_INSTRUCTIONS =
-  "Delivery: speak like a real person in an unscripted conversation, not like someone reading aloud. Pacing: natural conversational speed with uneven rhythm -- run short phrases together, take a small breath at clause boundaries, and let the pace vary with what is being said instead of holding one steady tempo. Emphasis: stress only the one or two words that actually carry the meaning of the sentence and let the rest ride lightly; do not give every word equal weight and do not over-enunciate. Intonation: let pitch fall naturally at the end of statements and rise only on genuine questions. Overall: relaxed, human, and a little imperfect rather than polished or announcer-like.";
+  "Delivery: speak like a real person in an unscripted conversation, not like someone reading aloud. Pacing: natural conversational speed with uneven rhythm -- run short phrases together, take a small breath at clause boundaries, and let the pace vary with what is being said instead of holding one steady tempo. Emphasis: stress only the one or two words that actually carry the meaning of the sentence and let the rest ride lightly; do not give every word equal weight and do not over-enunciate. Intonation: let pitch fall naturally at the end of statements and rise only on genuine questions. Overall: relaxed, human, and a little imperfect rather than polished or announcer-like. Emotional register: regardless of what the words themselves say, keep your vocal delivery flat, calm, and even -- the same conversational register from the first line to the last. Never let your voice sound angry, heated, elated, or manic, and never spike in volume or pitch to convey excitement or frustration. If the line's content is frustrated or enthusiastic, let the words carry that meaning; your voice stays level and conversational regardless.";
 
 // Returns gpt-4o-mini-tts delivery instructions for a scenario slug.
 //

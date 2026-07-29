@@ -97,3 +97,38 @@ describe("getVoiceInstructionsForScenario", () => {
     }
   });
 });
+
+// gpt-4o-mini-tts infers vocal emotion from the semantic content of the line
+// (a frustrated-sounding line gets rendered angrily, an eager-sounding line
+// gets rendered excitedly), which is what made customer audio swing between
+// angry, excited, and monotone within a single session even though nothing in
+// the steer ever asked for that. The universal steer now explicitly overrides
+// that inference so delivery stays flat regardless of what the words say.
+describe("emotional register override", () => {
+  test("the universal steer explicitly asks for a flat register regardless of content", () => {
+    assert.match(NATURAL_DELIVERY_INSTRUCTIONS, /flat|even|level/i);
+    assert.match(NATURAL_DELIVERY_INSTRUCTIONS, /regardless of what the words/i);
+  });
+
+  test("the override rules out the specific swings that were reported (angry, excited)", () => {
+    assert.match(NATURAL_DELIVERY_INSTRUCTIONS, /angry/i);
+    assert.match(NATURAL_DELIVERY_INSTRUCTIONS, /excitement|excited|elated/i);
+  });
+
+  test("every scenario inherits the flat-register override, curated or not", () => {
+    // Curated personas still get their age/energy steer layered on top, but the
+    // flat-register line must survive underneath every one of them -- a young,
+    // energetic persona should sound young and energetic in wording, not
+    // swing to genuinely angry or manic delivery.
+    for (const slug of [
+      "auto-sales-first-car-college-student",
+      "apartment-rental-recent-grad",
+      "employee-grievance-pto-denied-frustration",
+      "financial-advisor-young-professional-starting",
+      "auto-sales-skeptical-negotiator",
+    ]) {
+      const instructions = getVoiceInstructionsForScenario(slug);
+      assert.match(instructions, /regardless of what the words/i, slug);
+    }
+  });
+});
