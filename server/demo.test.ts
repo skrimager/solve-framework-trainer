@@ -272,23 +272,26 @@ describe("countDemoSessionsInIpWindow (rolling 30-day window)", () => {
   });
 });
 
-describe("isVoiceUnlockedForDemo (cost containment: voice on paid sessions only)", () => {
-  // The regression this guards: voice used to unlock at
-  // `sessionNumber >= MAX_DEMO_SESSIONS`. Both arguments are now about the
-  // session row itself, not its ordinal, so no amount of replaying can reach
-  // voice without a purchase.
-  test("the free session has no paid credit attached, so it gets no voice", () => {
-    assert.equal(isVoiceUnlockedForDemo(null), false);
-    assert.equal(isVoiceUnlockedForDemo(undefined), false);
-    assert.equal(isVoiceUnlockedForDemo(null, "someoneelse@example.com"), false);
+describe("isVoiceUnlockedForDemo (voice on every demo session, free or paid)", () => {
+  // The free tier is capped at MAX_DEMO_SESSIONS (1), so the free session IS
+  // the sales pitch -- it needs voice like the real product, not a text-only
+  // preview. Voice used to be paid-only for cost containment; that gate was
+  // removed once the free tier shrank to a single session. The abuse
+  // guardrails that actually bound cost are the per-device/per-IP session
+  // caps (MAX_DEMO_SESSIONS_PER_DEVICE / MAX_DEMO_SESSIONS_PER_IP), which are
+  // untouched by this and covered separately above.
+  test("the free session (no paid credit attached) still gets voice", () => {
+    assert.equal(isVoiceUnlockedForDemo(null), true);
+    assert.equal(isVoiceUnlockedForDemo(undefined), true);
+    assert.equal(isVoiceUnlockedForDemo(null, "someoneelse@example.com"), true);
   });
 
-  test("a session funded by a purchased credit gets voice", () => {
+  test("a session funded by a purchased credit also gets voice", () => {
     assert.equal(isVoiceUnlockedForDemo(1), true);
     assert.equal(isVoiceUnlockedForDemo(42, "someoneelse@example.com"), true);
   });
 
-  test("isPaidDemoSession is exactly 'a credit is linked'", () => {
+  test("isPaidDemoSession is exactly 'a credit is linked' (unaffected by the voice change)", () => {
     assert.equal(isPaidDemoSession(1), true);
     assert.equal(isPaidDemoSession(99), true);
     assert.equal(isPaidDemoSession(null), false);

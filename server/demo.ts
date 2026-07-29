@@ -309,18 +309,27 @@ export function isPaidDemoSession(paidSessionId: number | null | undefined): boo
   return paidSessionId != null;
 }
 
-// Voice (server-side TTS) is unlocked only on a PAID session for cost
-// containment; the single free session is text mode. This was originally keyed
-// off the session ordinal (`sessionNumber >= MAX_DEMO_SESSIONS`), which with a
-// one-session cap would have unlocked TTS for every anonymous visitor on their
-// first turn, so the gate is keyed off payment instead. Allowlisted founder
-// emails always get voice so live sales demos are never text-only.
+// Voice (server-side TTS) is unlocked on every demo session, free or paid.
+//
+// This used to be paid-only for cost containment, back when there were
+// multiple free sessions and gating voice behind payment meant most visitors
+// never heard the product's actual differentiator. Now that the free tier is
+// capped at MAX_DEMO_SESSIONS (currently 1) and every session after that is
+// paid, the free session IS the sales pitch: it needs to sound like the real
+// product, not a text-only preview of it. The one-time TTS cost per unique
+// signup is small and bounded by the same cap, so this doesn't reopen the
+// cost-abuse problem the original gate was built to prevent -- see
+// MAX_DEMO_SESSIONS_PER_DEVICE / MAX_DEMO_SESSIONS_PER_IP above for the
+// actual abuse guardrails, which are unaffected by this and still apply.
+//
+// `paidSessionId` and `email` are kept as parameters (unused in the body) so
+// every call site and this function's signature stay stable if voice is ever
+// gated again -- e.g. behind a different signal than payment.
 export function isVoiceUnlockedForDemo(
-  paidSessionId: number | null | undefined,
-  email?: string,
+  _paidSessionId: number | null | undefined,
+  _email?: string,
 ): boolean {
-  if (email && isUnlimitedDemoEmail(email)) return true;
-  return isPaidDemoSession(paidSessionId);
+  return true;
 }
 
 // Disposable/temporary email domains (mailinator, 10minutemail, guerrillamail,
