@@ -48,6 +48,18 @@ export type VoiceEvent =
 
 export type VoiceEffect =
   | "START_LISTENING"
+  // Chrome/Chromium's native SpeechRecognition enforces its own internal,
+  // non-configurable session-length limit (commonly ~60s, decided server-side
+  // by the browser, not this app). When that boundary fires mid-utterance it
+  // looks identical to the "user stopped talking" case at the state-machine
+  // level (RECOGNITION_ENDED), but it is NOT a new turn — the speaker may be
+  // mid-sentence with zero silence. RESUME_LISTENING tells the hook to start
+  // a new recognizer instance (still required per-turn for mobile capture)
+  // WITHOUT wiping the draft already captured, so words already spoken are
+  // never discarded. Contrast with START_LISTENING, which always means "begin
+  // a genuinely new utterance" (AI just replied, or voice mode just turned
+  // on) and correctly resets the draft to empty.
+  | "RESUME_LISTENING"
   | "STOP_LISTENING"
   | "PLAY_AUDIO"
   | "STOP_AUDIO";
@@ -65,6 +77,24 @@ export interface VoiceResult {
 }
 
 const noChange = (state: VoiceState): VoiceResult => ({ state, effects: [] });
+
+// Pure mapping from "which listening effect fired" to "should the draft be
+// wiped before this recognizer instance starts". Exported so it is directly
+// unit-testable without any DOM/SpeechRecognition mocking — the hook (which
+// does need that mocking) just calls this and passes the result to
+// startRecognition(fresh). Keeping this decision here, next to the effects it
+// classifies, is what stops a future new listening-effect from silently
+// defaulting to the wrong behavior.
+export function shouldResetDraftForEffect(effect: VoiceEffect): boolean {
+  switch (effect) {
+    case "START_LISTENING":
+      return true;
+    case "RESUME_LISTENING":
+      return false;
+    default:
+      return true;
+  }
+}
 
 // Resolve a transition that wants to begin listening. Falls back to
 // `awaiting_user` (mic-tap / type affordance) when recognition is unavailable.
@@ -105,9 +135,18 @@ export function voiceTransition(
           // can then edit/send the draft or tap again to resume.
           return { state: "awaiting_user", effects: ["STOP_LISTENING"] };
         case "RECOGNITION_ENDED":
-          // Mobile browsers end continuous recognition spontaneously. Restart
-          // so the conversation keeps flowing hands-free.
-          return beginListening(ctx);
+          // Fires both when the speaker genuinely paused (mobile browsers end
+          // continuous recognition spontaneously between utterances) AND when
+          // Chrome's own internal session-length cap kills a still-ongoing
+          // utterance out from under the speaker (see RESUME_LISTENING doc
+          // comment above). We cannot tell which case this is from the event
+          // alone, but resuming without wiping the draft is safe either way:
+          // if the speaker had genuinely finished, there is nothing in the
+          // draft to preserve; if they were mid-sentence, this is exactly the
+          // case that must not reset. So always resume rather than restart.
+          return ctx.speechSupported
+            ? { state: "listening", effects: ["RESUME_LISTENING"] }
+            : { state: "awaiting_user", effects: [] };
         case "RECOGNITION_ERROR":
           // Permission denied or repeated failures — fall back to a mic tap
           // rather than silently retrying forever.

@@ -2542,6 +2542,14 @@ Stay blunt and a little impatient, skeptical of anything that sounds like a pitc
       "dealing with someone who will tell you the truth about what you are buying",
       "protecting the business that runs entirely out of this vehicle",
     ],
+    // The last three lines here are the SAME underlying zero-downtime
+    // guarantee demand ("promise this won't happen again") in different
+    // words, not three separate objections to escalate through one after
+    // another. REASONABLE_CUSTOMER_RULES' Rule B governs that demand as a
+    // single topic regardless of phrasing: one honest answer plus a real
+    // mitigation offer (warranty, loaner, service coverage) resolves all
+    // three, and Vince gets at most one more reworded pass before the topic
+    // is closed for the rest of the conversation.
     objections: [
       "what's the out-the-door number, I don't need the tour",
       "how do I know this one isn't going to do the same thing to me",
