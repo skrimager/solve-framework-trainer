@@ -5,8 +5,10 @@ import { createSentenceStreamer } from "./sentences";
 import {
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildDiscoveryPhaseLines,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveDiscoveryPhase,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
@@ -359,6 +361,48 @@ YOU MAY STILL ASK YOUR OWN QUESTIONS, AFTER YOU ANSWER. A question of your own i
 
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
 
+// Governs WHEN the customer expects to be shown options. This is a fourth axis
+// and it loosens none of the three above: the realism rules stop verbatim
+// repetition, the reasonableness rules bound what the pushback is about, and the
+// responsiveness rules make the customer answer the question. A customer can
+// obey all three and still append "...so what do you have that you can show me?"
+// to every single answer, because each appended demand is freshly worded, in
+// scope, and comes after a real answer.
+//
+// That is the live failure this block exists to fix. The rep asked about safety
+// features, got an answer plus that demand; asked sedan or SUV, got an answer
+// plus that demand again. Discovery could not proceed without being interrupted
+// by the same impatience every turn.
+//
+// It is a side effect of the previous layer rather than of anything in the
+// persona. Being told to engage and to be free to ask a question of its own
+// AFTER answering, with nothing saying that wanting to see the inventory is
+// something a person says ONCE, the model reads "show interest" as "ask to be
+// shown", every turn. So this block supplies the missing structure: a
+// conversation has a discovery phase and a presentation phase, the rep decides
+// when the second one starts, and the request to be shown belongs to the first
+// one exactly once. It is composed last in the stable prefix, and the volatile
+// per-turn block states which phase the conversation is actually in, because
+// that is the one thing a static rule cannot know.
+export const DISCOVERY_PHASE_RULES = `Discovery comes before options (these rules govern WHEN you expect to be shown something; they do not loosen anything above about how guarded you are, what you push back about, or your duty to answer what was asked):
+
+A REAL CONVERSATION HAS TWO PHASES AND THE CONSULTANT DECIDES WHEN THE SECOND ONE STARTS.
+1. Discovery: they ask questions to understand what you actually need. Your job here is to answer them and let them lead. Options are not on the table yet.
+2. Presentation: they have what they need and they start showing you actual options. NOW you engage with what is in front of you.
+Know which phase you are in and behave accordingly. When the consultant is asking you questions, you are in discovery.
+
+YOU MAY ASK TO SEE WHAT THEY HAVE EXACTLY ONCE, EARLY, AND THEN NEVER AGAIN UNTIL THEY PRESENT. Wanting to see the options is natural and you are allowed to say it once, near the start, in your own words ("what have you got that would work for something like that?"). That is realistic. Saying it a second time is not, and saying it every turn is the least realistic thing you can do in this conversation.
+
+NEVER TACK A DEMAND TO BE SHOWN ONTO THE END OF AN ANSWER. This is the specific habit that is forbidden. Once you have answered the consultant's question, stop. Do not append "what do you have that you can show me?", "what do you have with those features?", "so what can you show me?", "do you have anything like that?", or any reworded version of the same request. Answering a question and then immediately demanding to be shown is not engagement, it is interrupting your own answer.
+- Them: "What safety features matter most to you?" You: "Backup camera and blind spot monitoring, mainly." That is the whole reply. It is complete.
+- "Backup camera and blind spot. What do you have in your inventory you can show me that has those features?" is the reply you must never give. The second sentence is the error, and repeating that sentence on the next turn, and the turn after that, is the failure this rule exists to prevent.
+
+WHEN THEY TELL YOU QUESTIONS COME FIRST, TAKE THEM AT THEIR WORD. If the consultant says some version of "before I show you a bunch of options, let me ask a few quick questions so I show you the right ones", that is them doing their job well, and it settles the matter. Showing comes later. From that point on you simply answer until they are ready, and you do not ask when you are going to see something.
+
+LET THEM LEAD, AND BE PATIENT THROUGH DISCOVERY. A few questions in a row is a normal conversation, not a stall. Answer them one at a time the way a person does. Impatience is still available to you if the consultant genuinely wastes your time (they keep asking things they already asked, or they go a long stretch with no direction at all), and when that happens say THAT, in your own words, rather than reaching for the same demand again.
+
+WHEN THEY DO PRESENT, ENGAGE PROPERLY. The moment the consultant starts showing you options ("I've got a few that fit all of that, let me pull them up"), the wait is over and you should show it: "Great, let's see them." React to what they actually put in front of you, say what you think, and ask the real questions you have about it. This rule never makes you a customer who does not want to see anything; it makes you one who lets the consultant get there first.`;
+
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
 // turn to turn within a session (as long as persona/difficulty are unchanged),
@@ -380,13 +424,15 @@ export function buildCustomerReplyStablePrefix(
   // final word on any instruction above that could be read as "never accept an
   // answer", and CUSTOMER_RESPONSIVENESS_RULES comes after that so it is the
   // final word on any instruction that could be read as "never engage with the
-  // question". The two bound different axes (what you push back about vs.
-  // whether you answer), so neither weakens the other.
+  // question", and DISCOVERY_PHASE_RULES comes after that so it is the final
+  // word on any instruction that could be read as "ask to be shown on every
+  // turn". The four bound different axes (what you push back about, whether you
+  // answer, and when you expect to be shown), so none weakens another.
   // Composing them here (rather than at each call site) is what makes every
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${DISCOVERY_PHASE_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -425,6 +471,10 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // Same discipline: each is derived from explicit text in the transcript, so it
   // can only ever assert something the conversation actually contains.
   lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
+  // Which phase the conversation is in, and whether the customer has already
+  // asked to be shown options. Same discipline again: derived from explicit
+  // text, so it can only assert a request the transcript actually contains.
+  lines.push(...buildDiscoveryPhaseLines(deriveDiscoveryPhase(transcript)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;

@@ -2075,3 +2075,217 @@ describe("worked example (spec): the premature warranty question", () => {
 function escapeForRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ===========================================================================
+// The show-me loop (this PR). The fourth layer of the customer-prompt stack:
+// DISCOVERY_PHASE_RULES in the cacheable prefix, and the deterministic per-turn
+// phase lines in the volatile tail.
+// ===========================================================================
+
+import { DISCOVERY_PHASE_RULES } from "./llm";
+import { deriveDiscoveryPhase } from "./conversationState";
+
+describe("DISCOVERY_PHASE_RULES - reaches every customer prompt", () => {
+  test("it is embedded in the customer prompt at every difficulty", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced"]) {
+      assert.ok(
+        buildCustomerReplyPrompt(PERSONA, [], difficulty).includes(DISCOVERY_PHASE_RULES),
+        `${difficulty} must inherit the discovery-phase rules`,
+      );
+    }
+  });
+
+  test("it survives escalation and an unrecognized difficulty (no silent bypass)", () => {
+    for (const tier of [0, 1, 2]) {
+      assert.ok(buildCustomerReplyPrompt(PERSONA, [], "advanced", tier).includes(DISCOVERY_PHASE_RULES));
+    }
+    assert.ok(buildCustomerReplyPrompt(PERSONA, [], "nonsense-level").includes(DISCOVERY_PHASE_RULES));
+  });
+
+  test("it lives in the cacheable stable prefix, not the volatile tail", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.includes(DISCOVERY_PHASE_RULES));
+    const prompt = buildCustomerReplyPrompt(PERSONA, [turn("consultant", "Hi there.")], "advanced", 2);
+    assert.ok(prompt.indexOf(DISCOVERY_PHASE_RULES) < prompt.indexOf("Conversation so far:"));
+  });
+
+  test("it composes as the FOURTH layer, leaving PR #88 and PR #90 intact", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.includes(CONVERSATION_REALISM_RULES));
+    assert.ok(prefix.includes(REASONABLE_CUSTOMER_RULES), "PR #88's block must still be there in full");
+    assert.ok(prefix.includes(CUSTOMER_RESPONSIVENESS_RULES), "PR #90's block must still be there in full");
+    assert.ok(prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES));
+    assert.ok(prefix.indexOf(REASONABLE_CUSTOMER_RULES) < prefix.indexOf(CUSTOMER_RESPONSIVENESS_RULES));
+    assert.ok(
+      prefix.indexOf(CUSTOMER_RESPONSIVENESS_RULES) < prefix.indexOf(DISCOVERY_PHASE_RULES),
+      "the phase layer is the fourth and last layer of the stack",
+    );
+  });
+
+  test("guardrail: difficulty and the prior layers' own text are untouched", () => {
+    const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.match(advanced, /Push back hard on price and value/);
+    assert.match(advanced, /Do not make it easy/);
+    assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
+    assert.match(advanced, /THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER/);
+    assert.match(advanced, /one out-of-scope question and one round of "what else do you have"/);
+  });
+});
+
+describe("DISCOVERY_PHASE_RULES - content", () => {
+  const rules = DISCOVERY_PHASE_RULES;
+
+  test("it names the two phases and who decides when the second one starts", () => {
+    assert.match(rules, /A REAL CONVERSATION HAS TWO PHASES AND THE CONSULTANT DECIDES WHEN THE SECOND ONE STARTS/);
+    assert.match(rules, /When the consultant is asking you questions, you are in discovery/);
+  });
+
+  test("expressing interest ONCE, early, is explicitly allowed", () => {
+    assert.match(rules, /YOU MAY ASK TO SEE WHAT THEY HAVE EXACTLY ONCE, EARLY/);
+    assert.match(rules, /Wanting to see the options is natural and you are allowed to say it once/);
+  });
+
+  test("the tacked-on re-demand is the specific habit forbidden", () => {
+    assert.match(rules, /NEVER TACK A DEMAND TO BE SHOWN ONTO THE END OF AN ANSWER/);
+    assert.match(rules, /what do you have that you can show me\?/);
+    // The spec's own broken line is quoted so the model cannot mistake it for fine.
+    assert.match(rules, /What do you have in your inventory you can show me that has those features\?/);
+  });
+
+  test("the rep's discovery framing settles the matter", () => {
+    assert.match(rules, /WHEN THEY TELL YOU QUESTIONS COME FIRST, TAKE THEM AT THEIR WORD/);
+    assert.match(rules, /let me ask a few quick questions so I show you the right ones/);
+  });
+
+  test("guardrail: it does not create a customer who never wants to see anything", () => {
+    assert.match(rules, /WHEN THEY DO PRESENT, ENGAGE PROPERLY/);
+    assert.match(rules, /Great, let's see them/);
+    assert.match(rules, /never makes you a customer who does not want to see anything/);
+    // Impatience is still available when the rep genuinely wastes time.
+    assert.match(rules, /Impatience is still available to you/);
+  });
+});
+
+// The reported broken transcript, verbatim from the spec.
+describe("worked example (spec): the safety-features / sedan-or-SUV re-demand loop", () => {
+  const Q1 = "Tell me a little about the safety features you're looking for.";
+  const A1_BROKEN =
+    "A backup camera and blind spot. What do you have in your inventory you can show me that has those features?";
+  const Q2 = "Most of our cars have those. Are you thinking sedan, SUV, or compact?";
+  const A2_BROKEN = "A sedan or maybe a compact SUV. What do you have you can show me with those features?";
+
+  const AFTER_FIRST_DEMAND = [turn("consultant", Q1), turn("customer", A1_BROKEN), turn("consultant", Q2)];
+
+  test("the first re-demand is detected, so the next turn is told not to repeat it", () => {
+    const state = deriveDiscoveryPhase(AFTER_FIRST_DEMAND);
+    assert.equal(state.showRequests.length, 1);
+    assert.equal(state.showRequests[0], A1_BROKEN);
+
+    const prompt = buildCustomerReplyPrompt(PERSONA, AFTER_FIRST_DEMAND, "intermediate");
+    assert.match(prompt, /You have ALREADY told them you want to see what they have/);
+    assert.match(prompt, /no version of that request tacked onto the end of your answer/);
+    // And the live question is still pinned, so the fix suppresses the demand
+    // without reintroducing PR #90's dodge.
+    assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(prompt, /sedan, SUV, or compact\?/);
+  });
+
+  test("the second re-demand would be the transcript's third strike, and the prompt escalates", () => {
+    const loop = [...AFTER_FIRST_DEMAND, turn("customer", A2_BROKEN), turn("consultant", "And how are you on gas?")];
+    assert.equal(deriveDiscoveryPhase(loop).showRequests.length, 2);
+
+    const prompt = buildCustomerReplyPrompt(PERSONA, loop, "intermediate");
+    assert.match(prompt, /You have now made that request 2 times in this conversation/);
+    assert.match(prompt, /Say nothing further about being shown options until the consultant brings them out/);
+  });
+
+  test("the FIXED transcript from the spec produces no suppression at all", () => {
+    // The rep frames discovery up front, and the customer simply answers.
+    const fixed = [
+      turn(
+        "consultant",
+        "Before I show you a bunch of cars, let me ask a few quick questions so I show you the right ones, not waste your time. What safety features matter most to you?",
+      ),
+      turn("customer", "Backup camera and blind spot monitoring, mainly."),
+      turn("consultant", "Got it. Sedan, SUV, or compact?"),
+      turn("customer", "Probably a sedan, maybe a compact SUV."),
+      turn("consultant", "And how are you on gas, is fuel economy a priority?"),
+    ];
+    const state = deriveDiscoveryPhase(fixed);
+    assert.deepEqual(state.showRequests, [], "the fixed transcript never re-demands");
+    assert.ok(state.discoveryFraming, "the rep's framing is recognized");
+    assert.equal(state.presentationLine, null, "framing is not mistaken for presenting");
+
+    const prompt = buildCustomerReplyPrompt(PERSONA, fixed, "intermediate");
+    assert.doesNotMatch(prompt, /You have ALREADY told them you want to see what they have/);
+    assert.match(prompt, /BEFORE they show you anything/);
+    assert.match(prompt, /Do not push to be shown options yet/);
+  });
+
+  test("once the rep presents, the customer is released to engage fully", () => {
+    const presenting = [
+      ...AFTER_FIRST_DEMAND,
+      turn("customer", "A sedan or maybe a compact SUV."),
+      turn("consultant", "Perfect. I've got a few that fit all of that, let me pull them up for you."),
+    ];
+    const prompt = buildCustomerReplyPrompt(PERSONA, presenting, "intermediate");
+    assert.match(prompt, /is now putting options in front of you/);
+    assert.doesNotMatch(prompt, /You have ALREADY told them you want to see what they have/);
+  });
+});
+
+// The overcorrection guard: a customer who never wants to see anything is a
+// different bug, so the FIRST expression of interest must pass through clean.
+describe("the customer may still ask to see options once, early", () => {
+  const EARLY = [
+    turn("consultant", "Hi there, what brings you in today?"),
+    turn("customer", "I'm after something safe for the kids. What have you got that would work?"),
+  ];
+
+  test("nothing suppresses the first ask, because there is no earlier one", () => {
+    assert.deepEqual(deriveDiscoveryPhase(EARLY.slice(0, 1)).showRequests, []);
+    const prompt = buildCustomerReplyPrompt(PERSONA, EARLY.slice(0, 1), "intermediate");
+    assert.doesNotMatch(prompt, /You have ALREADY told them you want to see what they have/);
+    assert.doesNotMatch(prompt, /Do not push to be shown options yet/);
+  });
+
+  test("the static rule grants the one ask in so many words", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, EARLY.slice(0, 1), "intermediate");
+    assert.match(prompt, /YOU MAY ASK TO SEE WHAT THEY HAVE EXACTLY ONCE, EARLY/);
+    assert.match(prompt, /what have you got that would work for something like that\?/);
+  });
+
+  test("only the SECOND ask is suppressed, and only until the rep presents", () => {
+    const asked = deriveDiscoveryPhase(EARLY);
+    assert.equal(asked.showRequests.length, 1);
+    const nextTurn = [...EARLY, turn("consultant", "Good place to start. How many kids are we fitting?")];
+    assert.match(
+      buildCustomerReplyPrompt(PERSONA, nextTurn, "intermediate"),
+      /You have ALREADY told them you want to see what they have/,
+    );
+  });
+});
+
+describe("buildTurnStateBlock - the phase lines stay out of the cacheable prefix", () => {
+  test("they are derived per turn, not baked into the prefix", () => {
+    const transcript = [
+      turn("customer", "What do you have that you can show me?"),
+      turn("consultant", "What's the drive like?"),
+    ];
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "intermediate");
+    assert.ok(prompt.startsWith(prefix));
+    assert.doesNotMatch(prefix, /You have ALREADY told them you want to see what they have/);
+    assert.match(prompt, /You have ALREADY told them you want to see what they have/);
+  });
+
+  test("a transcript with none of these signals is unchanged by the new layer", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need something for my commute."),
+      turn("consultant", "How long is that commute each way?"),
+    ]);
+    assert.doesNotMatch(block, /You have ALREADY told them/);
+    assert.doesNotMatch(block, /putting options in front of you/);
+    assert.match(block, /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+});
