@@ -20,6 +20,15 @@ export {
   isInternalTestScenario,
 } from "@shared/internalTestScenarios";
 
+// The dedicated internal test account seeded by server/seed.ts. This is the
+// value INTERNAL_TEST_USERNAME is meant to be set to.
+//
+// It is deliberately NOT a default for the gate below. Seeding the account and
+// switching the gate on stay two separate acts: the row can exist harmlessly in
+// every environment while the scenario remains hidden until someone sets the env
+// var on purpose. Exported so seed.ts and the docs cannot drift from the gate.
+export const INTERNAL_TEST_ACCOUNT_USERNAME = "Testdummy";
+
 // Username of the single internal account allowed to see and start internal test
 // scenarios, read from the environment so staging and production can each point
 // at a real personal login without a code change, and so the value never has to

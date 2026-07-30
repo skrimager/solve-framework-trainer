@@ -19,15 +19,16 @@ import {
   scenariosVisibleTo,
 } from "./routes";
 import {
+  INTERNAL_TEST_ACCOUNT_USERNAME,
   INTERNAL_TEST_SUV_SLUG,
   INTERNAL_TEST_SUV_SOURCE_SLUG,
   isInternalTestScenario,
   isInternalTestUser,
   internalTestUsername,
 } from "./internalTestScenario";
-import { scenarios as seedScenarios } from "./seed";
+import { scenarios as seedScenarios, ensureInternalTestAccount } from "./seed";
 import { getVoiceForScenario } from "./voices";
-import type { InsertScenario, Scenario, Session, User } from "@shared/schema";
+import type { InsertOffice, InsertScenario, Office, Scenario, Session, User } from "@shared/schema";
 
 const INTERNAL_USERNAME = "wade.internal";
 
@@ -201,6 +202,126 @@ describe("the seeded internal test scenario", () => {
 });
 
 // ===========================================================================
+// Seeded internal test account
+// ===========================================================================
+
+describe("the seeded Testdummy account", () => {
+  const OFFICE_NAME = "Internal Test Office";
+
+  let offices: Office[];
+  let usersByName: Map<string, User>;
+  let createdUsers: any[];
+  let createdOffices: InsertOffice[];
+
+  const originals = {
+    getUserByUsername: (storage as any).getUserByUsername,
+    listOffices: (storage as any).listOffices,
+    createOffice: (storage as any).createOffice,
+    createUser: (storage as any).createUser,
+    getOfficeByInviteCode: (storage as any).getOfficeByInviteCode,
+  };
+
+  beforeEach(() => {
+    offices = [];
+    usersByName = new Map();
+    createdUsers = [];
+    createdOffices = [];
+
+    (storage as any).getUserByUsername = async (username: string) => usersByName.get(username);
+    (storage as any).listOffices = async () => offices;
+    (storage as any).getOfficeByInviteCode = async () => undefined;
+    (storage as any).createOffice = async (o: InsertOffice) => {
+      createdOffices.push(o);
+      const row = { ...o, id: 900 + offices.length } as Office;
+      offices.push(row);
+      return row;
+    };
+    (storage as any).createUser = async (u: any) => {
+      createdUsers.push(u);
+      const row = { ...u, id: 700 + createdUsers.length } as User;
+      usersByName.set(u.username, row);
+      return row;
+    };
+  });
+
+  afterEach(() => {
+    Object.assign(storage as any, originals);
+  });
+
+  test("the seeded username is the literal the gate is documented with", () => {
+    assert.equal(INTERNAL_TEST_ACCOUNT_USERNAME, "Testdummy");
+  });
+
+  test("creates a real, non-demo consultant that can hold a seat", async () => {
+    await ensureInternalTestAccount();
+
+    assert.equal(createdUsers.length, 1);
+    const user = createdUsers[0];
+    assert.equal(user.username, "Testdummy");
+    assert.equal(user.password, "TestDummy@Solve");
+    assert.equal(user.role, "consultant");
+    // Not a demo account, so it hits checkSeatAccess and the practice cap like a
+    // paying customer does; seatActive so those gates actually let it practise.
+    assert.equal(user.isDemoAccount, false);
+    assert.equal(user.seatActive, true);
+  });
+
+  test("puts it in its own office, never the publicly-listed Demo Office", async () => {
+    await ensureInternalTestAccount();
+
+    assert.equal(createdOffices.length, 1);
+    assert.equal(createdOffices[0].name, OFFICE_NAME);
+    // /api/public/demo-dashboard serves the Demo Office roster unauthenticated.
+    assert.notEqual(createdOffices[0].inviteCode, "DEMO2024");
+    assert.equal(createdUsers[0].officeId, offices[0].id);
+    // Both office gates in checkSeatAccess must pass or the account cannot practise.
+    assert.equal(createdOffices[0].status, "active");
+    assert.equal(createdOffices[0].subscriptionStatus, "active");
+  });
+
+  test("does not commit its invite code: each fresh seed mints a random one", async () => {
+    await ensureInternalTestAccount();
+    const first = createdOffices[0].inviteCode;
+
+    offices = [];
+    usersByName = new Map();
+    createdOffices = [];
+    await ensureInternalTestAccount();
+
+    assert.notEqual(createdOffices[0].inviteCode, first);
+  });
+
+  test("is idempotent: re-seeding an already-seeded database is a no-op", async () => {
+    await ensureInternalTestAccount();
+    await ensureInternalTestAccount();
+    await ensureInternalTestAccount();
+
+    assert.equal(createdUsers.length, 1, "duplicate Testdummy users were created");
+    assert.equal(createdOffices.length, 1, "duplicate internal offices were created");
+  });
+
+  test("leaves an existing Testdummy alone, wherever it already lives", async () => {
+    // A live database may already hold the account in some other office, or with
+    // a rotated password. Re-seeding must never resurrect the committed default.
+    usersByName.set("Testdummy", { id: 12, username: "Testdummy", officeId: 4 } as User);
+
+    await ensureInternalTestAccount();
+
+    assert.equal(createdUsers.length, 0);
+    assert.equal(createdOffices.length, 0);
+  });
+
+  test("reuses the internal office instead of adding a second one", async () => {
+    offices = [{ id: 42, name: OFFICE_NAME } as Office];
+
+    await ensureInternalTestAccount();
+
+    assert.equal(createdOffices.length, 0);
+    assert.equal(createdUsers[0].officeId, 42);
+  });
+});
+
+// ===========================================================================
 // HTTP
 // ===========================================================================
 
@@ -246,6 +367,9 @@ describe("internal test scenario over HTTP", () => {
     created = [];
 
     (storage as any).getUser = async (id: number) => users.find((u) => u.id === id);
+    // Only reached by non-demo users, i.e. the Testdummy cases below: an active
+    // office so checkSeatAccess turns on seatActive alone.
+    (storage as any).getOffice = async () => ({ id: 1, status: "active", subscriptionStatus: "active" });
     (storage as any).listScenarios = async () => scenarioRows;
     (storage as any).getScenario = async (id: number) => scenarioRows.find((s) => s.id === id);
     (storage as any).listSessionsByUser = async () => [];
@@ -362,5 +486,66 @@ describe("internal test scenario over HTTP", () => {
     assert.equal(res.status, 200);
     assert.equal(created.length, 1);
     assert.equal(created[0].scenarioId, NORMAL_SCENARIO_ID);
+  });
+
+  // --- The configuration this actually ships with ---
+  //
+  // Everything above uses a placeholder username to prove nothing is hardcoded.
+  // These use the literal "Testdummy" and the real seeded account shape, so the
+  // exact value that goes into INTERNAL_TEST_USERNAME on Render is covered.
+
+  const TESTDUMMY_USER_ID = 501;
+  const CASE_VARIANT_USER_ID = 502;
+
+  const withTestdummySeeded = () => {
+    process.env.INTERNAL_TEST_USERNAME = "Testdummy";
+    users = [
+      // isDemoAccount: false and seatActive: true, exactly as seed.ts creates it.
+      mkUser({ id: TESTDUMMY_USER_ID, username: "Testdummy", isDemoAccount: false, seatActive: true }),
+      mkUser({ id: NORMAL_USER_ID, username: "alice" }),
+      mkUser({ id: CASE_VARIANT_USER_ID, username: "testdummy" }),
+    ];
+  };
+
+  test("INTERNAL_TEST_USERNAME=Testdummy shows the scenario to the seeded account", async () => {
+    withTestdummySeeded();
+    const slugs = await slugsFrom(`?requesterId=${TESTDUMMY_USER_ID}`);
+    assert.ok(
+      slugs.includes(INTERNAL_TEST_SUV_SLUG),
+      "Testdummy could not see the internal test scenario",
+    );
+    assert.ok(slugs.includes(INTERNAL_TEST_SUV_SOURCE_SLUG));
+  });
+
+  test("INTERNAL_TEST_USERNAME=Testdummy hides the scenario from everybody else", async () => {
+    withTestdummySeeded();
+    // Anonymous, an ordinary consultant, and a case-variant near miss of the
+    // configured name all get the unchanged catalog.
+    for (const query of [
+      "",
+      `?requesterId=${NORMAL_USER_ID}`,
+      `?requesterId=${CASE_VARIANT_USER_ID}`,
+    ]) {
+      assert.deepEqual(await slugsFrom(query), [INTERNAL_TEST_SUV_SOURCE_SLUG], `leaked via "${query}"`);
+    }
+  });
+
+  test("the seeded account can actually start the internal scenario, seat gate included", async () => {
+    withTestdummySeeded();
+    // Non-demo, so unlike every case above this genuinely runs checkSeatAccess.
+    // Proves the seeded shape (real consultant + seatActive + active office) is
+    // sufficient to run a pilot, not just to see the card.
+    const res = await startSession(TESTDUMMY_USER_ID, INTERNAL_SCENARIO_ID);
+    assert.equal(res.status, 200);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].userId, TESTDUMMY_USER_ID);
+    assert.equal(created[0].scenarioId, INTERNAL_SCENARIO_ID);
+  });
+
+  test("a case-variant of Testdummy is refused the internal scenario", async () => {
+    withTestdummySeeded();
+    const res = await startSession(CASE_VARIANT_USER_ID, INTERNAL_SCENARIO_ID);
+    assert.equal(res.status, 403);
+    assert.equal(created.length, 0);
   });
 });
