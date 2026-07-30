@@ -153,6 +153,56 @@ describe("Rule S: a topic the rep sequences for later stops being re-asked", () 
     assert.match(state.sequencedTopics[0].label, /paint color/i);
   });
 
+  // Wade's literal words from the voice session, split into the two turns he
+  // reported them as. Deliberately NOT cleaned up: no question mark on the
+  // customer's ask, no sentence breaks in the rep's reply, no ordering adverb
+  // anywhere. The first version of this rule was validated against a tidied-up
+  // paraphrase of this and detected nothing at all on the real thing.
+  const LITERAL_CUSTOMER =
+    "Oh, I appreciate you wanting to show me the right vehicle. Can you please tell me more about the safety features can you make sure that you can give me information on the safety ratings";
+  const LITERAL_REP =
+    "hey let's make sure we found the right vehicle for you if it's not the right vehicle the safety features on this one doesn't matter let's figure out exactly what you're looking for";
+
+  test("the literal reported voice transcript is detected, punctuation and all", () => {
+    const state = deriveConversationState(
+      t("r: What brings you in today?", `c: ${LITERAL_CUSTOMER}`, `r: ${LITERAL_REP}`),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /safety features/i);
+    assert.equal(state.sequencedTopics[0].redirectCount, 1);
+    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+  });
+
+  test("the literal transcript is caught by relevance conditioning, with no ordering word present", () => {
+    // Guards the actual regression: the reply contains no "first", "before we",
+    // or "once we", so an ordering-adverb-only rule cannot see it.
+    assert.doesNotMatch(LITERAL_REP, /\bfirst\b|\bbefore we\b|\bonce we\b|\bafter we\b/i);
+    assert.equal(
+      deriveConversationState(t(`c: ${LITERAL_CUSTOMER}`, `r: ${LITERAL_REP}`)).sequencedTopics.length,
+      1,
+    );
+  });
+
+  test("conditional sequencing works on an unrelated subject too, so it is not one tuned sentence", () => {
+    const state = deriveConversationState(
+      t(
+        "c: I'm curious about the tow capacity",
+        "r: honestly until we know what you're hauling the tow numbers don't mean much let's figure out what you actually put in the bed",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /tow capacity/i);
+  });
+
+  test("relevance conditioning with no discovery pivot is still just a brush-off", () => {
+    assert.deepEqual(
+      deriveConversationState(
+        t("c: What's the safety rating on this one?", "r: If it's not the right vehicle the safety features don't matter."),
+      ).sequencedTopics,
+      [],
+    );
+  });
+
   test("a bare brush-off with no discovery question is not sequencing and is not accepted", () => {
     const state = deriveConversationState(
       t("c: What's the tow capacity on this one?", "r: Let's come back to that later."),
@@ -723,6 +773,15 @@ describe("Rule G: a topic the rep sequences for later is answered, not re-asked"
 
   test("an ordinary question carries no sequencing line at all", () => {
     assert.doesNotMatch(questionLines("r: What brings you in today?"), /proposed getting to it later/);
+  });
+
+  test("the literal reported voice transcript produces the turn-scoped acceptance line", () => {
+    const rendered = questionLines(
+      "c: Oh, I appreciate you wanting to show me the right vehicle. Can you please tell me more about the safety features can you make sure that you can give me information on the safety ratings",
+      "r: hey let's make sure we found the right vehicle for you if it's not the right vehicle the safety features on this one doesn't matter let's figure out exactly what you're looking for",
+    );
+    assert.match(rendered, /proposed getting to it later/);
+    assert.match(rendered, /do not spend this turn asking about safety features again/);
   });
 });
 

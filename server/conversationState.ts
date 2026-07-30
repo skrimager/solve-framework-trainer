@@ -495,8 +495,15 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
 // of the customer's own question at runtime, which is what makes it work for
 // safety ratings, tow capacity, paint colors, or anything else nobody thought
 // to list. What it requires instead is stronger evidence per turn than Rule 2
-// does: an ordering phrase AND a real discovery question in the same reply, so
-// a bare brush-off is never mistaken for skilled sequencing.
+// does: the rep must DEFER the topic and pivot to discovery in the same reply,
+// so a bare brush-off is never mistaken for skilled sequencing.
+//
+// Deferral is recognized two ways, because reps only sometimes say it as an
+// order. The first version of this rule only understood ordering adverbs
+// ("first", "before we", "once we") and missed the reported transcript
+// entirely, which stated the same move as a CONDITION and never used one:
+// "if it's not the right vehicle the safety features on this one doesn't
+// matter". Both forms are sequencing; only one of them says "first".
 // ---------------------------------------------------------------------------
 
 // Number of times the rep may sequence the SAME subject before the customer has
@@ -528,6 +535,48 @@ const SEQUENCING_MARKERS: RegExp[] = [
   /\bnail down\b/i,
   /\bthen (?:we'?ll|we can|i'?ll|i can)\b[^.!?]{0,60}\b(?:cover|go over|get into|talk about|look at|come back)\b/i,
   /\bstart(?:ing)? with\b/i,
+];
+
+// The same move stated as a condition instead of an order: the topic is not
+// refused and not handed off, it is declared not-yet-meaningful until something
+// else is settled. This is how the reported transcript said it, and how reps
+// tend to say it out loud, where ordering adverbs are rare and run-on speech
+// with no punctuation is the norm.
+//
+// These are deliberately about the SHAPE of the argument (a conditional or
+// temporal clause tied to an assertion of irrelevance, or making sure the right
+// option is identified before its details are worth discussing) rather than
+// about any topic, so they carry no more vocabulary than the ordering list does.
+const RELEVANCE_CONDITIONING_MARKERS: RegExp[] = [
+  // "if it's not the right vehicle the safety features ... doesn't matter"
+  /\b(?:if|unless|until)\b[^.!?]{0,80}\b(?:do(?:es)?n'?t|do(?:es)? not|won'?t|will not|wouldn'?t)\s+(?:really\s+|even\s+)?(?:matter|help|mean|count)\b/i,
+  // the same sentence with its halves the other way round
+  /\b(?:do(?:es)?n'?t|do(?:es)? not|won'?t|will not|wouldn'?t)\s+(?:really\s+|even\s+)?(?:matter|help|mean|count)\b[^.!?]{0,80}\b(?:if|unless|until|once|when)\b/i,
+  // "there's no point going through specs until we know what you need"
+  /\b(?:no|not much|little)\s+(?:point|sense|use|value)\b[^.!?]{0,60}\b(?:until|unless|before|if|till)\b/i,
+  // "that only matters once we've picked something"
+  /\bonly\s+(?:matters?|helps?|counts?)\b[^.!?]{0,60}\b(?:once|after|when|if)\b/i,
+  // establishment-first framing: pinning down the RIGHT option is the
+  // precondition, which is sequencing even with no ordering word present
+  /\b(?:make sure|figure out|find out|know|establish|land on|settle on)\b[^.!?]{0,40}\bthe right\b/i,
+];
+
+// Rule 2's ASK_MARKERS assume tidy text: "can you tell", "tell me about", and a
+// question mark. Speech interposes words and drops punctuation, so the reported
+// customer line ("Can you please tell me more about the safety features can you
+// make sure that you can give me information on the safety ratings") matched
+// none of them and Rule S never even looked at the rep's reply. These are the
+// same requests with the adjacency relaxed and the question mark optional.
+//
+// Kept as a separate list rather than widening ASK_MARKERS, so the
+// department-handoff rule's inputs and behavior are untouched.
+const SOFT_ASK_MARKERS: RegExp[] = [
+  ...ASK_MARKERS,
+  /\b(?:can|could|would) you\b[^.!?]{0,24}\b(?:tell|explain|give|show|walk)\b/i,
+  /\btell me\b[^.!?]{0,16}\babout\b/i,
+  /\b(?:want|need|like|love)\s+to\s+(?:know|hear|see|understand)\b/i,
+  /\b(?:curious|wondering)\b/i,
+  /\bgive me\b[^.!?]{0,24}\b(?:information|info|details|idea|sense|rundown)\b/i,
 ];
 
 // How the customer names what they are asking about. Each captures the subject
@@ -619,7 +668,9 @@ function isDepartmentTopic(text: string): boolean {
 // that once we know what you need, what are you driving today?" from "let's come
 // back to that", which is a brush-off the customer should not have to accept.
 function isSequencingRedirect(text: string): boolean {
-  return matchesAny(text, SEQUENCING_MARKERS) && extractAsks(text).length > 0;
+  const defers =
+    matchesAny(text, SEQUENCING_MARKERS) || matchesAny(text, RELEVANCE_CONDITIONING_MARKERS);
+  return defers && extractAsks(text).length > 0;
 }
 
 function mentionsKeyword(text: string, keywords: string[]): boolean {
@@ -639,7 +690,7 @@ function deriveSequencedTopics(transcript: TranscriptMessage[]): SequencedTopicS
     if (!text) continue;
 
     if (m.role === "customer") {
-      if (!matchesAny(text, ASK_MARKERS) || isDepartmentTopic(text)) continue;
+      if (!matchesAny(text, SOFT_ASK_MARKERS) || isDepartmentTopic(text)) continue;
       const subject = extractAskedSubject(text);
       if (!subject) continue;
       // The same subject worded differently is the same subject, so a later ask
@@ -784,6 +835,12 @@ const IMPERATIVE_ASK_MARKERS: RegExp[] = [
   /\bgive me a sense\b/i,
   /\bi(?:'d| would) (?:love|like) to (?:hear|know)\b/i,
   /\blet me know\b/i,
+  // Hortative requests for information. "let's figure out exactly what you're
+  // looking for" asks the customer for something just as much as "tell me what's
+  // on your mind" does, and spoken redirects land in this form constantly. The
+  // verb has to be about acquiring information now, which is what keeps "let's
+  // come back to that" out: parking a topic is not asking for anything.
+  /\blet'?s (?:figure out|find out|work out|dig into|go through|talk through|understand|hear)\b/i,
 ];
 
 // The rep NARROWING: asking the customer to convert something general into a
@@ -884,7 +941,7 @@ export function deriveDirectQuestion(transcript: TranscriptMessage[]): DirectQue
   // Sequencing is only claimed on subjects Rule 2 does not already own, so the
   // two never both speak about the same ask.
   const sequenced =
-    !redirected && matchesAny(previous, ASK_MARKERS) && !isDepartmentTopic(previous) && isSequencingRedirect(text)
+    !redirected && matchesAny(previous, SOFT_ASK_MARKERS) && !isDepartmentTopic(previous) && isSequencingRedirect(text)
       ? extractAskedSubject(previous)
       : null;
 
