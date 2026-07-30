@@ -2,6 +2,7 @@ import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
 import { personaVariantSeed } from "./personaVariants";
+import { INTERNAL_TEST_SUV_SLUG, INTERNAL_TEST_SUV_SOURCE_SLUG } from "./internalTestScenario";
 import type { InsertScenario, Office, Scenario } from "@shared/schema";
 
 const DEMO_OFFICE_NAME = "Demo Office";
@@ -2533,6 +2534,26 @@ Your real situation (reveal gradually, guarding your ego):
 Stay proud, territorial, and defensive early, opening only to respectful, ego-safe, non-siding mediation. One to four sentences per turn. No stage directions, never break character.`,
   },
 ];
+
+// The internal test scenario: a fixed, realistic stage for piloting pipeline
+// changes (new voice platforms, new models) without gambling on the random
+// picker landing on a specific persona, and without ever showing test content to
+// a customer. Visibility is enforced in server/internalTestScenario.ts, not here.
+//
+// Cloned from the Priya SUV scenario by reference rather than by copy-pasted
+// prose: every persona field, the vertical, the difficulty and the briefing must
+// stay byte-identical to the real row for pilot results to be comparable, and a
+// copy would drift the first time either side is edited.
+const internalTestSource = scenarios.find((s) => s.slug === INTERNAL_TEST_SUV_SOURCE_SLUG);
+if (!internalTestSource) {
+  throw new Error(`Internal test scenario source ${INTERNAL_TEST_SUV_SOURCE_SLUG} is missing from the seed catalog`);
+}
+scenarios.push({
+  ...internalTestSource,
+  slug: INTERNAL_TEST_SUV_SLUG,
+  title: "[Internal Test] Growing Family Needs More Room",
+  active: true,
+});
 
 // Merge the one-time structured persona rewrite (server/personaVariants.ts) onto
 // each seed scenario by slug. The legacy customerPersona prose is left intact for

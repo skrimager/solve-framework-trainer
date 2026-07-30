@@ -1,4 +1,5 @@
 import type { PersonaVariantSeed } from "./persona";
+import { INTERNAL_TEST_SUV_SLUG, INTERNAL_TEST_SUV_SOURCE_SLUG } from "./internalTestScenario";
 
 // One-time structured rewrite of every scenario persona. Each entry restates the
 // FIXED core (identity, opening stance, hidden real need, designed ideal outcome,
@@ -2620,3 +2621,8 @@ Stay brisk and budget-focused up front, guarded about how worried you are, and m
     ],
   },
 };
+
+// The internal test scenario is a verbatim clone of the Priya SUV persona so
+// pilot runs against it stay comparable to the real scenario. Aliasing the same
+// object (rather than copying the prose) makes drift between the two impossible.
+personaVariantSeed[INTERNAL_TEST_SUV_SLUG] = personaVariantSeed[INTERNAL_TEST_SUV_SOURCE_SLUG];

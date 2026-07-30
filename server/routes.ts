@@ -94,6 +94,11 @@ import {
 import { registerDemoV2Routes } from "./demoV2Routes";
 import { DEMO_V2_ALL_SLUGS } from "./demoV2";
 import {
+  isInternalTestScenario,
+  isInternalTestUser,
+  canAccessScenarioSlug,
+} from "./internalTestScenario";
+import {
   contactTypeSchema,
   contactPatchSchema,
   normalizeContactPatch,
@@ -243,8 +248,162 @@ export function isDemoOnlyScenario(slug: string): boolean {
 // The scenarios a real (seat-holding) trainee may be offered. Every trainee-facing
 // pool built from listScenarios() goes through this, so `active` is never the only
 // thing standing between demo content and real training.
+//
+// Internal test scenarios are dropped here too, which is what keeps them out of
+// the random vertical draw, the certification expert picker, manager scenario
+// coverage, and every other pool derived from this function. The single
+// user-scoped exception is applied by scenariosVisibleTo below, not here, so a
+// caller that forgets to pass a user gets the hidden-from-everyone behaviour.
 export function realTrainingScenarios<T extends { slug: string; active: boolean }>(all: T[]): T[] {
-  return all.filter((s) => s.active && !isDemoOnlyScenario(s.slug));
+  return all.filter((s) => s.active && !isDemoOnlyScenario(s.slug) && !isInternalTestScenario(s.slug));
+}
+
+// The scenarios a specific requester may see. Identical to realTrainingScenarios
+// for every real user; the internal test account additionally gets the active
+// internal test scenarios folded back in.
+export function scenariosVisibleTo<T extends { slug: string; active: boolean }>(
+  all: T[],
+  user: Pick<User, "username"> | null | undefined,
+): T[] {
+  const base = realTrainingScenarios(all);
+  if (!isInternalTestUser(user)) return base;
+  return [...base, ...all.filter((s) => s.active && isInternalTestScenario(s.slug))];
+}
+
+// Scenario listing/detail plus session creation. Registered from registerRoutes;
+// exported separately so tests can mount these three routes on a bare express app
+// without booting the whole application (and its seed()).
+export function registerScenarioAndSessionRoutes(app: Express): void {
+  // --- Scenarios ---
+  app.get("/api/scenarios", async (req, res) => {
+    // Optional ?requesterId= (same convention as GET /api/sessions): the listing
+    // stays public for the unauthenticated demo flow, but a requester who
+    // identifies themselves can be shown user-scoped content. Only the internal
+    // test account sees anything extra; for everyone else the response is
+    // byte-identical to the anonymous one.
+    const rawRequesterId = req.query.requesterId;
+    let requester: User | undefined;
+    if (typeof rawRequesterId === "string" && rawRequesterId.length > 0) {
+      requester = await storage.getUser(Number(rawRequesterId));
+      if (!requester) return res.status(401).json({ message: "Unknown user" });
+    }
+
+    const scenarios = await storage.listScenarios();
+    let active = scenariosVisibleTo(scenarios, requester);
+    // Optional ?track= filter so the client (consultant picker and admin
+    // management) can request just one track's scenarios. Unknown/absent track
+    // returns all active scenarios (back-compat).
+    const track = typeof req.query.track === "string" ? req.query.track : undefined;
+    if (track === "consulting" || track === "leadership") {
+      active = active.filter((s) => scenarioTrack(s.track) === track);
+    }
+    res.json(active);
+  });
+
+  app.get("/api/scenarios/:id", async (req, res) => {
+    const scenario = await storage.getScenario(Number(req.params.id));
+    if (!scenario) return res.status(404).json({ message: "Not found" });
+    // Internal test scenarios 404 for everyone but the internal account, so
+    // guessing the id reveals nothing that listing already hides. 404 (not 403)
+    // matches the "you can't see this" shape this endpoint already returns.
+    const requesterId = Number(req.query.requesterId);
+    const requester = requesterId ? await storage.getUser(requesterId) : undefined;
+    if (!canAccessScenarioSlug(scenario.slug, requester)) {
+      return res.status(404).json({ message: "Not found" });
+    }
+    res.json(scenario);
+  });
+
+  // --- Sessions (role-play attempts) ---
+  app.post("/api/sessions", async (req, res) => {
+    const { userId, scenarioId } = req.body ?? {};
+
+    // Hiding an internal test scenario from the picker is not enough: refuse to
+    // start one for anyone but the internal account, even when its id is passed
+    // directly. Checked before the seat/cap gates so probing a scenario id tells
+    // an outsider nothing about billing state.
+    const target = await storage.getScenario(Number(scenarioId));
+    if (target && isInternalTestScenario(target.slug)) {
+      const starter = await storage.getUser(Number(userId));
+      if (!isInternalTestUser(starter)) {
+        return res.status(403).json({ message: "Not available" });
+      }
+    }
+
+    const gate = await checkSeatAccess(Number(userId));
+    if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+    // Enforce the monthly fair-use practice cap before creating the session. At
+    // the cap, refuse with a friendly message + reset date; in the warn band,
+    // allow the session but carry the warning back so the client can surface it.
+    const cap = await checkPracticeCap(Number(userId));
+    if (cap.blocked) {
+      return res.status(403).json({
+        message: blockedMessage(cap.resetDate),
+        limitReached: true,
+        resetDate: cap.resetDate,
+        practiceCap: cap,
+      });
+    }
+
+    // Start every session with the customer's own opening line so the consultant
+    // walks in cold (no pre-roleplay briefing) and must uncover the situation
+    // through discovery. Falls back to an empty transcript if generation fails,
+    // so a flaky LLM call never blocks starting a session.
+    // Draw this session's persona rendition (personality, motivation, objections)
+    // once at start and store it resolved on the session, so every turn replays
+    // the same customer while a fresh session gets a different one. Selection is
+    // a no-op for scenarios without variant pools (variantSection is "").
+    let openingTranscript = "[]";
+    let personaVariant: string | null = null;
+    try {
+      const scenario = await storage.getScenario(scenarioId);
+      if (scenario) {
+        const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
+        personaVariant = JSON.stringify(selected);
+        const variantSection = buildPersonaVariantSection(selected);
+        const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
+        if (openingText) {
+          const openingMsg = transcriptMessageSchema.parse({
+            role: "customer",
+            content: openingText,
+            audioStatus: "none",
+            msgId: randomUUID(),
+            timestamp: new Date().toISOString(),
+          });
+          openingTranscript = JSON.stringify([openingMsg]);
+        }
+      }
+    } catch (err) {
+      console.error("Opening line generation failed; starting with empty transcript:", err);
+    }
+
+    // Starting a new attempt retires any SOLVE Coach follow-up thread from the
+    // trainee's previous attempt: prior threads are soft-cleared so a fresh
+    // attempt never shows the last attempt's Q&A (persistence is per-attempt,
+    // not kept forever). Best-effort — a failure here must not block starting.
+    try {
+      await storage.clearCoachingMessagesForUser(Number(userId));
+    } catch (err) {
+      console.error("Failed to clear prior coaching threads:", err);
+    }
+
+    const session = await storage.createSession({
+      userId,
+      scenarioId,
+      status: "in_progress",
+      personaVariant,
+      transcript: openingTranscript,
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    });
+    // Carry the cap status alongside the session so the client can show the
+    // approaching-limit banner when the user is in the warn band.
+    res.json({ ...session, practiceCap: cap });
+  });
 }
 
 export async function registerRoutes(
@@ -867,103 +1026,7 @@ export async function registerRoutes(
     res.json(office);
   });
 
-  // --- Scenarios ---
-  app.get("/api/scenarios", async (req, res) => {
-    const scenarios = await storage.listScenarios();
-    let active = realTrainingScenarios(scenarios);
-    // Optional ?track= filter so the client (consultant picker and admin
-    // management) can request just one track's scenarios. Unknown/absent track
-    // returns all active scenarios (back-compat).
-    const track = typeof req.query.track === "string" ? req.query.track : undefined;
-    if (track === "consulting" || track === "leadership") {
-      active = active.filter((s) => scenarioTrack(s.track) === track);
-    }
-    res.json(active);
-  });
-
-  app.get("/api/scenarios/:id", async (req, res) => {
-    const scenario = await storage.getScenario(Number(req.params.id));
-    if (!scenario) return res.status(404).json({ message: "Not found" });
-    res.json(scenario);
-  });
-
-  // --- Sessions (role-play attempts) ---
-  app.post("/api/sessions", async (req, res) => {
-    const { userId, scenarioId } = req.body ?? {};
-    const gate = await checkSeatAccess(Number(userId));
-    if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
-
-    // Enforce the monthly fair-use practice cap before creating the session. At
-    // the cap, refuse with a friendly message + reset date; in the warn band,
-    // allow the session but carry the warning back so the client can surface it.
-    const cap = await checkPracticeCap(Number(userId));
-    if (cap.blocked) {
-      return res.status(403).json({
-        message: blockedMessage(cap.resetDate),
-        limitReached: true,
-        resetDate: cap.resetDate,
-        practiceCap: cap,
-      });
-    }
-
-    // Start every session with the customer's own opening line so the consultant
-    // walks in cold (no pre-roleplay briefing) and must uncover the situation
-    // through discovery. Falls back to an empty transcript if generation fails,
-    // so a flaky LLM call never blocks starting a session.
-    // Draw this session's persona rendition (personality, motivation, objections)
-    // once at start and store it resolved on the session, so every turn replays
-    // the same customer while a fresh session gets a different one. Selection is
-    // a no-op for scenarios without variant pools (variantSection is "").
-    let openingTranscript = "[]";
-    let personaVariant: string | null = null;
-    try {
-      const scenario = await storage.getScenario(scenarioId);
-      if (scenario) {
-        const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
-        personaVariant = JSON.stringify(selected);
-        const variantSection = buildPersonaVariantSection(selected);
-        const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
-        if (openingText) {
-          const openingMsg = transcriptMessageSchema.parse({
-            role: "customer",
-            content: openingText,
-            audioStatus: "none",
-            msgId: randomUUID(),
-            timestamp: new Date().toISOString(),
-          });
-          openingTranscript = JSON.stringify([openingMsg]);
-        }
-      }
-    } catch (err) {
-      console.error("Opening line generation failed; starting with empty transcript:", err);
-    }
-
-    // Starting a new attempt retires any SOLVE Coach follow-up thread from the
-    // trainee's previous attempt: prior threads are soft-cleared so a fresh
-    // attempt never shows the last attempt's Q&A (persistence is per-attempt,
-    // not kept forever). Best-effort — a failure here must not block starting.
-    try {
-      await storage.clearCoachingMessagesForUser(Number(userId));
-    } catch (err) {
-      console.error("Failed to clear prior coaching threads:", err);
-    }
-
-    const session = await storage.createSession({
-      userId,
-      scenarioId,
-      status: "in_progress",
-      personaVariant,
-      transcript: openingTranscript,
-      score: null,
-      rubricScores: null,
-      feedback: null,
-      createdAt: new Date().toISOString(),
-      completedAt: null,
-    });
-    // Carry the cap status alongside the session so the client can show the
-    // approaching-limit banner when the user is in the warn band.
-    res.json({ ...session, practiceCap: cap });
-  });
+  registerScenarioAndSessionRoutes(app);
 
   app.get("/api/sessions/:id", async (req, res) => {
     const session = await storage.getSession(Number(req.params.id));
