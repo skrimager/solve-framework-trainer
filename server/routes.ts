@@ -35,6 +35,7 @@ import {
   sessionVariantSection,
 } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
+import { registerVapiPilotRoutes } from "./vapiCustomLlm";
 import { AUDIO_DIR, audioPathForMsg } from "./audioCache";
 import { historyForTurn, runReplyStream, type MsgAudioStatus } from "./turnStream";
 import { getCoachingReply, type CoachingResponder, type CoachingThreadMessage } from "./coaching";
@@ -1473,6 +1474,12 @@ export async function registerRoutes(
   registerPublicDemoDashboardRoute(app);
 
   registerPublicAndAdminRoutes(app);
+
+  // Vapi voice pilot (ONE scenario: auto-sales-growing-family-suv). Additive and
+  // self-contained: it mounts a single OpenAI-compatible custom-LLM endpoint that
+  // Vapi calls, and it reaches the customer through the same getCustomerReply()
+  // every other path already uses. No existing route or scenario is affected.
+  registerVapiPilotRoutes(app);
 
   // Start the Opportunity Intelligence drip sender (every ~20 min it sends any
   // scheduled+due outreach via the existing Resend transport). Guarded against

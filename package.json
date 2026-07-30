@@ -10,6 +10,7 @@
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "stripe:setup": "tsx scripts/stripe-setup.ts",
+    "vapi:setup": "tsx scripts/setup-vapi-pilot.ts",
     "test": "DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/unused} OPENAI_API_KEY=${OPENAI_API_KEY:-sk-test-dummy} STRIPE_SEAT_TEAM_PRICE_ID=price_seat_team STRIPE_SEAT_OFFICE_PRICE_ID=price_seat_office STRIPE_SEAT_COMPANY_PRICE_ID=price_seat_company STRIPE_DASHBOARD_TEAM_PRICE_ID=price_dash_team STRIPE_DASHBOARD_OFFICE_PRICE_ID=price_dash_office STRIPE_DASHBOARD_COMPANY_PRICE_ID=price_dash_company tsx --test server/*.test.ts client/src/lib/*.test.ts"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "@tanstack/react-query": "^5.60.5",
     "@types/multer": "^2.2.0",
     "@types/pg": "^8.20.0",
+    "@vapi-ai/web": "^2.6.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
