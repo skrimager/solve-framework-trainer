@@ -384,8 +384,23 @@ export interface DecisionMakerState {
   answer: string;
 }
 
+export interface SequencedTopicState {
+  // The customer's own words for what they asked about, quoted back into the
+  // prompt. There is no fixed vocabulary here: whatever they raised is the
+  // label.
+  label: string;
+  // Normalized content words, used to recognize the same subject when it comes
+  // back worded differently ("safety rating" / "safety ratings").
+  keywords: string[];
+  // How many times the rep has proposed handling this subject later.
+  redirectCount: number;
+  // True once the rep has sequenced it SEQUENCING_STOP_THRESHOLD times.
+  closed: boolean;
+}
+
 export interface ConversationState {
   deflectedTopics: DeflectedTopicState[];
+  sequencedTopics: SequencedTopicState[];
   decisionMaker: DecisionMakerState | null;
   // How many separate times the customer has asked to be shown other options.
   alternativesRequests: number;
@@ -457,6 +472,211 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
         closed: redirectCount >= DEFLECTION_STOP_THRESHOLD,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// Rule S: the rep sequencing a topic for later, on ANY subject.
+//
+// The live failure: the customer asked about safety ratings, the rep said "let's
+// make sure we find the right vehicle for you first" and asked a real discovery
+// question, and the customer re-asked about safety ratings verbatim on every
+// following turn. Rule 2 above is the mechanism that would have stopped it, but
+// it can only ever fire for the four DeflectableTopic values, and safety is not
+// one of them, so no state was produced and the model had no memory of the
+// redirect.
+//
+// Adding `safety` as a fifth enum value would have fixed exactly this
+// transcript and left the next unhardcoded subject broken. It is also the wrong
+// semantics: the four topics above mean "this belongs to another department and
+// the rep is right to hand it off". Sequencing means the opposite, that the
+// topic belongs to THIS conversation, just later, once discovery has earned it.
+//
+// So this mechanism carries no topic vocabulary at all. The subject is read out
+// of the customer's own question at runtime, which is what makes it work for
+// safety ratings, tow capacity, paint colors, or anything else nobody thought
+// to list. What it requires instead is stronger evidence per turn than Rule 2
+// does: an ordering phrase AND a real discovery question in the same reply, so
+// a bare brush-off is never mistaken for skilled sequencing.
+// ---------------------------------------------------------------------------
+
+// Number of times the rep may sequence the SAME subject before the customer has
+// to drop it for good. Mirrors DEFLECTION_STOP_THRESHOLD deliberately: one more
+// ask is allowed after the first redirect, and the second one closes it.
+export const SEQUENCING_STOP_THRESHOLD = 2;
+
+// Ordering phrases: the rep putting a topic later in the conversation rather
+// than handing it to someone else. This is a separate list from
+// REDIRECT_MARKERS, which is mostly about department handoff and stays
+// untouched, though the ordering phrases the two have in common are repeated
+// here so sequencing does not depend on that list's shape.
+//
+// The trailing-"first" forms are what the reported transcript actually used
+// ("let's make sure we find the right vehicle for you first"), and no existing
+// marker matched it.
+const SEQUENCING_MARKERS: RegExp[] = [
+  /\blet'?s (?:first|start|focus|come back|circle back)\b/i,
+  /\bfirst,? (?:let'?s|i'?d like|i want|i need)\b/i,
+  /\b(?:find|figure out|nail down|pin down|sort out|lock in|settle|get|know|understand)\b[^.!?]{0,60}\bfirst\b/i,
+  /\bonce we\b/i,
+  /\bafter we\b/i,
+  /\bbefore we (?:get|dig|talk|go|jump|move)\b/i,
+  /\bwe(?:'ll| will| can) (?:get|come|circle) back to\b/i,
+  /\bcome back to (?:that|it|this)\b/i,
+  /\bcircle back\b/i,
+  /\bpark(?:ing)? that\b/i,
+  /\bset that (?:aside|to the side)\b/i,
+  /\bnail down\b/i,
+  /\bthen (?:we'?ll|we can|i'?ll|i can)\b[^.!?]{0,60}\b(?:cover|go over|get into|talk about|look at|come back)\b/i,
+  /\bstart(?:ing)? with\b/i,
+];
+
+// How the customer names what they are asking about. Each captures the subject
+// itself rather than testing for a known topic, which is the whole point: the
+// vocabulary comes from the customer, not from this file.
+const SUBJECT_CAPTURE_PATTERNS: RegExp[] = [
+  /\b(?:tell me|talk|hear|know|curious|wondering|asking)\b[^?.!]{0,24}\babout\s+([^?.!,;]{2,60})/i,
+  /\bwhat(?:'s| is| are)\s+(?:the|your|its|their)\s+([^?.!,;]{2,60})/i,
+  /\bhow(?:'s| is| are)\s+(?:the|its|their)\s+([^?.!,;]{2,60})/i,
+  /\bwhat about\s+([^?.!,;]{2,60})/i,
+  /\bhow about\s+([^?.!,;]{2,60})/i,
+  /\bwhat kind of\s+([^?.!,;]{2,60})/i,
+  /\bhow (?:much|many)\s+([^?.!,;]{2,60})/i,
+  /\bdoes it (?:have|come with|get)\s+([^?.!,;]{2,60})/i,
+];
+
+// Where a captured phrase stops being the subject and starts being the rest of
+// the sentence: "the safety rating on this one" is about the safety rating.
+const SUBJECT_TAIL_BREAK =
+  /\s+(?:on|in|for|with|at|like|that|this|these|those|here|there|though|but|and|when|if|as|does|do|did|is|are|was|were|can|could|will|would|should|has|have|had)\s+/i;
+
+const SUBJECT_LEADING_FILLER = /^(?:the|a|an|your|our|its|their|his|her|any|some|more|other|of)\s+/i;
+
+// Words that carry no subject on their own, so "tell me about it" names nothing
+// and produces no tracked subject at all.
+const SUBJECT_STOPWORDS = new Set([
+  "it", "this", "that", "these", "those", "one", "ones", "thing", "things", "stuff",
+  "here", "there", "you", "your", "yours", "my", "me", "mine", "we", "us", "our",
+  "they", "them", "their", "the", "a", "an", "and", "or", "but", "of", "to", "for",
+  "on", "in", "at", "with", "about", "more", "much", "many", "some", "any", "other",
+  "is", "are", "was", "were", "be", "do", "does", "did", "get", "got", "have", "has",
+  "know", "tell", "like", "look", "really", "just", "so", "then", "now", "what",
+  "how", "why", "when", "which", "who", "whole", "bit", "lot",
+]);
+
+// Crude singularization, enough to tie "ratings" to "rating" without pulling in
+// a stemmer. "ss" endings are left alone so "business" does not become "busines".
+function normalizeKeyword(word: string): string {
+  const w = word.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  return w;
+}
+
+export interface AskedSubject {
+  label: string;
+  keywords: string[];
+}
+
+// What the customer's line is asking ABOUT, in their own words. Null when the
+// line names nothing concrete, which keeps the mechanism conservative: an
+// undetected subject just means the pre-existing behavior.
+export function extractAskedSubject(text: string): AskedSubject | null {
+  for (const pattern of SUBJECT_CAPTURE_PATTERNS) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+
+    let phrase = match[1].split(SUBJECT_TAIL_BREAK)[0].trim();
+    while (SUBJECT_LEADING_FILLER.test(phrase)) {
+      phrase = phrase.replace(SUBJECT_LEADING_FILLER, "").trim();
+    }
+    if (!phrase) continue;
+
+    const keywords = Array.from(
+      new Set(
+        phrase
+          .split(/\s+/)
+          .map(normalizeKeyword)
+          .filter((w) => w.length > 1 && !SUBJECT_STOPWORDS.has(w)),
+      ),
+    );
+    if (keywords.length === 0) continue;
+
+    return { label: phrase, keywords };
+  }
+  return null;
+}
+
+// True when the line belongs to one of the four department-handoff topics. Those
+// are Rule 2's territory and are deliberately never tracked here, so the two
+// mechanisms cannot both claim the same ask or double up their prompt lines.
+function isDepartmentTopic(text: string): boolean {
+  return (Object.keys(TOPIC_PATTERNS) as DeflectableTopic[]).some((topic) =>
+    mentionsTopic(text, topic),
+  );
+}
+
+// A rep reply that sequences rather than dodges: it names an order AND asks a
+// real question of its own. The question is what separates "let's come back to
+// that once we know what you need, what are you driving today?" from "let's come
+// back to that", which is a brush-off the customer should not have to accept.
+function isSequencingRedirect(text: string): boolean {
+  return matchesAny(text, SEQUENCING_MARKERS) && extractAsks(text).length > 0;
+}
+
+function mentionsKeyword(text: string, keywords: string[]): boolean {
+  return keywords.some((k) => new RegExp(`\\b${k}s?\\b`, "i").test(text));
+}
+
+// Counts, per subject the customer raised, how many times the rep proposed
+// handling it later. Same accounting shape as deriveDeflectedTopics: `pending`
+// holds subjects asked since the rep last spoke and is cleared on every rep
+// turn, so a rep who simply answered has not redirected anything.
+function deriveSequencedTopics(transcript: TranscriptMessage[]): SequencedTopicState[] {
+  const tracked: { label: string; keywords: string[]; redirectCount: number }[] = [];
+  const pending = new Set<(typeof tracked)[number]>();
+
+  for (const m of transcript) {
+    const text = m.content.trim();
+    if (!text) continue;
+
+    if (m.role === "customer") {
+      if (!matchesAny(text, ASK_MARKERS) || isDepartmentTopic(text)) continue;
+      const subject = extractAskedSubject(text);
+      if (!subject) continue;
+      // The same subject worded differently is the same subject, so a later ask
+      // adds to the existing entry instead of starting a second one.
+      let entry = tracked.find((e) => e.keywords.some((k) => subject.keywords.includes(k)));
+      if (entry) {
+        entry.keywords = Array.from(new Set([...entry.keywords, ...subject.keywords]));
+      } else {
+        entry = { label: subject.label, keywords: subject.keywords, redirectCount: 0 };
+        tracked.push(entry);
+      }
+      pending.add(entry);
+      continue;
+    }
+
+    if (isSequencingRedirect(text)) {
+      const redirected = new Set(pending);
+      // A reply that names the subject outright still counts, even when the ask
+      // was several turns back ("then we'll cover safety ratings").
+      for (const entry of tracked) {
+        if (mentionsKeyword(text, entry.keywords)) redirected.add(entry);
+      }
+      redirected.forEach((entry) => {
+        entry.redirectCount += 1;
+      });
+    }
+    pending.clear();
+  }
+
+  return tracked
+    .filter((e) => e.redirectCount > 0)
+    .map((e) => ({
+      label: e.label,
+      keywords: e.keywords,
+      redirectCount: e.redirectCount,
+      closed: e.redirectCount >= SEQUENCING_STOP_THRESHOLD,
+    }));
 }
 
 // The rep's decision-maker question plus the customer's next line, which is the
@@ -624,6 +844,10 @@ export interface DirectQuestionState {
   // The topic the rep parked in this same message, if the customer had just
   // raised one that belongs elsewhere.
   redirectedTopic: string | null;
+  // The subject, in the customer's own words, the rep proposed getting to later
+  // in this same message while asking a discovery question of their own. Null
+  // unless both halves of that are present.
+  sequencedTopic: string | null;
 }
 
 function extractAsks(text: string): string[] {
@@ -657,11 +881,19 @@ export function deriveDirectQuestion(transcript: TranscriptMessage[]): DirectQue
       ? (Object.keys(TOPIC_PATTERNS) as DeflectableTopic[]).find((topic) => mentionsTopic(previous, topic))
       : undefined;
 
+  // Sequencing is only claimed on subjects Rule 2 does not already own, so the
+  // two never both speak about the same ask.
+  const sequenced =
+    !redirected && matchesAny(previous, ASK_MARKERS) && !isDepartmentTopic(previous) && isSequencingRedirect(text)
+      ? extractAskedSubject(previous)
+      : null;
+
   return {
     asks,
     narrowing: asks.some((ask) => matchesAny(ask, NARROWING_MARKERS) || looksLikeOptionList(ask)),
     vagueAnswer: matchesAny(previous, VAGUE_ANSWER_MARKERS) ? previous : null,
     redirectedTopic: redirected ? TOPIC_LABEL[redirected] : null,
+    sequencedTopic: sequenced ? sequenced.label : null,
   };
 }
 
@@ -692,12 +924,19 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
     );
   }
 
+  if (question.sequencedTopic) {
+    lines.push(
+      `- You had asked about ${question.sequencedTopic}, and in this same message the consultant proposed getting to it later, once they understand what you actually need, then asked you something to move that along. That is them doing their job well, not brushing you off. Accept it. Answer the question they just asked, in your own words and with real detail, and do not spend this turn asking about ${question.sequencedTopic} again.`,
+    );
+  }
+
   return lines;
 }
 
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
   return {
     deflectedTopics: deriveDeflectedTopics(transcript),
+    sequencedTopics: deriveSequencedTopics(transcript),
     decisionMaker: deriveDecisionMaker(transcript),
     alternativesRequests: countAlternativesRequests(transcript),
     alternativesRoundSpent: isAlternativesRoundSpent(transcript),
@@ -722,6 +961,18 @@ export function buildConversationStateLines(state: ConversationState): string[] 
     } else {
       lines.push(
         `- The consultant has redirected ${t.label} once, telling you it is handled elsewhere. You may raise it at most ONE more time. If they redirect it again, it is closed for good and you must drop it permanently.`
+      );
+    }
+  }
+
+  for (const t of state.sequencedTopics) {
+    if (t.closed) {
+      lines.push(
+        `- The consultant has now proposed handling ${t.label} later ${t.redirectCount} times, and they are right to sequence it that way. That topic is CLOSED for the rest of this conversation. Do not raise it again in any form, do not hint at it, and do not treat it as unfinished business that stops you engaging. Put your attention on the question they are actually asking you now.`
+      );
+    } else {
+      lines.push(
+        `- You asked about ${t.label} and the consultant proposed getting to it later, after they understand what you need. That is a reasonable way to run the conversation and you accept it. You may raise ${t.label} at most ONE more time. If they sequence it again, it is closed for good and you must drop it permanently.`
       );
     }
   }
