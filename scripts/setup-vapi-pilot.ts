@@ -186,10 +186,20 @@ const TRANSCRIBER = {
 //     stays apples-to-apples.
 //
 // Voice choice: Priya is 31, female, warm and nervous-excited (server/seed.ts),
-// and the existing pipeline casts her as "nova" (server/voices.ts). "Neha" and
-// "Paige" are both female Vapi platform voices from the schema's voiceId enum.
-const VAPI_VOICE_A = { provider: "vapi", voiceId: "Neha", speed: 1.0 } as const;
-const VAPI_VOICE_B = { provider: "vapi", voiceId: "Paige", speed: 1.0 } as const;
+// and the existing pipeline casts her as "nova" (server/voices.ts). "Savannah"
+// and "Layla" are both currently-active female Vapi platform voices (see
+// https://docs.vapi.ai/providers/voice/vapi-voices).
+//
+// NOTE: the schema's voiceId enum still lists several retired names ("Neha",
+// "Paige", "Kylie", "Spencer", "Harry", "Cole", "Hana", "Lily"), but Vapi's
+// live API rejects all of them for new assistants as of 2026-07-30 ("legacy
+// voice set being phased out"). The OpenAPI spec had not yet been updated to
+// reflect this. Confirmed via live POST /assistant calls (400 Bad Request on
+// "Neha", "Paige", and "Kylie") before landing on the active pair below. If
+// this script starts failing again with a similar 400 on voiceId, check that
+// docs page for further deprecations before re-running.
+const VAPI_VOICE_A = { provider: "vapi", voiceId: "Savannah", speed: 1.0 } as const;
+const VAPI_VOICE_B = { provider: "vapi", voiceId: "Layla", speed: 1.0 } as const;
 
 // Client messages the browser hook subscribes to (see
 // client/src/hooks/use-vapi-voice-conversation.ts). "transcript" drives the live
