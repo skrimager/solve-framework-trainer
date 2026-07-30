@@ -42,6 +42,9 @@ export const PERSONA_VOICES: Record<string, string> = {
   // Auto sales
   "auto-sales-tech-worker-upgrade": "echo", // Alex, 27 (m)
   "auto-sales-growing-family-suv": "nova", // Priya, 31 (f)
+  // Internal test clone of the row above. Same voice on purpose: the clone only
+  // has value during a pipeline pilot if it sounds identical to the real one.
+  "internal-test-suv-priya": "nova", // Priya, 31 (f)
   "auto-sales-skeptical-negotiator": "onyx", // Frank, 52 (m)
   "auto-sales-first-car-college-student": "coral", // Mia, 20 (f)
 

@@ -17,6 +17,7 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { useViewportHeight } from "@/hooks/use-viewport-height";
 import { apiRequest } from "@/lib/queryClient";
+import { useAuth } from "@/lib/auth";
 import { getAvatarUrl } from "@/lib/avatars";
 import { useVoiceConversation } from "@/hooks/use-voice-conversation";
 import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Save, XCircle } from "lucide-react";
@@ -26,6 +27,7 @@ const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 export default function RolePlay() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
@@ -112,11 +114,16 @@ export default function RolePlay() {
     queryKey: ["/api/sessions", id],
   });
 
+  // requesterId is what lets a restricted scenario (the internal test stage)
+  // resolve for the account allowed to see it. Every other scenario is unaffected.
   const { data: scenario } = useQuery<Scenario>({
-    queryKey: ["/api/scenarios", session?.scenarioId],
-    enabled: !!session?.scenarioId,
+    queryKey: ["/api/scenarios", session?.scenarioId, user?.id],
+    enabled: !!session?.scenarioId && !!user,
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/scenarios/${session!.scenarioId}`);
+      const res = await apiRequest(
+        "GET",
+        `/api/scenarios/${session!.scenarioId}?requesterId=${user!.id}`,
+      );
       return res.json();
     },
   });

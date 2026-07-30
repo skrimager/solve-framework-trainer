@@ -11,8 +11,9 @@ import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles, FlaskConical } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
+import { isInternalTestScenario } from "@shared/internalTestScenarios";
 import { REQUIRED_QUALIFYING, QUALIFYING_SCORE } from "@/lib/progression";
 
 // Monthly fair-use practice standing returned by GET /api/users/:id/practice-usage.
@@ -128,8 +129,12 @@ export default function Scenarios() {
     }
   };
 
+  // Identify the requester so the listing can be user-scoped (same convention as
+  // the roster/dashboard queries). For every real consultant the response is
+  // identical to the anonymous one; only the internal test account sees more.
   const { data: scenarios, isLoading } = useQuery<Scenario[]>({
-    queryKey: ["/api/scenarios"],
+    queryKey: [`/api/scenarios?requesterId=${user?.id}`],
+    enabled: !!user,
   });
 
   const { data: mySessions } = useQuery<Session[]>({
@@ -203,6 +208,13 @@ export default function Scenarios() {
   }
   const orderedVerticals = Array.from(verticalGroups.keys()).sort((a, b) =>
     verticalLabel(a).localeCompare(verticalLabel(b)),
+  );
+
+  // The server only ever returns an internal test scenario to the internal test
+  // account, so its presence in the response IS the permission check and the
+  // client never learns which username is internal.
+  const internalTestScenarios = (scenarios ?? []).filter(
+    (s) => isInternalTestScenario(s.slug) && scenarioTrack(s) === track,
   );
 
   // The level shown/highlighted is the one for the selected track — the two are
@@ -444,6 +456,46 @@ export default function Scenarios() {
               </CardContent>
             </Card>
           )}
+          {/* Internal test scenarios. Only ever present in the response for the
+              internal account, so this renders for nobody else. Deliberately
+              neutral/gray (lime is reserved for admin/vault) and explicitly
+              labelled, so it can never be mistaken for customer-facing content
+              in an accidental screenshot. Starting it is a direct call rather
+              than a random draw, which is the whole point: a pilot needs the
+              same persona every run, not whatever the picker lands on. */}
+          {internalTestScenarios.map((s) => (
+            <Card
+              key={s.id}
+              className="border border-dashed"
+              style={{ borderColor: "rgba(255,255,255,0.25)", backgroundColor: "rgba(255,255,255,0.03)" }}
+              data-testid={`card-internal-test-${s.slug}`}
+            >
+              <CardHeader>
+                <div className="flex items-center gap-2">
+                  <FlaskConical className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <CardTitle className="text-lg text-muted-foreground">{s.title}</CardTitle>
+                  <Badge variant="secondary" className="ml-auto shrink-0">
+                    Internal test
+                  </Badge>
+                </div>
+                <CardDescription className="pt-1">
+                  Not customer-facing. A fixed copy of a real {verticalLabel(s.vertical)} conversation,
+                  visible only to this account, for piloting pipeline changes against a persona that
+                  never varies between runs.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button
+                  variant="outline"
+                  onClick={() => startSession.mutate(s.id)}
+                  disabled={startSession.isPending || capBlocked}
+                  data-testid={`button-start-internal-test-${s.slug}`}
+                >
+                  {capBlocked ? "Monthly limit reached" : "Start internal test conversation"}
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
           {orderedVerticals.map((vertical) => {
             const pool = verticalGroups.get(vertical) ?? [];
             const presentDifficulties = new Set(pool.map((s) => s.difficulty));
