@@ -1984,6 +1984,149 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   });
 });
 
+// ===========================================================================
+// Answer discipline: the customer volleyed a question back after nearly every
+// statement, including on topics that had already been answered or deferred.
+// The three rules below bound the instructions that were rewarding it --
+// REACT-THEN-ADVANCE ("raise a different concern" as a way to advance) and
+// NEVER REPEAT YOURSELF ("express it in a NEW way") -- so that neither can be
+// read as licence to reopen a settled topic in fresh wording.
+// ===========================================================================
+describe("CUSTOMER_RESPONSIVENESS_RULES - answer discipline", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("a return question is framed as the exception, not the default turn shape", () => {
+    assert.match(rules, /A RETURN QUESTION IS THE EXCEPTION, NOT YOUR DEFAULT MOVE/);
+    assert.match(rules, /your job on every single turn is to answer one/);
+    assert.match(rules, /Tacking a question onto the end of turn after turn/);
+    assert.match(rules, /A reply that ends on a period is normal and good/);
+  });
+
+  test("the reported worked example is carried verbatim, answer and dodge both named", () => {
+    // The consultant answers with real data and closes with a light check-in;
+    // the customer answers the check-in either way.
+    assert.match(rules, /this one gets about 28 highway and 21 city/);
+    assert.match(rules, /Does that sound like what you were expecting, or what mileage were you hoping for\?/);
+    assert.match(rules, /Yeah, that tracks, that's about what I had in my head/);
+    assert.match(rules, /Actually I was hoping for closer to 30/);
+    // The exact reply that was observed live, named as forbidden.
+    assert.match(rules, /So what kind of cars do you have that get 21 to 28\?" is the reply you must never give/);
+    assert.match(rules, /It is a dodge wearing a question mark/);
+  });
+
+  test("a topic answered or properly deferred is closed for the rest of the conversation", () => {
+    assert.match(rules, /ONCE A TOPIC IS ANSWERED OR PROPERLY DEFERRED, IT IS CLOSED FOR THE REST OF THE CONVERSATION/);
+    // The reported one-time warranty explanation, as the worked example of a
+    // deferral that closes the topic on its own.
+    assert.match(rules, /warranty depends on which vehicle we land on, finance goes through all of it once we've found the right one/);
+    assert.match(rules, /One good explanation is all you get and all you need/);
+    assert.match(rules, /not on the next turn, not ten turns later/);
+  });
+
+  test("rewording a closed topic is called out as the same question, not a new one", () => {
+    // This is the shape that actually shipped: three consecutive replies each
+    // ending in a differently-worded ask about the same closed subject.
+    assert.match(rules, /Rewording is not a new question/);
+    assert.match(rules, /are all the SAME closed question/);
+    assert.match(rules, /exactly as unacceptable as asking it again word for word/);
+    assert.match(rules, /softening it into "can you tell me more about\.\.\." does not make it new/);
+  });
+
+  test("NEVER REPEAT YOURSELF is explicitly bounded so it cannot license a reopen", () => {
+    // The competing instruction is quoted by name inside the new rule, because
+    // the failure was the model resolving the tension the wrong way.
+    assert.match(rules, /NEVER REPEAT YOURSELF does not license this/);
+    assert.match(rules, /governs HOW you say something you are still legitimately holding onto/);
+    assert.match(rules, /it never governs WHETHER a settled topic can come back/);
+    assert.match(rules, /you are repeating yourself, not avoiding it/);
+  });
+
+  test("REACT-THEN-ADVANCE is bounded: advancing is never a disguised reopen", () => {
+    assert.match(rules, /ADVANCING NEVER MEANS RE-RAISING A CLOSED OR PARKED TOPIC/);
+    assert.match(rules, /a topic that is answered or currently deferred is not somewhere new/);
+    // The alternatives the model should reach for instead.
+    assert.match(rules, /a motivation you have not put on the table yet/);
+    // Root cause 2: persona text naming one topic as the character's biggest
+    // need biased the model toward it as its go-to "something to raise" move.
+    assert.match(rules, /how much it matters to you is not a reason to reopen it/);
+  });
+
+  test("no existing allowance is weakened by the new rule", () => {
+    // The fix targets the habitual near-every-turn return question, not every
+    // customer question ever, so all three prior outs must survive intact.
+    assert.match(rules, /YOU MAY STILL ASK YOUR OWN QUESTIONS, AFTER YOU ANSWER/);
+    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
+    assert.match(rules, /None of that changes/);
+    assert.match(rules, /answer first, then ask/);
+    // ...and the new rule says so itself rather than leaving it to inference.
+    assert.match(rules, /The allowances you already have are unchanged/);
+    assert.match(rules, /they are ceilings, not quotas/);
+  });
+
+  test("the new rule reaches every scenario, difficulty, and escalation tier", () => {
+    // It lives in CUSTOMER_RESPONSIVENESS_RULES precisely so no persona or
+    // scenario file has to be touched to get it.
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, tier);
+        assert.match(prompt, /A RETURN QUESTION IS THE EXCEPTION, NOT YOUR DEFAULT MOVE/);
+        assert.match(prompt, /ONCE A TOPIC IS ANSWERED OR PROPERLY DEFERRED, IT IS CLOSED/);
+        assert.match(prompt, /ADVANCING NEVER MEANS RE-RAISING A CLOSED OR PARKED TOPIC/);
+      }
+    }
+  });
+
+  test("it stays in the cacheable prefix", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.match(prefix, /A RETURN QUESTION IS THE EXCEPTION, NOT YOUR DEFAULT MOVE/);
+  });
+});
+
+// The reported must-pass shape, as a real voice transcript rather than a tidy
+// paraphrase of one: one unpunctuated run-on per turn, no question marks. Both
+// layers have to be in force on the customer's next turn -- the static rule and
+// the per-turn line naming the question that is actually owed an answer.
+describe("answer discipline against a messy live-style transcript", () => {
+  const C1 =
+    "okay before I start walking you around the lot let me ask you what's the most important thing to you in your next vehicle";
+  const U1 =
+    "honestly fuel economy I'm driving like ninety miles a day right now and it is just eating me alive";
+  const C2 =
+    "yeah that adds up fast so this one's rated right around 28 on the highway and 21 in the city which for your commute would be a real improvement does that sound like what you were expecting or were you hoping to do better than that";
+
+  const AT_THE_CHECK_IN = [turn("consultant", C1), turn("customer", U1), turn("consultant", C2)];
+
+  test("sanity: the rep's check-in carries no question mark and no imperative ask", () => {
+    // Pins WHY this used to go undetected, so a narrower implementation cannot
+    // silently satisfy the test below by keying off punctuation again.
+    assert.ok(!C2.includes("?"), "the reported line has no question mark");
+    assert.doesNotMatch(C2, /\btell me\b|\blet me know\b|\bwalk me through\b|\blet'?s figure out\b/i);
+  });
+
+  test("the check-in is recognized as the live question the customer owes an answer to", () => {
+    const q = deriveDirectQuestion(AT_THE_CHECK_IN);
+    assert.ok(q, "an unpunctuated spoken check-in is still a question");
+    assert.ok(q!.asks.some((a) => a.includes("does that sound like what you were expecting")));
+  });
+
+  test("the customer's prompt demands an answer and forbids bouncing it back", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_CHECK_IN, "advanced", 2);
+    assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+    assert.match(prompt, /do not bounce the question back at them by asking them something instead/);
+    // The static layer names the exact wrong reply for this exact exchange.
+    assert.match(prompt, /So what kind of cars do you have that get 21 to 28\?/);
+    assert.match(prompt, /A RETURN QUESTION IS THE EXCEPTION, NOT YOUR DEFAULT MOVE/);
+  });
+
+  test("nothing is falsely marked closed, so the new rule cannot mute a fresh topic", () => {
+    // Answer discipline must not turn into "never raise anything". No topic has
+    // been redirected or deferred in this transcript, so no closing line fires.
+    const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_CHECK_IN, "advanced", 2);
+    assert.doesNotMatch(prompt, /That topic is CLOSED/);
+    assert.doesNotMatch(prompt, /You may raise it at most ONE more time/);
+  });
+});
+
 describe("buildTurnStateBlock - the live question is pinned into the volatile tail", () => {
   test("the question is quoted and answering it is demanded", () => {
     const block = buildTurnStateBlock([
