@@ -637,6 +637,96 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
   });
 });
 
+// An unpunctuated spoken check-in ("...does that sound like what you were
+// expecting or were you hoping to do better than that") is the shape the rep
+// uses right after answering with real data, and it is exactly the question the
+// customer was volleying past instead of answering. It carries no question
+// mark, no "tell me", and no hortative, so ask detection saw nothing and the
+// customer was never told which question it owed an answer to.
+describe("Rule G: an unpunctuated spoken question is still a question", () => {
+  const CHECK_IN =
+    "yeah that adds up fast so this one's rated right around 28 on the highway and 21 in the city which for your commute would be a real improvement does that sound like what you were expecting or were you hoping to do better than that";
+
+  test("sanity: the reported line has no question mark and no imperative ask", () => {
+    // Pins the reason detection used to fail, so a punctuation-keyed
+    // implementation cannot silently pass the test below.
+    assert.ok(!CHECK_IN.includes("?"));
+    assert.doesNotMatch(CHECK_IN, /\btell me\b|\blet me know\b|\bwalk me through\b|\blet'?s figure out\b/i);
+  });
+
+  test("it is detected, and on two independent inversions rather than one phrase", () => {
+    const q = deriveDirectQuestion(t("c: honestly fuel economy I'm doing ninety miles a day", `r: ${CHECK_IN}`));
+    assert.ok(q, "the check-in must register as the live question");
+    assert.match(questionLines(`r: ${CHECK_IN}`), /JUST ASKED YOU SOMETHING DIRECTLY/);
+    // "does that sound" and "were you hoping" are separate interrogative
+    // clauses, so detection does not rest on one tuned sentence shape.
+    assert.ok(deriveDirectQuestion(t("r: does that sound about right to you")));
+    assert.ok(deriveDirectQuestion(t("r: were you hoping for something closer to thirty")));
+  });
+
+  test("it generalizes past this sentence, on unrelated subjects", () => {
+    assert.ok(deriveDirectQuestion(t("r: how many kids are you hauling around these days")));
+    assert.ok(deriveDirectQuestion(t("r: so the place you're in now what does that run you a month")));
+    assert.ok(deriveDirectQuestion(t("r: have you driven anything like this before")));
+  });
+
+  test("a rep statement is still not an ask", () => {
+    // The inversion is what makes it a question; a declarative that merely
+    // mentions the customer must not be quoted back as one.
+    assert.equal(deriveDirectQuestion(t("r: that makes sense, a lot of people are in the same spot")), null);
+    assert.equal(deriveDirectQuestion(t("r: if you can get by with a hybrid you'll save a fortune")), null);
+    assert.equal(deriveDirectQuestion(t("r: I'll show you what we have on the lot right now")), null);
+  });
+});
+
+// The customer's own asks were held to a stricter standard for the four
+// department topics than for everything else: Rule S accepted "can you please
+// tell me a little more about X" while Rule 2 did not, so the identical
+// sentence about WARRANTY was invisible to the mechanism that closes it. A
+// topic that only stays closed when the question is phrased tidily is not
+// closed.
+describe("Rule 2: a warranty question asked in ordinary speech still counts as an ask", () => {
+  const REDIRECT =
+    "I'd love to tell you about that, but that's our finance and warranty department, they'll go over all of it once we find the right vehicle, because until we know which vehicle we don't know if it's a 30,000-mile car or a brand new one. So tell me, what are you driving right now?";
+
+  for (const ask of [
+    "before we go too far can you please tell me a little more about the warranty",
+    "I'd love to hear about the warranty on something like this",
+    "just curious about the warranty",
+  ]) {
+    test(`"${ask.slice(0, 46)}..." is recognized`, () => {
+      const state = deriveConversationState(t(`c: ${ask}`, `r: ${REDIRECT}`));
+      assert.equal(state.deflectedTopics.length, 1);
+      assert.equal(state.deflectedTopics[0].topic, "warranty");
+      assert.equal(state.deflectedTopics[0].redirectCount, 1);
+    });
+  }
+
+  test("the one-time explanation closes the topic on the second redirect", () => {
+    // The reported end-to-end shape: explained once, re-asked in different
+    // words, redirected again, and permanently closed.
+    const rendered = stateLines(
+      "c: before we go too far can you please tell me a little more about the warranty",
+      `r: ${REDIRECT}`,
+      "c: fair enough, it's an '09 Odyssey with about 180 on it",
+      "r: that's a lot of miles. How many kids are you hauling around?",
+      "c: two, seven and four",
+      "c: I'd still love to hear what the warranty actually covers though",
+      "r: Same answer honestly, finance walks you through the warranty once we land on a vehicle. First let's figure out what fits you. What's the school run like?",
+    );
+    assert.match(rendered, /warranty or service coverage away from this conversation 2 times/);
+    assert.match(rendered, /That topic is CLOSED/);
+    assert.match(rendered, /Do not raise it again in any form/);
+  });
+
+  test("a customer statement about warranty is still not an ask", () => {
+    const state = deriveConversationState(
+      t("c: my last warranty was worthless", `r: ${REDIRECT}`),
+    );
+    assert.deepEqual(state.deflectedTopics, []);
+  });
+});
+
 describe("Rule G: narrowing questions demand a committed specific", () => {
   test("an explicit 'what specifically' narrows", () => {
     assert.equal(deriveDirectQuestion(t("r: When you say reliable, what specifically worries you?"))!.narrowing, true);
