@@ -1952,6 +1952,13 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
     assert.match(rules, /Do not keep pushing the parked topic/);
   });
 
+  test("Rule 3: the department topics are a worked example, not the whole list", () => {
+    // The closed four-topic list is what let the safety-ratings loop through, so
+    // the rule has to state the general principle alongside the examples.
+    assert.match(rules, /Those are the clearest cases, not the whole list/);
+    assert.match(rules, /a consultant sequencing discovery is doing the job correctly, not dodging you/);
+  });
+
   test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
     assert.match(rules, /WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION/);
     assert.match(rules, /Probably a hybrid, I do a lot of highway miles/);
