@@ -1946,17 +1946,35 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
     assert.match(rules, /I just want to make sure none of those things happen/);
   });
 
-  test("Rule 3: a premature question is redirected once and the customer returns to answering", () => {
-    assert.match(rules, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
-    assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics/);
+  test("Rule 3: a redirect toward discovery is followed and the customer returns to answering", () => {
+    assert.match(rules, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
     assert.match(rules, /Do not keep pushing the parked topic/);
+    assert.match(rules, /consultant sequencing discovery is doing the job correctly, not dodging you/);
   });
 
-  test("Rule 3: the department topics are a worked example, not the whole list", () => {
-    // The closed four-topic list is what let the safety-ratings loop through, so
-    // the rule has to state the general principle alongside the examples.
-    assert.match(rules, /Those are the clearest cases, not the whole list/);
-    assert.match(rules, /a consultant sequencing discovery is doing the job correctly, not dodging you/);
+  test("Rule 3: the trigger is the redirect itself, not a list of named topics", () => {
+    // Enumerating topics is what caused this bug twice (safety ratings, then car
+    // seat installation): the model treated the list as the scope and ignored
+    // redirects on anything absent from it. The rule must key off the
+    // consultant's move and say so for ANY subject.
+    assert.match(rules, /regardless of what topic you were redirected away from/);
+    assert.match(rules, /This applies to ANY topic/);
+    assert.match(rules, /There is no fixed list of topics this covers/);
+    assert.match(rules, /not named as an example anywhere in these rules/);
+  });
+
+  test("Rule 3: the per-turn self-check is stated explicitly", () => {
+    assert.match(rules, /APPLY THIS TEST ON EVERY SINGLE TURN/);
+    assert.match(rules, /does my response answer THAT question, or does it pivot/);
+    assert.match(rules, /it does not matter what the pivot topic is/);
+  });
+
+  test("Rule 3: two attempts allowed, then the topic is dropped on any subject", () => {
+    assert.match(rules, /HOW MANY TIMES YOU MAY PRESS BEFORE YOU MUST STOP/);
+    assert.match(rules, /you may reasonably ask ONE more time, and that is attempt two/);
+    assert.match(rules, /After the SECOND redirect from the consultant, you drop it entirely/);
+    assert.match(rules, /There is no third attempt/);
+    assert.match(rules, /This holds on ANY subject/);
   });
 
   test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
@@ -2084,7 +2102,7 @@ describe("worked example (spec): the premature warranty question", () => {
     assert.match(prompt, /what are you driving\?/);
     assert.match(prompt, /Accept that redirect/);
     assert.match(prompt, /do not spend this turn pushing warranty or service coverage again/);
-    assert.match(prompt, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
+    assert.match(prompt, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
   });
 
   test("PR #87's one-more-ask allowance is preserved, it is just not this turn's move", () => {
