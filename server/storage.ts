@@ -1,8 +1,8 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray, and, or, desc, lte } from "drizzle-orm";
+import { eq, inArray, and, or, desc, lte, isNull } from "drizzle-orm";
 import { filterContacts, sortByFollowUp, runContactCascade, type ContactFilters } from "./contacts";
 import { runUserCascade, checkUserDeletable, userIsPaying, UserDeleteBlockedError, type UserCascade } from "./users";
 import { runOfficeCascade, officeIsPayingCustomer, OfficeDeleteBlockedError } from "./offices";
@@ -194,6 +194,31 @@ export interface IStorage {
   // never spend the same credit twice. Returns the claimed row, or undefined
   // when no credit was available.
   claimOldestPaidDemoSession(signupId: number, demoSessionId: number): Promise<DemoPaidSession | undefined>;
+
+  // --- Message Coach (see server/messageCoach.ts) ---
+  // One signup row per email; freeScoreUsedAt is the one-free-score-per-email gate.
+  getMessageCoachSignupByEmail(email: string): Promise<MessageCoachSignup | undefined>;
+  createMessageCoachSignup(data: InsertMessageCoachSignup): Promise<MessageCoachSignup>;
+  updateMessageCoachSignup(id: number, patch: Partial<InsertMessageCoachSignup>): Promise<MessageCoachSignup | undefined>;
+  // Spends the one free score in a single conditional update (id +
+  // freeScoreUsedAt IS NULL), so two concurrent requests for the same email
+  // cannot both come away with a free score. Returns the updated row, or
+  // undefined when the free score was already spent.
+  claimFreeMessageCoachScore(id: number, usedAt: string): Promise<MessageCoachSignup | undefined>;
+
+  createMessageCoachScore(data: InsertMessageCoachScore): Promise<MessageCoachScore>;
+
+  // $4.99 one-time purchases of an additional score. One row per Stripe Checkout
+  // Session, mirroring the demo paid-session methods above.
+  createMessageCoachPaidPurchase(data: InsertMessageCoachPaidPurchase): Promise<MessageCoachPaidPurchase>;
+  getMessageCoachPaidPurchase(id: number): Promise<MessageCoachPaidPurchase | undefined>;
+  getMessageCoachPaidPurchaseByStripeCheckoutSessionId(id: string): Promise<MessageCoachPaidPurchase | undefined>;
+  updateMessageCoachPaidPurchase(id: number, patch: Partial<InsertMessageCoachPaidPurchase>): Promise<MessageCoachPaidPurchase | undefined>;
+  listMessageCoachPaidPurchasesBySignup(signupId: number): Promise<MessageCoachPaidPurchase[]>;
+  // Claims THIS purchase in one conditional update (id + status='paid'), so two
+  // concurrent score requests quoting the same purchase cannot both spend it.
+  // Returns the claimed row, or undefined when it was not a spendable credit.
+  claimMessageCoachPaidPurchase(id: number): Promise<MessageCoachPaidPurchase | undefined>;
 
   // --- Opportunity Intelligence (admin-only outbound lead-gen + drip) ---
   createProspectSearch(search: InsertProspectSearch): Promise<ProspectSearch>;
@@ -803,6 +828,84 @@ export class DatabaseStorage implements IStorage {
         consumedByDemoSessionId: demoSessionId,
       })
       .where(and(eq(demoPaidSessions.status, "paid"), inArray(demoPaidSessions.id, oldestPaid)))
+      .returning();
+    return rows[0];
+  }
+
+  // --- Message Coach ---
+  async getMessageCoachSignupByEmail(email: string): Promise<MessageCoachSignup | undefined> {
+    const rows = await db.select().from(messageCoachSignups).where(eq(messageCoachSignups.email, email));
+    return rows[0];
+  }
+
+  async createMessageCoachSignup(data: InsertMessageCoachSignup): Promise<MessageCoachSignup> {
+    const rows = await db.insert(messageCoachSignups).values(data).returning();
+    return rows[0];
+  }
+
+  async updateMessageCoachSignup(id: number, patch: Partial<InsertMessageCoachSignup>): Promise<MessageCoachSignup | undefined> {
+    const rows = await db.update(messageCoachSignups).set(patch).where(eq(messageCoachSignups.id, id)).returning();
+    return rows[0];
+  }
+
+  // The IS NULL predicate stays on the UPDATE itself, not on a prior read, so a
+  // race between two score requests for the same email produces one winner and
+  // one undefined rather than two free scores.
+  async claimFreeMessageCoachScore(id: number, usedAt: string): Promise<MessageCoachSignup | undefined> {
+    const rows = await db
+      .update(messageCoachSignups)
+      .set({ freeScoreUsedAt: usedAt })
+      .where(and(eq(messageCoachSignups.id, id), isNull(messageCoachSignups.freeScoreUsedAt)))
+      .returning();
+    return rows[0];
+  }
+
+  async createMessageCoachScore(data: InsertMessageCoachScore): Promise<MessageCoachScore> {
+    const rows = await db.insert(messageCoachScores).values(data).returning();
+    return rows[0];
+  }
+
+  async createMessageCoachPaidPurchase(data: InsertMessageCoachPaidPurchase): Promise<MessageCoachPaidPurchase> {
+    const rows = await db.insert(messageCoachPaidPurchases).values(data).returning();
+    return rows[0];
+  }
+
+  async getMessageCoachPaidPurchase(id: number): Promise<MessageCoachPaidPurchase | undefined> {
+    const rows = await db.select().from(messageCoachPaidPurchases).where(eq(messageCoachPaidPurchases.id, id));
+    return rows[0];
+  }
+
+  async getMessageCoachPaidPurchaseByStripeCheckoutSessionId(id: string): Promise<MessageCoachPaidPurchase | undefined> {
+    const rows = await db
+      .select()
+      .from(messageCoachPaidPurchases)
+      .where(eq(messageCoachPaidPurchases.stripeCheckoutSessionId, id));
+    return rows[0];
+  }
+
+  async updateMessageCoachPaidPurchase(id: number, patch: Partial<InsertMessageCoachPaidPurchase>): Promise<MessageCoachPaidPurchase | undefined> {
+    const rows = await db.update(messageCoachPaidPurchases).set(patch).where(eq(messageCoachPaidPurchases.id, id)).returning();
+    return rows[0];
+  }
+
+  async listMessageCoachPaidPurchasesBySignup(signupId: number): Promise<MessageCoachPaidPurchase[]> {
+    return db
+      .select()
+      .from(messageCoachPaidPurchases)
+      .where(eq(messageCoachPaidPurchases.signupId, signupId))
+      .orderBy(messageCoachPaidPurchases.id);
+  }
+
+  // The status = 'paid' predicate stays on the UPDATE itself, so if two requests
+  // race quoting the same purchase, the loser matches no row and gets undefined
+  // rather than spending the credit twice. Same shape as
+  // claimOldestPaidDemoSession. consumedByScoreId is stamped afterwards, once the
+  // score row it funded exists.
+  async claimMessageCoachPaidPurchase(id: number): Promise<MessageCoachPaidPurchase | undefined> {
+    const rows = await db
+      .update(messageCoachPaidPurchases)
+      .set({ status: "consumed", consumedAt: new Date().toISOString() })
+      .where(and(eq(messageCoachPaidPurchases.id, id), eq(messageCoachPaidPurchases.status, "paid")))
       .returning();
     return rows[0];
   }

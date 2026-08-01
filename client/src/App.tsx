@@ -19,6 +19,7 @@ import Certification from "@/pages/certification";
 import AdminLogin from "@/pages/admin-login";
 import AdminDashboard from "@/pages/admin-dashboard";
 import DemoV2 from "@/pages/demo-v2";
+import MessageCoach from "@/pages/message-coach";
 import DemoDashboard from "@/pages/dashboard-demo";
 import OfficeSetup, { OfficeSetupComplete } from "@/pages/office-setup";
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -65,6 +66,10 @@ function AppRouter() {
           stays /demo; the earlier single-scenario page it replaced has been
           removed. There is deliberately no parallel /demo-v2 route. */}
       <Route path="/demo" component={DemoV2} />
+      {/* Public Message Coach: no auth. Every server route behind it 404s while
+          MESSAGE_COACH_ENABLED is not "true", so the page renders its own "not
+          available" state rather than a broken form when the flag is off. */}
+      <Route path="/message-coach" component={MessageCoach} />
       {/* Public, read-only demo of the manager dashboard: no auth, seeded
           sample data only. Served by the no-auth GET /api/public/demo-dashboard
           endpoint; intentionally outside RequireAuth and with no path into the

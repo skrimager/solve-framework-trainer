@@ -829,3 +829,82 @@ export const leadershipRubricScoresSchema = z.object({
   blamelessResolution: z.number(), // resolution offered without blaming the client/customer OR the company/coworker
 });
 export type LeadershipRubricScores = z.infer<typeof leadershipRubricScoresSchema>;
+
+// ===========================================================================
+// Message Coach — a public lead-magnet tool that scores, diagnoses and rewrites
+// a single outreach message. Entirely additive: three new tables, no change to
+// any existing one. The whole surface is dark unless MESSAGE_COACH_ENABLED is
+// "true" (see server/messageCoachRoutes.ts).
+//
+// These rows are deliberately NOT joined to demo_signups. A Message Coach
+// visitor is anonymous in exactly the way a demo visitor is (email only, no
+// login, no office, no seat), but the two funnels meter different things and
+// share no quota, so mixing them into one signup row would make either limit
+// depend on the other.
+// ===========================================================================
+
+// One row per email that has used the free tool. `freeScoreUsedAt` is the whole
+// enforcement mechanism for "one free score per email": null means the free
+// score is still available, any timestamp means it is spent forever.
+export const messageCoachSignups = pgTable("message_coach_signups", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name"),
+  createdAt: text("created_at").notNull(),
+  freeScoreUsedAt: text("free_score_used_at"), // ISO timestamp; null until the free score is spent
+});
+
+export const insertMessageCoachSignupSchema = createInsertSchema(messageCoachSignups).omit({ id: true });
+export type InsertMessageCoachSignup = z.infer<typeof insertMessageCoachSignupSchema>;
+export type MessageCoachSignup = typeof messageCoachSignups.$inferSelect;
+
+// One row per scored message, whichever path paid for it. Both foreign keys are
+// nullable because the three sources populate different ones: a free/paid score
+// has a signupId and no officeId, a member score has an officeId and no
+// signupId. officeId is the only forward-looking field here — it exists so
+// usage-by-office can be reported later without a backfill.
+export const messageCoachScores = pgTable("message_coach_scores", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").references(() => messageCoachSignups.id),
+  officeId: integer("office_id").references(() => offices.id),
+  industry: text("industry"), // dropdown value, or null when not supplied
+  messageText: text("message_text").notNull(),
+  score: integer("score").notNull(), // 0-100
+  stalledStep: text("stalled_step").notNull(),
+  coaching: text("coaching").notNull(),
+  rewrite: text("rewrite").notNull(),
+  source: text("source").notNull(), // 'free' | 'paid' | 'member'
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertMessageCoachScoreSchema = createInsertSchema(messageCoachScores).omit({ id: true });
+export type InsertMessageCoachScore = z.infer<typeof insertMessageCoachScoreSchema>;
+export type MessageCoachScore = typeof messageCoachScores.$inferSelect;
+
+// One row per $4.99 additional-score purchase. This mirrors demo_paid_sessions
+// field for field (see that table's comment for why a row per purchase rather
+// than a counter); only the consumed_by_* target differs, because what a Message
+// Coach credit buys is a score row rather than a practice session.
+//
+// status lifecycle:
+//   'pending'  Checkout Session created; payment not yet confirmed.
+//   'paid'     webhook confirmed payment; one unconsumed score credit exists.
+//   'consumed' the credit has been spent; consumed_by_score_id links to the
+//              message_coach_scores row it funded.
+export const messageCoachPaidPurchases = pgTable("message_coach_paid_purchases", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").notNull().references(() => messageCoachSignups.id),
+  email: text("email").notNull(), // denormalized, matches messageCoachSignups.email at purchase time
+  stripeCheckoutSessionId: text("stripe_checkout_session_id").notNull().unique(),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  amountTotal: integer("amount_total").notNull(), // cents
+  status: text("status").notNull().default("pending"), // 'pending' | 'paid' | 'consumed'
+  createdAt: text("created_at").notNull(),
+  paidAt: text("paid_at"),
+  consumedAt: text("consumed_at"),
+  consumedByScoreId: integer("consumed_by_score_id").references((): AnyPgColumn => messageCoachScores.id),
+});
+
+export const insertMessageCoachPaidPurchaseSchema = createInsertSchema(messageCoachPaidPurchases).omit({ id: true });
+export type InsertMessageCoachPaidPurchase = z.infer<typeof insertMessageCoachPaidPurchaseSchema>;
+export type MessageCoachPaidPurchase = typeof messageCoachPaidPurchases.$inferSelect;
