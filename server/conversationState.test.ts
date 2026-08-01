@@ -8,6 +8,7 @@ import {
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  defersToLater,
   deriveConversationState,
   deriveDirectQuestion,
   hasCustomerAcceptedProposal,
@@ -238,6 +239,178 @@ describe("Rule S: a topic the rep sequences for later stops being re-asked", () 
     );
     assert.equal(state.sequencedTopics.length, 1, "'safety rating' and 'safety ratings' are the same subject");
     assert.equal(state.sequencedTopics[0].closed, true);
+  });
+});
+
+// The third narrow miss in this file in one day. The first two fixes each added
+// phrases to a fixed list, were checked against that day's reported sentence,
+// and then missed the next real conversation. These tests exist to prove the
+// replacement recognizes redirects it was never shown.
+describe("Rule S: deferral is recognized by composition, not by a phrasebook", () => {
+  // Verbatim from the staging session, untidied. Reproduced before the fix:
+  // the safety topic stopped at redirectCount 1 and never closed, because the
+  // second redirect matched no marker at all.
+  const STAGING_TRANSCRIPT = [
+    "r: Hi Priya, thanks for coming in today. Is there any particular reason you're looking to buy an SUV today?",
+    "c: We're expecting our first child soon, and we're really feeling the need for something spacious and practical. Plus, we want to make sure we have enough room for the baby gear. Is there a specific model you recommend for families?",
+    "r: Congratulations on the little one! When you think about 'enough room,' what specifically comes to mind — is it more about cargo space for gear, seating for other family members, or something else?",
+    "c: Thanks! We're mostly focused on cargo space for all the baby gear—things like the stroller and car seat that we need to fit. It's going to be a lot, so I want to make sure there's enough room for everything. Oh, and I'm also curious about how safe the models you're suggesting are. Can you share the safety ratings?",
+    "r: That's a great question, and I promise we'll get to all the safety details once we find the right vehicle for you — I'll walk you through everything it offers. Besides the stroller and car seat, are there other things like sports equipment or luggage for trips that you'll regularly need to haul around?",
+    "c: We might need to fit in some larger items too, like a pack-and-play and some bags when traveling. Being able to access everything easily is really important, especially once the baby is here. Speaking of safety, can we dive into those ratings a bit more when you have a chance?",
+    "r: Absolutely, we'll cover all of that in detail shortly, I don't want to skip ahead. Aside from space and safety, is there a particular budget range you two are hoping to stay within for this vehicle?",
+  ];
+
+  const SECOND_REDIRECT =
+    "Absolutely, we'll cover all of that in detail shortly, I don't want to skip ahead. Aside from space and safety, is there a particular budget range you two are hoping to stay within for this vehicle?";
+
+  test("the staging transcript closes safety on the second redirect", () => {
+    const state = deriveConversationState(t(...STAGING_TRANSCRIPT));
+    const safety = state.sequencedTopics.find((s) => s.keywords.includes("safe"));
+    assert.ok(safety, "the safety subject must be tracked");
+    assert.equal(safety!.redirectCount, 2);
+    assert.equal(safety!.closed, true);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /CLOSED/);
+    assert.match(rendered, /Do not raise it again in any form/);
+  });
+
+  test("the first redirect alone leaves safety open for exactly one more ask", () => {
+    const state = deriveConversationState(t(...STAGING_TRANSCRIPT.slice(0, 5)));
+    const safety = state.sequencedTopics.find((s) => s.keywords.includes("safe"));
+    assert.equal(safety!.redirectCount, 1);
+    assert.equal(safety!.closed, false);
+    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+  });
+
+  test("the reported second redirect is a deferral on its own, outside any transcript", () => {
+    assert.equal(defersToLater(SECOND_REDIRECT), true);
+  });
+
+  // Pins the regression itself. If someone reintroduces a phrase-list-shaped
+  // check, this sentence is the one it will miss again.
+  test("the reported second redirect contains none of the phrases the old list held", () => {
+    for (const old of [
+      /\bcome back to\b/i,
+      /\bcircle back\b/i,
+      /\bonce we\b/i,
+      /\bafter we\b/i,
+      /\bbefore we (?:get|dig|talk|go|jump|move)\b/i,
+      /\bfirst\b/i,
+      /\bpark(?:ing)? that\b/i,
+      /\bset that (?:aside|to the side)\b/i,
+      /\bnail down\b/i,
+      /\bstart(?:ing)? with\b/i,
+      /\bdoes\s?n'?t\s+matter\b/i,
+      /\bno point\b/i,
+      /\bthe right\b/i,
+    ]) {
+      assert.doesNotMatch(SECOND_REDIRECT, old);
+    }
+  });
+
+  // Realistic rep sentences, none of which is a literal match for anything that
+  // was ever in a marker list. Each pairs a handling verb with a later-marker,
+  // or declares the topic premature, or parks it.
+  const UNSEEN_DEFERRALS = [
+    "we'll cover all of that in detail shortly, I don't want to skip ahead",
+    "let's hold that thought for now and get back to it",
+    "I'll circle back on that in a few minutes",
+    "we're not there yet on that, let's keep going",
+    "that's coming up, just not yet",
+    "good question, saving that for a bit",
+    "I want to go over all of that with you down the road",
+    "we'll dive into those numbers in a moment",
+    "let me answer that toward the end",
+    "I'll pull up the full comparison for you later on",
+    "we'll walk through the whole spec sheet when we get there",
+    "I'd rather not jump ahead on that",
+    "put a pin in that one",
+    "I'll share all those figures with you in a bit",
+  ];
+
+  for (const phrase of UNSEEN_DEFERRALS) {
+    test(`recognized as a deferral: "${phrase}"`, () => {
+      assert.equal(defersToLater(phrase), true);
+    });
+  }
+
+  // The other half of the contract: a rep who is simply talking, answering, or
+  // asking must never be read as deferring. Widening detection is only an
+  // improvement if this list stays clean.
+  const NOT_DEFERRALS = [
+    "It's rated to 5,000 pounds.",
+    "This one gets about 28 highway and 21 city.",
+    "That's a great question. The safety rating is five stars across the board.",
+    "Let's go over the cargo space. How much do you usually haul?",
+    "What's most important to you in your next vehicle?",
+    "I can show you the crash test data right now if you want.",
+    "The finance department handles all of that.",
+    "We covered the trim levels already, so what's your budget?",
+    "Tell me about your commute.",
+  ];
+
+  for (const phrase of NOT_DEFERRALS) {
+    test(`not a deferral: "${phrase}"`, () => {
+      assert.equal(defersToLater(phrase), false);
+    });
+  }
+
+  test("a deferral with no question behind it is still just a brush-off", () => {
+    // Forward motion is still required, so widening deferral detection cannot
+    // turn a bare dismissal into something the customer has to accept.
+    assert.equal(defersToLater("We'll cover all of that in detail shortly."), true);
+    assert.deepEqual(
+      deriveConversationState(
+        t("c: What's the tow capacity on this one?", "r: We'll cover all of that in detail shortly."),
+      ).sequencedTopics,
+      [],
+    );
+  });
+
+  test("the composition generalizes across the two word lists, not one tuned sentence", () => {
+    // Same move, four different handling verbs and four different later-markers,
+    // on a subject nothing in this file has heard of.
+    const variants = [
+      "r: We'll go over the roof rack rating in a bit. What are you hauling day to day?",
+      "r: I'll walk you through the roof rack rating down the road. What are you hauling day to day?",
+      "r: Let me pull up the roof rack rating for you later on. What are you hauling day to day?",
+      "r: We can dig into the roof rack rating when the time comes. What are you hauling day to day?",
+    ];
+    for (const reply of variants) {
+      const state = deriveConversationState(t("c: What's the roof rack rating on this?", reply));
+      assert.equal(state.sequencedTopics.length, 1, reply);
+      assert.match(state.sequencedTopics[0].label, /roof rack rating/i);
+    }
+  });
+
+  test("the subject is recognized when the rep says it back in a different word form", () => {
+    // The other half of the reported bug: the tracked keyword was "safe" and the
+    // rep's word was "safety", so the topic was never credited with a redirect.
+    const state = deriveConversationState(
+      t(
+        "c: I'm curious about how safe these models are",
+        "r: Good question. What's your commute like?",
+        "c: About forty minutes each way.",
+        "r: We'll cover safety in detail shortly, I don't want to skip ahead. What's your budget?",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.equal(state.sequencedTopics[0].redirectCount, 1);
+  });
+
+  test("stem matching does not collapse merely similar words", () => {
+    // "car" must not reach "cargo". A four-character floor on the prefix rule is
+    // what keeps the widened matching from over-firing. The ask is two turns back
+    // so it is no longer pending, which is the only path stem matching controls.
+    const state = deriveConversationState(
+      t(
+        "c: I'm curious about the car alarm",
+        "r: Sure. What's your commute like?",
+        "c: About forty minutes each way.",
+        "r: We'll get into cargo space in a bit. How many people are you carrying?",
+      ),
+    );
+    assert.deepEqual(state.sequencedTopics, []);
   });
 });
 

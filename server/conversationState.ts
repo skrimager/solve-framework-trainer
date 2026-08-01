@@ -517,31 +517,160 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
 // ask is allowed after the first redirect, and the second one closes it.
 export const SEQUENCING_STOP_THRESHOLD = 2;
 
-// Ordering phrases: the rep putting a topic later in the conversation rather
-// than handing it to someone else. This is a separate list from
-// REDIRECT_MARKERS, which is mostly about department handoff and stays
-// untouched, though the ordering phrases the two have in common are repeated
-// here so sequencing does not depend on that list's shape.
+// Ordering adverbs: the rep explicitly placing one thing before another. This
+// is a separate list from REDIRECT_MARKERS, which is mostly about department
+// handoff and stays untouched.
 //
-// The trailing-"first" forms are what the reported transcript actually used
-// ("let's make sure we find the right vehicle for you first"), and no existing
-// marker matched it.
-const SEQUENCING_MARKERS: RegExp[] = [
-  /\blet'?s (?:first|start|focus|come back|circle back)\b/i,
+// These are the forms where the ordering IS the whole phrase, so there is
+// nothing to compose them out of. Everything that used to live here and could
+// be expressed as "a verb of handling a topic + a marker of later" has been
+// moved into the compositional detector below, which recognizes the same
+// phrases and a very large number of others besides.
+const ORDERING_MARKERS: RegExp[] = [
+  /\blet'?s (?:first|start|focus)\b/i,
   /\bfirst,? (?:let'?s|i'?d like|i want|i need)\b/i,
   /\b(?:find|figure out|nail down|pin down|sort out|lock in|settle|get|know|understand)\b[^.!?]{0,60}\bfirst\b/i,
+  /\bstart(?:ing)? with\b/i,
   /\bonce we\b/i,
   /\bafter we\b/i,
   /\bbefore we (?:get|dig|talk|go|jump|move)\b/i,
-  /\bwe(?:'ll| will| can) (?:get|come|circle) back to\b/i,
-  /\bcome back to (?:that|it|this)\b/i,
-  /\bcircle back\b/i,
-  /\bpark(?:ing)? that\b/i,
-  /\bset that (?:aside|to the side)\b/i,
-  /\bnail down\b/i,
-  /\bthen (?:we'?ll|we can|i'?ll|i can)\b[^.!?]{0,60}\b(?:cover|go over|get into|talk about|look at|come back)\b/i,
-  /\bstart(?:ing)? with\b/i,
 ];
+
+// ---------------------------------------------------------------------------
+// Compositional deferral detection
+//
+// Three fixes to this file today have each added phrases to a fixed list, been
+// verified against the phrasing in that day's bug report, and then missed the
+// next real conversation. The reported miss this time was "we'll cover all of
+// that in detail shortly, I don't want to skip ahead", which is about as
+// ordinary as a redirect gets and matched nothing.
+//
+// A fixed list can only ever recognize the sentences someone thought to write
+// down. What makes these sentences redirects is not their wording but their
+// composition: the rep names an ACT OF HANDLING a topic and attaches it to a
+// LATER TIME. "cover ... shortly", "get to ... once we", "walk you through ...
+// down the road", "go over ... in a bit" are all the same move, and none of
+// them needs to be enumerated if the two halves are enumerated separately and
+// matched near each other. Two word lists of n and m entries recognize n x m
+// phrasings in either order, so the ~25 handling verbs and ~25 later-markers
+// below cover several hundred sentences rather than the 14 the old list held —
+// and adding one word to either list adds a whole row or column, not one cell.
+//
+// Two further classes cover deferrals that never name a time at all:
+// PREMATURITY (the rep says the topic is out of order: "I don't want to skip
+// ahead", "we're not there yet") and PARKING (the rep puts the topic down to be
+// picked up later: "hold that thought", "let's circle back"). Both are small
+// closed semantic classes rather than open-ended phrasebooks.
+// ---------------------------------------------------------------------------
+
+// Verbs of ADDRESSING a topic in conversation. Not verbs of answering it — the
+// point of a deferral is that the rep says they will do this, later.
+const TOPIC_HANDLING_VERBS = [
+  "cover(?:ing)?",
+  "get(?:ting)? (?:to|into)",
+  "go(?:ing)? (?:over|through|into)",
+  "gone (?:over|through)",
+  "talk(?:ing)? about",
+  "dig(?:ging)? into",
+  "div(?:e|ing) into",
+  "walk(?:ing)? (?:you |through)",
+  "run(?:ning)? through",
+  "revisit(?:ing)?",
+  "discuss(?:ing)?",
+  "address(?:ing)?",
+  "look(?:ing)? at",
+  "touch(?:ing)? on",
+  "unpack(?:ing)?",
+  "explor(?:e|ing)",
+  "spend(?:ing)? time on",
+  "get(?:ting)? you (?:those|that|the)",
+  "shar(?:e|ing)",
+  "show(?:ing)? you",
+  "pull(?:ing)? (?:up|those|that)",
+  "answer(?:ing)?",
+  "compar(?:e|ing)",
+  "review(?:ing)?",
+  "lay(?:ing)? out",
+];
+
+// Markers that place something later than now: plain deferral adverbs, and the
+// subordinate clauses that express the same thing as a precondition.
+const LATER_TIME_MARKERS = [
+  "shortly",
+  "soon",
+  "later(?: on)?",
+  "in (?:just )?a (?:bit|moment|minute|sec|second|few|little bit|little while)",
+  "in a few (?:minutes|moments)",
+  "down the (?:road|line)",
+  "before long",
+  "momentarily",
+  "afterwards?",
+  "further (?:along|down|on)",
+  "at (?:that|some) point",
+  "when the time comes",
+  "when we get (?:there|to (?:that|it|those))",
+  "toward(?:s)? the end",
+  "at the end",
+  "another time",
+  "next",
+  "in a while",
+  "once (?:we|i|you)",
+  "after (?:we|i|you)",
+  "as soon as (?:we|i|you)",
+  "until (?:we|i|you)",
+  "when (?:we|i|you)(?:'ve| have| get| know| find|'re done| finish)",
+  "before (?:we|i) (?:get|dig|go|jump|move|talk|do)",
+  "then (?:we|i)(?:'ll| will| can)",
+];
+
+// The rep declaring the topic out of order rather than naming a time for it.
+// This is what "I don't want to skip ahead" is, and no time word appears in it.
+const PREMATURITY_MARKERS: RegExp[] = [
+  /\b(?:don'?t|do not|didn'?t|won'?t|can'?t|rather not|hate to|trying not to|let'?s not|no need to|before we)\b[^.!?]{0,40}\b(?:skip|jump|leap|race|rush|run|get|go|move)\s+ahead\b/i,
+  /\bget(?:ting)? ahead of (?:ourselves|myself|the process|things)\b/i,
+  /\bahead of (?:ourselves|myself)\b/i,
+  /\b(?:not|aren'?t|isn'?t|we'?re not)\s+(?:quite\s+)?there\s+yet\b/i,
+  /\bnot (?:just )?yet\b/i,
+  /\bjump(?:ing)? around\b/i,
+  /\bout of order\b/i,
+  /\btoo far ahead\b/i,
+  /\bthat'?s coming up\b/i,
+  /\bwe'?ll get there\b/i,
+];
+
+// The rep setting the topic down intact, to be picked back up. These verbs mean
+// "later" on their own, so unlike the handling verbs they need no time marker.
+const PARKING_MARKERS: RegExp[] = [
+  /\bhold(?:ing)? (?:that|it|this|those) thought\b/i,
+  /\bpark(?:ing)? (?:that|it|this)\b/i,
+  /\b(?:set|setting|put|putting) (?:that|it|this) (?:aside|to the side|on hold)\b/i,
+  /\bput(?:ting)? a pin in\b/i,
+  /\btabl(?:e|ing) (?:that|it|this)\b/i,
+  /\bsav(?:e|ing) (?:that|it|this)\b[^.!?]{0,30}\b(?:for|until|till)\b/i,
+  /\bshelv(?:e|ing) (?:that|it|this)\b/i,
+  /\bbookmark(?:ing)? (?:that|it|this)\b/i,
+  /\b(?:come|get|circle|loop|swing) back (?:to|around to)\b/i,
+  /\bcircl(?:e|ing) back\b/i,
+  /\bcom(?:e|ing) back to (?:that|it|this|those)\b/i,
+];
+
+// Two signal classes matched near each other, in either order, without crossing
+// a sentence boundary. The window is what ties the halves together: "cover all
+// of that in detail shortly" is one clause, "we covered the trim levels. Later,
+// what's your budget" is not.
+function nearEachOther(a: string[], b: string[], gap = 60): RegExp[] {
+  const A = `(?:${a.join("|")})`;
+  const B = `(?:${b.join("|")})`;
+  return [
+    new RegExp(`\\b${A}\\b[^.!?]{0,${gap}}\\b${B}\\b`, "i"),
+    new RegExp(`\\b${B}\\b[^.!?]{0,${gap}}\\b${A}\\b`, "i"),
+  ];
+}
+
+const HANDLING_AT_A_LATER_TIME: RegExp[] = nearEachOther(
+  TOPIC_HANDLING_VERBS,
+  LATER_TIME_MARKERS,
+);
 
 // The same move stated as a condition instead of an order: the topic is not
 // refused and not handed off, it is declared not-yet-meaningful until something
@@ -674,13 +803,52 @@ function isDepartmentTopic(text: string): boolean {
 // that once we know what you need, what are you driving today?" from "let's come
 // back to that", which is a brush-off the customer should not have to accept.
 function isSequencingRedirect(text: string): boolean {
-  const defers =
-    matchesAny(text, SEQUENCING_MARKERS) || matchesAny(text, RELEVANCE_CONDITIONING_MARKERS);
-  return defers && extractAsks(text).length > 0;
+  return defersToLater(text) && extractAsks(text).length > 0;
+}
+
+// The five ways a rep can put a topic later, none of which depends on the exact
+// sentence being one somebody wrote down in advance.
+export function defersToLater(text: string): boolean {
+  return (
+    matchesAny(text, HANDLING_AT_A_LATER_TIME) ||
+    matchesAny(text, PREMATURITY_MARKERS) ||
+    matchesAny(text, PARKING_MARKERS) ||
+    matchesAny(text, ORDERING_MARKERS) ||
+    matchesAny(text, RELEVANCE_CONDITIONING_MARKERS)
+  );
+}
+
+// Common inflections and nominalizations stripped down to a shared stem, so the
+// subject the customer named ("how safe the models are") is still recognized
+// when the rep says it back a different way ("space and safety"). That exact
+// mismatch is half of the reported bug: the tracked keyword was "safe" and the
+// rep's word was "safety", and an inflection-only check saw two unrelated words.
+const DERIVATIONAL_SUFFIXES = ["ability", "ibility", "ities", "ity", "ness", "ments", "ment", "ings", "ing", "ers", "er", "ed", "ty"];
+
+function stemWord(word: string): string {
+  const w = normalizeKeyword(word);
+  for (const suffix of DERIVATIONAL_SUFFIXES) {
+    if (w.endsWith(suffix) && w.length - suffix.length >= 3) return w.slice(0, -suffix.length);
+  }
+  return w;
+}
+
+// Same word, allowing for the ways English redresses one. Equal stems, or one a
+// prefix of the other by no more than three letters. The four-character floor is
+// what keeps short stems from swallowing unrelated words ("car" / "cargo").
+function stemsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.length >= 4 && b.startsWith(a) && b.length - a.length <= 3) return true;
+  if (b.length >= 4 && a.startsWith(b) && a.length - b.length <= 3) return true;
+  return false;
 }
 
 function mentionsKeyword(text: string, keywords: string[]): boolean {
-  return keywords.some((k) => new RegExp(`\\b${k}s?\\b`, "i").test(text));
+  const spoken = (text.toLowerCase().match(/[a-z0-9']+/g) ?? []).map(stemWord);
+  return keywords.some((k) => {
+    const stem = stemWord(k);
+    return spoken.some((w) => stemsMatch(stem, w));
+  });
 }
 
 // Counts, per subject the customer raised, how many times the rep proposed
