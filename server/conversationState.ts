@@ -1071,3 +1071,199 @@ export function buildConversationStateLines(state: ConversationState): string[] 
 
   return lines;
 }
+
+// ---------------------------------------------------------------------------
+// Product alignment gate (opt-in, flag-gated at the call site in llm.ts).
+//
+// A real buyer cannot be led into the weeds of trim levels and tow ratings
+// before anyone has asked what they need the thing FOR. The simulated customer
+// could, because nothing stopped it, and a rep who opened on specs got a
+// cooperative spec conversation and a passing-looking discovery that never
+// discovered anything.
+//
+// This tracks the four things that have to be on the table before feature talk
+// is a reasonable place for the conversation to be. It is deliberately four
+// booleans and nothing more: no score, no ordering, no state machine. Each is
+// derived from an explicit lexical marker in the transcript in the same
+// conservative spirit as everything above, so a missed signal just leaves the
+// customer behaving as it did before the flag existed.
+//
+// Kept out of ConversationState on purpose. The gate is a separate derivation
+// with a separate renderer, so with the flag off not one byte of the prompt
+// changes and pre/post behavior can be compared honestly.
+// ---------------------------------------------------------------------------
+
+// The rep asking what the thing is actually for. Matched against the rep's ask
+// sentences only, so "a family sedan is a great use case" in a statement never
+// counts as having asked anything.
+const USE_CASE_ASK_MARKERS: RegExp[] = [
+  /\bwhat (?:are|will) you (?:be )?(?:using|doing with)\b/i,
+  /\b(?:use|using) (?:it|this|them|that) (?:for|to)\b/i,
+  /\bwhat (?:do|will|would) you need it to do\b/i,
+  /\bwhat brings you (?:in|here|by)\b/i,
+  /\bwhat (?:are|were) you looking (?:for|to do)\b/i,
+  /\bday[- ]to[- ]day\b/i,
+  /\btypical (?:day|week|drive|trip|use|usage|workload)\b/i,
+  /\bhow (?:do|would|will) you (?:plan to )?(?:use|be using)\b/i,
+  /\bwhat'?s (?:it|this) (?:going to be )?for\b/i,
+  /\bprimar(?:y|ily)\b[^?.!]{0,30}\b(?:use|using|for|need)\b/i,
+  /\bwhat kind of (?:driving|work|use|usage|trips|miles|space|projects|jobs)\b/i,
+  /\bmost of (?:your|the) (?:driving|use|time|miles)\b/i,
+];
+
+// The rep asking who else is in the picture: riding along, living there, using
+// it, or otherwise part of the decision.
+const WHO_ELSE_ASK_MARKERS: RegExp[] = [
+  /\bwho else\b/i,
+  /\banyone else\b/i,
+  /\bwho(?:'s| is| will| would| are)\b[^?.!]{0,40}\b(?:using|riding|driving|living|working|travel|with you|in (?:the|it))\b/i,
+  /\b(?:just|only) (?:you|yourself)\b/i,
+  /\bhow many (?:people|of you|passengers|kids|children|employees|users|seats|bedrooms)\b/i,
+  /\bwho (?:else )?is involved\b/i,
+  /\b(?:kids|children|passengers|family|spouse|wife|husband|partner|team|crew|roommates?)\b/i,
+];
+
+// The rep asking why: what is driving this, what changed, what matters most.
+const MOTIVATION_ASK_MARKERS: RegExp[] = [
+  /\bwhat'?s (?:driving|prompting|behind|changed|different)\b/i,
+  /\bwhy (?:now|are you|is (?:it|this)|the (?:change|switch)|change|switch|looking|replace)\b/i,
+  /\bwhat (?:made|makes|has|prompted|brought) you\b/i,
+  /\bwhat are you (?:hoping|trying|looking) (?:to|for)\b/i,
+  /\bwhat (?:would|does) (?:success|the right one|a good outcome|ideal)\b/i,
+  /\b(?:most important|matters most|top priority|biggest priority)\b/i,
+  /\bwhat'?s (?:most )?important to you\b/i,
+];
+
+// A CUSTOMER turn naming something that bothers them: a worry, a frustration,
+// or a past experience that went badly. This one reads the customer's side,
+// because the gate is about what has been established, not about who asked.
+const CONCERN_MARKERS: RegExp[] = [
+  /\bworri(?:ed|es|some)\b/i,
+  /\bconcern(?:ed|s)?\b/i,
+  /\bfrustrat/i,
+  /\bnervous\b/i,
+  /\banxious\b/i,
+  /\bafraid\b/i,
+  /\bscared\b/i,
+  /\bwary\b/i,
+  /\bskeptical\b/i,
+  /\bproblem(?:s)?\b/i,
+  /\bissues?\b/i,
+  /\bhate(?:d)?\b/i,
+  /\bnever again\b/i,
+  /\bburned\b/i,
+  /\bbad experience\b/i,
+  /\blast (?:time|one|place|guy)\b/i,
+  /\bprevious (?:one|car|house|vendor|provider)\b/i,
+  /\bbroke down\b/i,
+  /\bkept (?:breaking|failing|going)\b/i,
+  /\bfell apart\b/i,
+  /\bstuck with\b/i,
+  /\bheadache\b/i,
+  /\b(?:tired|sick) of\b/i,
+  /\bdisappoint/i,
+  /\bwent wrong\b/i,
+  /\bregret/i,
+  /\bdon'?t want (?:to )?(?:end up|go through|deal|another|any)\b/i,
+];
+
+// The rep pulling the conversation into product internals: trims, packages,
+// configurations, capacities, spec sheets. Generic by SHAPE rather than by an
+// enumerated topic list, because enumerating topics is exactly what made the
+// redirect rule fail on subjects nobody had thought to name.
+const PRODUCT_SPEC_MARKERS: RegExp[] = [
+  /\btrims?\b/i,
+  /\bpackages?\b/i,
+  /\bconfigurations?\b/i,
+  /\bspecs?\b|\bspecifications?\b/i,
+  /\b(?:towing|payload|load|storage|seating|cargo|hauling) capacity\b/i,
+  /\bhorsepower\b|\btorque\b|\bdrivetrain\b|\bengine (?:size|option|choice)\b/i,
+  /\bdimensions\b/i,
+  /\bsquare (?:feet|footage)\b/i,
+  /\bwhich (?:model|trim|version|package|tier|plan|configuration|engine|edition)\b/i,
+  /\bwhat (?:model|trim|version|package|tier|plan|edition)\b/i,
+  /\bfeature (?:set|list)\b/i,
+  /\bprocessor\b|\bmegapixels?\b|\bgigabytes?\b|\bstorage (?:size|tier)\b/i,
+  /\btop trim\b|\bbase model\b|\bfully loaded\b/i,
+];
+
+export interface AlignmentGateState {
+  // The consultant asked what this is for, and the customer gave a real answer.
+  useCase: boolean;
+  // The consultant asked who else is in the picture, and the customer answered.
+  whoElse: boolean;
+  // The consultant asked why, and the customer answered.
+  motivation: boolean;
+  // The customer has named at least one worry or past frustration.
+  concern: boolean;
+  // All four. Feature talk is a reasonable place to be from here on.
+  satisfied: boolean;
+  // The consultant's spec question this turn, quoted, when they have dived into
+  // product internals while the gate is still open. Null otherwise.
+  featureDive: string | null;
+}
+
+// A customer reply substantial enough to count as having actually answered.
+// "Yeah" and "sure" do not establish anything.
+function isSubstantiveAnswer(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length >= 15 && trimmed.split(/\s+/).length >= 4;
+}
+
+// True when the rep asked something matching `markers` and the customer then
+// said something real. Both halves are required: an unanswered question has not
+// established anything either.
+function askedAndAnswered(transcript: TranscriptMessage[], markers: RegExp[]): boolean {
+  for (let i = 0; i < transcript.length; i++) {
+    const m = transcript[i];
+    if (m.role !== "consultant") continue;
+    if (!extractAsks(m.content).some((ask) => matchesAny(ask, markers))) continue;
+    for (let j = i + 1; j < transcript.length; j++) {
+      if (transcript[j].role === "customer" && isSubstantiveAnswer(transcript[j].content)) return true;
+    }
+  }
+  return false;
+}
+
+export function deriveAlignmentGate(transcript: TranscriptMessage[]): AlignmentGateState {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+
+  const useCase = askedAndAnswered(spoken, USE_CASE_ASK_MARKERS);
+  const whoElse = askedAndAnswered(spoken, WHO_ELSE_ASK_MARKERS);
+  const motivation = askedAndAnswered(spoken, MOTIVATION_ASK_MARKERS);
+  const concern = spoken.some((m) => m.role === "customer" && matchesAny(m.content, CONCERN_MARKERS));
+  const satisfied = useCase && whoElse && motivation && concern;
+
+  const last = spoken.at(-1);
+  const specAsk =
+    !satisfied && last && last.role === "consultant"
+      ? extractAsks(last.content).find((ask) => matchesAny(ask, PRODUCT_SPEC_MARKERS))
+      : undefined;
+
+  return { useCase, whoElse, motivation, concern, satisfied, featureDive: specAsk ?? null };
+}
+
+// Renders the gate as prompt lines. Empty array once the gate is satisfied and
+// the rep is not in the weeds, so a well-run conversation reads exactly as it
+// did before this existed.
+export function buildAlignmentGateLines(state: AlignmentGateState): string[] {
+  if (state.satisfied) return [];
+
+  const missing: string[] = [];
+  if (!state.useCase) missing.push("what you actually need it for");
+  if (!state.whoElse) missing.push("who else this has to work for besides you");
+  if (!state.motivation) missing.push("why you are doing this at all right now");
+  if (!state.concern) missing.push("what you are worried about or what went wrong last time");
+
+  const lines: string[] = [
+    `- Nobody has established any of this yet: ${missing.join("; ")}. You are aware of that the way a real buyer is: not as a rule you are following, but as the reason detailed product talk feels premature to you right now. Never say out loud that something has to happen first, never announce an order to this conversation, and never hint that you are withholding anything. Just be a person who has not been asked yet.`,
+  ];
+
+  if (state.featureDive) {
+    lines.push(
+      `- The consultant has gone straight to product detail with "${state.featureDive}" before any of that is on the table. You are the buyer, not the person who memorized the catalogue, so the honest answer is usually that you do not know and have not thought about it in those terms. Say that plainly, in your own words, and then say what you DO know: the situation you are in, the thing you need this to handle, the part of it that actually matters to you. That is a real answer to their question, not a dodge, and it puts the conversation back on ground you can speak to. Do not pretend to a preference you do not have, and do not lecture them about asking the wrong question.`,
+    );
+  }
+
+  return lines;
+}

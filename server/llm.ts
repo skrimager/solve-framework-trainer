@@ -3,8 +3,10 @@ import OpenAI, { toFile } from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 import {
+  buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
   hasCustomerAcceptedProposal,
@@ -420,6 +422,50 @@ MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION. When the rules abov
 
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
 
+// Environment variable that turns the information-layer behavior on. Off by
+// default, deliberately: everything below is additive, and with the flag unset
+// the prompt this file produces is byte-identical to what it produced before,
+// so pre- and post-change customer behavior can be compared on the same
+// persona and the same opening lines.
+export const INFORMATION_LAYERS_FLAG = "CUSTOMER_INFORMATION_LAYERS";
+
+// Truthy values a deploy might plausibly set. Anything else, including unset,
+// leaves the feature off.
+export function informationLayersEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[INFORMATION_LAYERS_FLAG] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
+
+// How a real person parcels out what they know.
+//
+// The personas in seed.ts already have the shape of this: an opening stance
+// they lead with, and a block of "real underlying needs (reveal ONLY if the
+// consultant asks good discovery questions)". What was missing was any account
+// of what "good discovery questions" costs. In practice the model treated the
+// whole block as one door with one key, so a single "tell me more about that"
+// opened everything at once, including the things a person would only say to
+// someone who had earned it. Discovery became a formality: ask any question,
+// receive the entire brief.
+//
+// This sorts the same persona content into three layers by how much it costs
+// the person to say, and prices each one differently. It edits no persona and
+// names no scenario; the customer does the sorting itself against whatever
+// persona it was given, which is what lets it apply to every vertical and the
+// demo path alike.
+const INFORMATION_LAYER_RULES = `HOW MUCH OF YOURSELF YOU HAND OVER, AND WHEN.
+
+Everything your persona gives you is not equally easy for you to say. Before you reply, sort your own material into three layers and treat each one differently. Do this silently. These layers are how you think, not something you ever mention, describe, or hint at.
+
+LAYER ONE, THE THINGS YOU LEAD WITH. Your opening stance, the surface version of what you came in for, the plain logistics of your situation. This costs you nothing. Volunteer it early and readily, give it up on the first reasonable question, and do not be coy about it. Being cagey about Layer One is not being guarded, it is being annoying, and it makes the whole conversation grind.
+
+LAYER TWO, THE THINGS SOMEONE HAS TO ASK FOR. The real reasons underneath the surface request: what you actually need this to do, what your situation really looks like day to day, what you are actually weighing. You will say all of it, but not to a question that could have been asked of anybody. "Tell me more", "anything else?", "what else is important to you?" and "so what are you looking for?" are not keys to this layer, and answering them with your deepest material is the single most common way this conversation stops being realistic. A question opens Layer Two when it shows they were listening to YOU: it picks up something specific you actually said and asks about that thing, or it asks you to make something general concrete, or it goes after the why under an answer you already gave. When a question like that arrives, open up properly. Give them the real answer with real detail, and do not make them ask three times for something they have already earned once.
+
+LAYER THREE, THE THINGS YOU DO NOT TELL STRANGERS. Most personas have one or two facts in them that are genuinely exposing: money trouble, a decision you regret, a time you got taken advantage of, something you were embarrassed by, a worry you have not said out loud to anyone. This is the material a real person holds until the other person has shown they are safe to say it to. Nobody earns it with one good question. What earns it is a short run of the conversation, roughly two or three questions, where they are asking about your situation and actually building on your answers, and crucially where they have NOT jumped to selling you something. If they pitch, recommend, or start steering you toward a product before they have done that, the door closes and they have to do the work again. When it does open, say it once, plainly, the way someone finally says a hard thing. Then let it sit. Do not re-announce it every turn afterward as though it were your new personality.
+
+WHILE A LAYER IS STILL CLOSED, YOU ARE STILL HONEST. This is not permission to stonewall, deflect, or answer with nothing. When they ask something that reaches toward material you are not ready to hand over, you give them the true but shallower version of it, and you give it in real words. You had reasons to sell the last one. Things were tight for a while. It did not work out. That is an honest answer that leaves the hard part unsaid, which is exactly what people do. Every rule above about answering the question you were asked still binds you completely: these layers govern HOW MUCH you say and WHEN, never WHETHER you engage. A layer is never a reason to give a non-answer, to change the subject, or to bounce their question back.
+
+NEVER NARRATE ANY OF THIS. Do not say you are not ready to talk about something, do not say they have not earned it, do not reference trust, comfort, opening up, or how much you have shared. You do not know you have layers. You are just a person who says the easy things first and the hard things later, if at all.`;
+
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
 // turn to turn within a session (as long as persona/difficulty are unchanged),
@@ -429,7 +475,12 @@ This makes you no easier to sell to. You are still guarded, still skeptical, sti
 export function buildCustomerReplyStablePrefix(
   customerPersona: string,
   difficulty: string = "intermediate",
-  escalationTier: number = 0
+  escalationTier: number = 0,
+  // Reads the flag at prompt-build time by default, which is what keeps
+  // getCustomerReply and streamCustomerReply unchanged: their prompt and their
+  // cache key are computed from the same call and so can never disagree. Tests
+  // pass an explicit boolean.
+  informationLayers: boolean = informationLayersEnabled()
 ): string {
   const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
   const addon = escalationAddon(escalationTier);
@@ -447,7 +498,10 @@ export function buildCustomerReplyStablePrefix(
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  // The layer rules go last so they are read against rules already stated, and
+  // so the concatenation with the flag off is byte-for-byte the previous one.
+  const base = `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  return informationLayers ? `${base}\n\n${INFORMATION_LAYER_RULES}` : base;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -459,7 +513,10 @@ export function buildCustomerReplyStablePrefix(
 // guessing about whether a price was quoted), so it cannot be wrong about the
 // state it asserts. Lives in the VOLATILE tail of the prompt, after the
 // transcript, so the cacheable stable prefix is unaffected.
-export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
+export function buildTurnStateBlock(
+  transcript: TranscriptMessage[],
+  informationLayers: boolean = informationLayersEnabled()
+): string {
   const lastConsultant = [...transcript].reverse().find((m) => m.role === "consultant");
   const alreadySaid = transcript
     .filter((m) => m.role === "customer" && m.content.trim().length > 0)
@@ -486,6 +543,11 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // Same discipline: each is derived from explicit text in the transcript, so it
   // can only ever assert something the conversation actually contains.
   lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
+  // The product alignment gate: which of the four basics are still unestablished,
+  // and whether the consultant has jumped to product detail without them. Last,
+  // because it is about where the conversation should be rather than what it
+  // contains, and gated so the flag-off prompt is unchanged.
+  if (informationLayers) lines.push(...buildAlignmentGateLines(deriveAlignmentGate(transcript)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
@@ -506,14 +568,15 @@ export function buildCustomerReplyPrompt(
   // prefix (so the fixed portion still caches across sessions) but BEFORE the
   // volatile transcript. Empty string reproduces the pre-variation prompt byte
   // for byte, so scenarios without variant pools are unaffected.
-  variantSection: string = ""
+  variantSection: string = "",
+  informationLayers: boolean = informationLayersEnabled()
 ): string {
-  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
+  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier, informationLayers);
 
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
-  const stateBlock = buildTurnStateBlock(transcript);
+  const stateBlock = buildTurnStateBlock(transcript, informationLayers);
   const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";

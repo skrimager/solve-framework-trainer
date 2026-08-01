@@ -6,6 +6,8 @@ import {
   buildCustomerReplyStablePrefix,
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
+  INFORMATION_LAYERS_FLAG,
+  informationLayersEnabled,
   computeScoreCacheHash,
   scoreTranscript,
   type ScoreResponder,
@@ -2077,6 +2079,193 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - question discipline", () => {
     assert.match(rules, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
     assert.match(rules, /There is no fixed list of topics this covers/);
     assert.match(rules, /APPLY THIS TEST ON EVERY SINGLE TURN/);
+  });
+});
+
+describe("information layers - the flag", () => {
+  test("it is off unless the environment explicitly turns it on", () => {
+    assert.equal(informationLayersEnabled({}), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "0" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "false" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "off" }), false);
+  });
+
+  test("the usual truthy spellings turn it on", () => {
+    for (const value of ["1", "true", "TRUE", "on", "yes", " true "]) {
+      assert.equal(
+        informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: value }),
+        true,
+        `${JSON.stringify(value)} should enable the feature`,
+      );
+    }
+  });
+
+  test("with the flag off the prompt carries none of the new behavior", () => {
+    // The whole point of the flag: someone comparing pre- and post-change
+    // behavior has to be comparing the same prompt, not a nearly-identical one.
+    const transcript = [
+      turn("consultant", "What's the towing capacity you need?"),
+      turn("customer", "I honestly haven't thought about it."),
+      turn("consultant", "Which trim were you looking at?"),
+    ];
+    const off = buildCustomerReplyPrompt(PERSONA, transcript, "advanced", 1, "", false);
+    for (const marker of [
+      "HOW MUCH OF YOURSELF YOU HAND OVER",
+      "LAYER ONE",
+      "LAYER TWO",
+      "LAYER THREE",
+      "Nobody has established any of this yet",
+      "memorized the catalogue",
+    ]) {
+      assert.ok(!off.includes(marker), `flag-off prompt must not contain "${marker}"`);
+    }
+  });
+
+  test("the flag-off prompt survives intact inside the flag-on one", () => {
+    // Additive means additive: every line the old prompt had is still there in
+    // the same order, with the new material appended rather than interleaved.
+    const transcript = [
+      turn("customer", "I'm just having a look at the sports cars."),
+      turn("consultant", "Which trim did you have in mind?"),
+    ];
+    const offPrefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 1, false);
+    const onPrefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 1, true);
+    assert.ok(onPrefix.startsWith(offPrefix));
+
+    const offBlock = buildTurnStateBlock(transcript, false);
+    const onBlock = buildTurnStateBlock(transcript, true);
+    assert.ok(onBlock.startsWith(offBlock), "gate lines must be appended after the existing state lines");
+    assert.ok(onBlock.length > offBlock.length);
+  });
+
+  test("turning it on is purely additive: nothing that was there is removed", () => {
+    const off = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, false);
+    const on = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, true);
+    assert.ok(on.startsWith(off), "the flag-on prefix must extend the flag-off prefix, not rewrite it");
+    assert.ok(on.length > off.length);
+  });
+
+  test("it reaches every difficulty, escalation tier, and the demo path", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        assert.match(
+          buildCustomerReplyPrompt(PERSONA, [], difficulty, tier, "", true),
+          /HOW MUCH OF YOURSELF YOU HAND OVER, AND WHEN/,
+          `${difficulty}/tier ${tier} must inherit the layer rules`,
+        );
+      }
+    }
+  });
+
+  test("it lives in the cacheable stable prefix, after the rules it has to defer to", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2, true);
+    assert.match(prefix, /HOW MUCH OF YOURSELF YOU HAND OVER/);
+    assert.ok(
+      prefix.indexOf("FOLLOW A REDIRECT BACK TO DISCOVERY") < prefix.indexOf("HOW MUCH OF YOURSELF YOU HAND OVER"),
+      "the layer rules must come after the responsiveness rules they must not override",
+    );
+  });
+});
+
+describe("information layers - the three layers", () => {
+  const rules = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, true);
+
+  test("layer one is volunteered readily", () => {
+    assert.match(rules, /LAYER ONE, THE THINGS YOU LEAD WITH/);
+    assert.match(rules, /This costs you nothing/);
+    assert.match(rules, /Volunteer it early and readily/);
+    assert.match(rules, /Being cagey about Layer One is not being guarded, it is being annoying/);
+  });
+
+  test("layer two opens to a specific question, not a generic prompt", () => {
+    assert.match(rules, /LAYER TWO, THE THINGS SOMEONE HAS TO ASK FOR/);
+    assert.match(rules, /"Tell me more", "anything else\?"/);
+    assert.match(rules, /are not keys to this layer/);
+    assert.match(rules, /it picks up something specific you actually said and asks about that thing/);
+    // Once earned, it must actually open. A layer that never opens is just a
+    // stonewall with extra steps.
+    assert.match(rules, /do not make them ask three times for something they have already earned once/);
+  });
+
+  test("layer three is gated on earned trust and closed by a premature pitch", () => {
+    assert.match(rules, /LAYER THREE, THE THINGS YOU DO NOT TELL STRANGERS/);
+    assert.match(rules, /money trouble, a decision you regret, a time you got taken advantage of/);
+    assert.match(rules, /roughly two or three questions/);
+    assert.match(rules, /they have NOT jumped to selling you something/);
+    assert.match(rules, /If they pitch, recommend, or start steering you toward a product before they have done that, the door closes/);
+  });
+
+  test("a revealed layer three is said once, not turned into a refrain", () => {
+    assert.match(rules, /say it once, plainly/);
+    assert.match(rules, /Do not re-announce it every turn afterward/);
+  });
+
+  test("guardrail: a closed layer is never an excuse for a non-answer", () => {
+    assert.match(rules, /WHILE A LAYER IS STILL CLOSED, YOU ARE STILL HONEST/);
+    assert.match(rules, /This is not permission to stonewall, deflect, or answer with nothing/);
+    assert.match(rules, /you give them the true but shallower version of it/);
+    assert.match(rules, /these layers govern HOW MUCH you say and WHEN, never WHETHER you engage/);
+    assert.match(rules, /never a reason to give a non-answer, to change the subject, or to bounce their question back/);
+  });
+
+  test("the gate is never narrated out loud", () => {
+    assert.match(rules, /NEVER NARRATE ANY OF THIS/);
+    assert.match(rules, /do not say they have not earned it/);
+    assert.match(rules, /You do not know you have layers/);
+    assert.match(rules, /Do this silently/);
+  });
+
+  test("guardrail: it does not soften the customer or name a scenario", () => {
+    // It has to work for every vertical, so it must sort whatever persona it was
+    // handed rather than reference one.
+    for (const word of ["vehicle", "SUV", "dealership", "mortgage", "insurance"]) {
+      assert.ok(
+        !new RegExp(`\\b${word}\\b`, "i").test(rules.slice(rules.indexOf("HOW MUCH OF YOURSELF"))),
+        `the layer rules must not name a vertical, found "${word}"`,
+      );
+    }
+  });
+});
+
+describe("product alignment gate - reaches the volatile tail only when flagged on", () => {
+  const early = [
+    turn("customer", "I'm looking at that convertible in the window."),
+    turn("consultant", "Great choice. Which trim were you thinking, the base or the fully loaded one?"),
+  ];
+
+  test("with the flag off, the gate contributes nothing", () => {
+    const block = buildTurnStateBlock(early, false);
+    assert.ok(!block.includes("Nobody has established"));
+    assert.ok(!block.includes("you are the buyer, not the person who memorized the catalogue"));
+  });
+
+  test("with the flag on, the unestablished basics are named", () => {
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Nobody has established any of this yet: what you actually need it for/);
+    assert.match(block, /who else this has to work for besides you/);
+    assert.match(block, /why you are doing this at all right now/);
+    assert.match(block, /what you are worried about or what went wrong last time/);
+  });
+
+  test("a feature dive before the basics produces an in-character redirect, not an announcement", () => {
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Which trim were you thinking, the base or the fully loaded one\?/);
+    assert.match(block, /You are the buyer, not the person who memorized the catalogue/);
+    assert.match(block, /the honest answer is usually that you do not know/);
+    assert.match(block, /puts the conversation back on ground you can speak to/);
+    assert.match(block, /do not lecture them about asking the wrong question/);
+    // The customer must never say the quiet part out loud.
+    assert.match(block, /Never say out loud that something has to happen first/);
+    assert.match(block, /never announce an order to this conversation/);
+  });
+
+  test("the gate never overrides the standing duty to answer the live question", () => {
+    // buildDirectQuestionLines still demands a real answer in the same block, so
+    // the gate has to be compatible with it rather than contradict it.
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Answering THAT is your job this turn/);
+    assert.match(block, /That is a real answer to their question, not a dodge/);
   });
 });
 

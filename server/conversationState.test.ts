@@ -6,8 +6,10 @@ import {
   DEFLECTION_STOP_THRESHOLD,
   SEQUENCING_STOP_THRESHOLD,
   TRIVIAL_GAP_FRACTION,
+  buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
   hasCustomerAcceptedProposal,
@@ -814,5 +816,148 @@ describe("Rule G: derivation is pure and additive", () => {
       ),
       [],
     );
+  });
+});
+
+describe("product alignment gate: the four basics", () => {
+  // A conversation where the rep has actually done discovery. Each of the four
+  // is asked AND answered, which is what "established" means here.
+  const fullDiscovery = [
+    "c: I'm in the market for something bigger.",
+    "r: What will you be using it for, mostly?",
+    "c: Mostly hauling gear out to job sites during the week.",
+    "r: Who else is going to be riding in it?",
+    "c: My two kids on the weekends, and my wife takes it sometimes.",
+    "r: What's driving the change right now?",
+    "c: The old one finally gave out on me last month and I'm worried about ending up with another money pit.",
+  ];
+
+  test("an unasked basic is not established", () => {
+    const gate = deriveAlignmentGate(t("c: I'm looking at that convertible in the window."));
+    assert.equal(gate.useCase, false);
+    assert.equal(gate.whoElse, false);
+    assert.equal(gate.motivation, false);
+    assert.equal(gate.concern, false);
+    assert.equal(gate.satisfied, false);
+  });
+
+  test("asking without getting an answer establishes nothing", () => {
+    const gate = deriveAlignmentGate(t("r: What will you be using it for?"));
+    assert.equal(gate.useCase, false);
+  });
+
+  test("a one-word answer does not count as having answered", () => {
+    assert.equal(deriveAlignmentGate(t("r: What will you be using it for?", "c: Stuff.")).useCase, false);
+    assert.equal(
+      deriveAlignmentGate(t("r: What will you be using it for?", "c: Getting to work and back mostly.")).useCase,
+      true,
+    );
+  });
+
+  test("all four asked and answered satisfies the gate", () => {
+    const gate = deriveAlignmentGate(t(...fullDiscovery));
+    assert.deepEqual(
+      { useCase: gate.useCase, whoElse: gate.whoElse, motivation: gate.motivation, concern: gate.concern },
+      { useCase: true, whoElse: true, motivation: true, concern: true },
+    );
+    assert.equal(gate.satisfied, true);
+    // A conversation that got there reads exactly as it did before the gate existed.
+    assert.deepEqual(buildAlignmentGateLines(gate), []);
+  });
+
+  test("a concern only counts when the CUSTOMER names it", () => {
+    assert.equal(deriveAlignmentGate(t("r: Any concerns about reliability?", "c: Not really, no.")).concern, false);
+    assert.equal(
+      deriveAlignmentGate(t("r: How's it been going?", "c: Honestly I'm nervous about getting burned again.")).concern,
+      true,
+    );
+  });
+
+  test("the rendered lines name exactly what is still missing", () => {
+    const partial = deriveAlignmentGate(
+      t("r: What will you be using it for?", "c: Getting the kids to school and back, mostly."),
+    );
+    const rendered = buildAlignmentGateLines(partial).join("\n");
+    assert.ok(!rendered.includes("what you actually need it for"), "an established basic must not be listed as missing");
+    assert.match(rendered, /why you are doing this at all right now/);
+    assert.match(rendered, /what you are worried about or what went wrong last time/);
+  });
+
+  test("the customer is never told to announce the gate", () => {
+    const rendered = buildAlignmentGateLines(deriveAlignmentGate(t("c: Just browsing."))).join("\n");
+    assert.match(rendered, /Never say out loud that something has to happen first/);
+    assert.match(rendered, /never announce an order to this conversation/);
+    assert.match(rendered, /never hint that you are withholding anything/);
+    assert.match(rendered, /not as a rule you are following/);
+  });
+});
+
+describe("product alignment gate: the feature dive", () => {
+  test("a spec question before the basics is caught and quoted", () => {
+    const gate = deriveAlignmentGate(
+      t("c: I'm looking at that convertible in the window.", "r: Which trim were you thinking, the base or the fully loaded one?"),
+    );
+    assert.equal(gate.featureDive, "Which trim were you thinking, the base or the fully loaded one?");
+    const rendered = buildAlignmentGateLines(gate).join("\n");
+    assert.match(rendered, /You are the buyer, not the person who memorized the catalogue/);
+    assert.match(rendered, /the honest answer is usually that you do not know/);
+    assert.match(rendered, /not a dodge/);
+  });
+
+  test("it is generic by shape, not an enumerated topic list", () => {
+    // The redirect bug was caused by naming topics. These are different products
+    // in different verticals and none of them is named anywhere in the module.
+    for (const ask of [
+      "r: What towing capacity do you need?",
+      "r: How much square footage are you after?",
+      "r: Which plan tier makes sense for you?",
+      "r: What kind of processor do you want in it?",
+      "r: Were you thinking about the sport package?",
+    ]) {
+      assert.ok(deriveAlignmentGate(t("c: Just having a look.", ask)).featureDive, `${ask} should read as a feature dive`);
+    }
+  });
+
+  test("stating a spec is not diving into one", () => {
+    const gate = deriveAlignmentGate(t("c: Just having a look.", "r: The base trim comes with all-wheel drive."));
+    assert.equal(gate.featureDive, null);
+  });
+
+  test("once the basics are established, feature talk is fine", () => {
+    const gate = deriveAlignmentGate(
+      t(
+        "c: I'm in the market for something bigger.",
+        "r: What will you be using it for, mostly?",
+        "c: Mostly hauling gear out to job sites during the week.",
+        "r: Who else is going to be riding in it?",
+        "c: My two kids on the weekends, and my wife takes it sometimes.",
+        "r: What's driving the change right now?",
+        "c: The old one gave out and I'm worried about ending up with another money pit.",
+        "r: Which trim were you thinking?",
+      ),
+    );
+    assert.equal(gate.satisfied, true);
+    assert.equal(gate.featureDive, null);
+    assert.deepEqual(buildAlignmentGateLines(gate), []);
+  });
+
+  test("only the CURRENT turn's dive is flagged, not an old one", () => {
+    const gate = deriveAlignmentGate(
+      t("c: Just having a look.", "r: Which trim were you thinking?", "c: I hadn't got that far."),
+    );
+    assert.equal(gate.featureDive, null);
+  });
+});
+
+describe("product alignment gate: derivation is pure and additive", () => {
+  test("the same transcript yields the same gate", () => {
+    const transcript = t("c: Just having a look.", "r: Which trim were you thinking?");
+    assert.deepEqual(deriveAlignmentGate(transcript), deriveAlignmentGate(transcript));
+  });
+
+  test("it does not disturb the existing conversation state", () => {
+    const transcript = t("c: Just having a look.", "r: Which trim were you thinking?");
+    deriveAlignmentGate(transcript);
+    assert.deepEqual(buildConversationStateLines(deriveConversationState(transcript)), []);
   });
 });
