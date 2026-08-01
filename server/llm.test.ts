@@ -2082,6 +2082,41 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - answer discipline", () => {
   });
 });
 
+// Reported from a live session: personas asking the consultant to physically
+// demonstrate things. This is a spoken roleplay, so there is nothing to
+// demonstrate and the request goes nowhere.
+describe("CUSTOMER_RESPONSIVENESS_RULES - no physical demonstration requests", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("the rule states the conversation is spoken, not in person", () => {
+    assert.match(rules, /THIS IS A SPOKEN CONVERSATION, NOT AN IN-PERSON VISIT/);
+    assert.match(rules, /Nobody is standing next to a vehicle/);
+  });
+
+  test("it forbids asking for a demonstration or any physical action", () => {
+    assert.match(rules, /Never ask the consultant to demonstrate, show you hands-on/);
+    assert.match(rules, /installing a car seat, buckling a seatbelt, running the windshield wipers/);
+  });
+
+  test("it points the persona at the verbal version of the same question", () => {
+    assert.match(rules, /how does the seatbelt system work with a rear-facing car seat/);
+    assert.match(rules, /"show me how to buckle it" is not/);
+    assert.match(rules, /are the wipers automatic/);
+  });
+
+  test("it reaches the assembled prompt on every difficulty and escalation tier", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "expert"] as const) {
+      for (const escalation of [0, 1, 2]) {
+        assert.match(
+          buildCustomerReplyStablePrefix(PERSONA, difficulty, escalation),
+          /THIS IS A SPOKEN CONVERSATION, NOT AN IN-PERSON VISIT/,
+          `${difficulty} / escalation ${escalation}`,
+        );
+      }
+    }
+  });
+});
+
 // The reported must-pass shape, as a real voice transcript rather than a tidy
 // paraphrase of one: one unpunctuated run-on per turn, no question marks. Both
 // layers have to be in force on the customer's next turn -- the static rule and
