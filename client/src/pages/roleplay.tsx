@@ -20,6 +20,8 @@ import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { getAvatarUrl } from "@/lib/avatars";
 import { useVoiceConversation } from "@/hooks/use-voice-conversation";
+import { useVapiVoiceConversation } from "@/hooks/use-vapi-voice-conversation";
+import { isVapiPilotActive, vapiPilotConfigFromEnv } from "@/lib/vapiPilot";
 import { Volume2, Send, Loader2, AlertCircle, RotateCcw, Mic, MicOff, User, Save, XCircle } from "lucide-react";
 import type { Session, Scenario, TranscriptMessage } from "@shared/schema";
 
@@ -97,19 +99,6 @@ export default function RolePlay() {
   });
   voiceRef.current = voice;
 
-  const {
-    draft,
-    setDraft,
-    voiceMode,
-    speechSupported,
-    micActive,
-    voiceStatus,
-    micLabel,
-    handleMicTap,
-    handleVoiceModeToggle,
-    handleSend,
-  } = voice;
-
   const { data: session, isLoading } = useQuery<Session>({
     queryKey: ["/api/sessions", id],
   });
@@ -128,6 +117,48 @@ export default function RolePlay() {
     },
   });
   const avatarUrl = getAvatarUrl(scenario?.slug);
+
+  // ---- Vapi voice pilot (ONE scenario, feature-flagged) --------------------
+  // The pilot is on only when all of isVapiPilotActive()'s conditions hold: the
+  // flag (env var or ?vapi=1), the pilot scenario slug, and configured keys. Any
+  // other scenario, or a missing flag/key, and every line below is a no-op — the
+  // default engine above stays in charge exactly as it is today.
+  //
+  // Both hooks are called on every render because React forbids conditional hook
+  // calls. useVapiVoiceConversation is written to be completely inert while
+  // `enabled` is false (no Vapi client, no mic, no listeners), so calling it for
+  // scenarios that are not in the pilot costs nothing and changes nothing.
+  const vapiConfig = vapiPilotConfigFromEnv(import.meta.env as unknown as Record<string, unknown>);
+  const vapiPilotActive = isVapiPilotActive({
+    scenarioSlug: scenario?.slug,
+    envFlag: import.meta.env.VITE_VAPI_PILOT_ENABLED,
+    search: typeof window !== "undefined" ? window.location.search : "",
+    config: vapiConfig,
+  });
+  const vapiVoice = useVapiVoiceConversation({
+    enabled: vapiPilotActive,
+    config: vapiConfig,
+    // Typed replies still go through the normal transport on the pilot path, so
+    // the text box keeps working while voice is handled by Vapi.
+    send: (content, withAudio) => sendMessage.mutate({ content, withAudio }),
+    isSending: sendMessage.isPending,
+  });
+
+  // The single selection point. Everything the UI reads comes from here, so the
+  // JSX below is identical on both paths.
+  const activeVoice = vapiPilotActive ? vapiVoice : voice;
+  const {
+    draft,
+    setDraft,
+    voiceMode,
+    speechSupported,
+    micActive,
+    voiceStatus,
+    micLabel,
+    handleMicTap,
+    handleVoiceModeToggle,
+    handleSend,
+  } = activeVoice;
 
   const [scoringFailed, setScoringFailed] = useState(false);
   const [showIncompleteModal, setShowIncompleteModal] = useState(false);
@@ -187,7 +218,15 @@ export default function RolePlay() {
     },
   });
 
-  const transcript: TranscriptMessage[] = session ? JSON.parse(session.transcript) : [];
+  const persistedTranscript: TranscriptMessage[] = session ? JSON.parse(session.transcript) : [];
+  // On the pilot path the conversation happens inside the Vapi call and is not
+  // written to the session, so the live turns are appended for display only. This
+  // is what makes a cutoff visible: if the rep's sentence appears clipped here,
+  // the transcriber ended their turn early. `vapiTranscript` is empty whenever the
+  // pilot is off, so this reduces to today's behaviour for everyone else.
+  const transcript: TranscriptMessage[] = vapiPilotActive
+    ? [...persistedTranscript, ...vapiVoice.vapiTranscript]
+    : persistedTranscript;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -326,6 +365,11 @@ export default function RolePlay() {
         </div>
 
         <div className="border-t p-3 space-y-3 shrink-0">
+          {vapiPilotActive && vapiVoice.errorMessage && (
+            <p className="text-xs text-destructive" data-testid="text-vapi-pilot-error">
+              {vapiVoice.errorMessage}
+            </p>
+          )}
           {voiceStatus && (
             <p className="text-xs text-muted-foreground" data-testid="text-voice-status">
               {voiceStatus}
