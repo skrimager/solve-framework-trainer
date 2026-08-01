@@ -635,6 +635,17 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     assert.match(rendered, /still be guarded about how much you give them/);
     assert.match(rendered, /AFTER you have answered/);
   });
+
+  test("the rendered line treats answering as the whole turn, not a preamble to a question", () => {
+    // The old wording invited "a thought or a question of your own" on every
+    // turn the rep asked something, which is most of them, so the customer
+    // volleyed a question back almost every time.
+    const rendered = questionLines("r: What are you driving now?");
+    assert.match(rendered, /Answering is usually the whole turn/);
+    assert.match(rendered, /a reply that stops once the answer is given is a complete reply/);
+    assert.match(rendered, /a question of your own if you genuinely have one/);
+    assert.match(rendered, /never as a reflex to hand the turn back/);
+  });
 });
 
 describe("Rule G: narrowing questions demand a committed specific", () => {

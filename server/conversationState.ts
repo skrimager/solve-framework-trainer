@@ -963,7 +963,7 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   const quoted = question.asks.map((a) => `"${a}"`).join(" ");
 
   lines.push(
-    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, and you may add a thought or a question of your own AFTER you have answered, but never instead of answering.`,
+    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them. Answering is usually the whole turn, and a reply that stops once the answer is given is a complete reply. You may add a thought of your own AFTER you have answered, or a question of your own if you genuinely have one, but never instead of answering and never as a reflex to hand the turn back.`,
   );
 
   if (question.narrowing) {

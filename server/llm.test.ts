@@ -2002,6 +2002,84 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   });
 });
 
+// The customer ended nearly every turn with a question back at the rep. The
+// rules only ever said questions were permitted, and three separate
+// instructions pushed toward motion without saying a statement counts as
+// motion, so a trailing question satisfied all of them at once.
+describe("CUSTOMER_RESPONSIVENESS_RULES - question discipline", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("a turn is allowed to end without a question", () => {
+    assert.match(rules, /A QUESTION IS NOT HOW YOU END A TURN/);
+    assert.match(rules, /Asking is the exception in this conversation, not its rhythm/);
+    assert.match(rules, /A reply that ends on a period is a complete reply/);
+    assert.match(rules, /makes you an interrogator rather than someone weighing a decision/);
+  });
+
+  test("the worked example ends on a statement and names the staple-on as the error", () => {
+    assert.match(rules, /My old one was closer to 18, so that by itself would save me something/);
+    assert.match(rules, /That is the whole reply/);
+    assert.match(rules, /Do not staple "so what else do you have in that range\?" onto the end of it/);
+    assert.match(rules, /is padding, not curiosity/);
+  });
+
+  test("a question is warranted by genuine curiosity, never manufactured", () => {
+    assert.match(rules, /Ask when you would really ask/);
+    assert.match(rules, /genuinely surprised you, worried you, or does not add up/);
+    assert.match(rules, /Do not manufacture them/);
+  });
+
+  test("the fix asks for variation, not a replacement cadence", () => {
+    // A fixed "ask every Nth turn" is the same robotic artifact with different
+    // arithmetic, so the rule has to rule that out as explicitly as it rules
+    // out asking every turn.
+    assert.match(rules, /do not ration them on a schedule/);
+    assert.match(rules, /there is no quota to fill and no every-other-turn rhythm to hit/);
+    assert.match(rules, /run several turns at a stretch with no customer question in them at all/);
+    assert.match(rules, /Let it vary the way it really would/);
+  });
+
+  test("advancing the conversation is decoupled from asking", () => {
+    assert.match(rules, /MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION/);
+    assert.match(rules, /none of that means "ask something"/);
+    assert.match(rules, /conceding a point, revealing a detail you had been holding back/);
+    assert.match(rules, /only when the honest version of your next turn happens to be one/);
+  });
+
+  test("guardrail: no existing question allowance is withdrawn", () => {
+    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
+    assert.match(rules, /None of that changes/);
+    assert.match(rules, /answer first, then ask/);
+    assert.match(rules, /Never ask instead of answering/);
+  });
+
+  test("it reaches every scenario, difficulty, escalation tier, and the demo path", () => {
+    // Same composition point the redirect rule relies on: routes.ts and
+    // demoV2Routes.ts both build their prompt from the stable prefix.
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        assert.match(
+          buildCustomerReplyPrompt(PERSONA, [], difficulty, tier),
+          /A QUESTION IS NOT HOW YOU END A TURN/,
+          `${difficulty}/tier ${tier} must inherit question discipline`,
+        );
+      }
+    }
+  });
+
+  test("it lives in the cacheable stable prefix", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.match(prefix, /A QUESTION IS NOT HOW YOU END A TURN/);
+    assert.match(prefix, /MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION/);
+  });
+
+  test("guardrail: the redirect generalization is untouched", () => {
+    assert.match(rules, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
+    assert.match(rules, /There is no fixed list of topics this covers/);
+    assert.match(rules, /APPLY THIS TEST ON EVERY SINGLE TURN/);
+  });
+});
+
 describe("buildTurnStateBlock - the live question is pinned into the volatile tail", () => {
   test("the question is quoted and answering it is demanded", () => {
     const block = buildTurnStateBlock([
