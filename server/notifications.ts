@@ -11,6 +11,12 @@ import { APP_URL } from "./stripe";
 // could not be sent.
 
 const RESEND_API_URL = "https://api.resend.com/emails";
+const RESEND_AUDIENCES_URL = "https://api.resend.com/audiences";
+// Dedicated audience for Message Coach leads, kept separate from any other
+// lead source so a future campaign can target this list specifically without
+// mixing in demo signups or the general contact form. Created once via the
+// Resend dashboard/API; the id is stable and safe to hardcode like a Price ID.
+const MESSAGE_COACH_AUDIENCE_ID = "2175db48-4025-42d0-a0ec-af3b7d4f622d";
 const FROM_ADDRESS = "SOLVE Framework <notifications@solveframework.com>";
 const TO_ADDRESS = "hello@solveframework.com";
 // Inbound-lead mail (welcome + day 3/7 drip) is a personal note "from Wade", so
@@ -412,6 +418,59 @@ export async function sendDemoVerificationCode(email: string, code: string): Pro
     return true;
   } catch (err) {
     console.warn(`[notifications] Failed to send demo verification code to ${email}:`, err);
+    return false;
+  }
+}
+
+// Adds a Message Coach lead to the dedicated "Message Coach Leads" Resend
+// audience. Called once, right after a new message_coach_signups row is
+// created for an email (both the free-score and paid-checkout entry points
+// share that one row-creation site), so every signup that hands over an email
+// gets synced regardless of whether they end up scoring for free or paying.
+//
+// Best-effort and never throws: a Resend outage or missing key must never
+// block a score or a checkout. The caller decides whether to persist success
+// (see messageCoachSignups.resendSyncedAt) so a failed sync can be retried
+// later without re-deriving who still needs it.
+//
+// Resend's contacts endpoint is idempotent per (audience, email) — POSTing an
+// email already on the list updates it rather than creating a duplicate, so
+// this is safe to call more than once for the same address.
+export async function addMessageCoachLeadToAudience(
+  email: string,
+  name: string | null,
+): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[notifications] RESEND_API_KEY is not set; skipping Message Coach audience sync.");
+    return false;
+  }
+
+  const [firstName, ...rest] = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  const lastName = rest.join(" ") || undefined;
+
+  try {
+    const res = await getFetch()(`${RESEND_AUDIENCES_URL}/${MESSAGE_COACH_AUDIENCE_ID}/contacts`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        first_name: firstName || undefined,
+        last_name: lastName,
+        unsubscribed: false,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[notifications] Resend returned ${res.status} adding ${email} to Message Coach audience: ${detail}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to add ${email} to Message Coach audience:`, err);
     return false;
   }
 }

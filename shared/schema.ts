@@ -852,6 +852,10 @@ export const messageCoachSignups = pgTable("message_coach_signups", {
   name: text("name"),
   createdAt: text("created_at").notNull(),
   freeScoreUsedAt: text("free_score_used_at"), // ISO timestamp; null until the free score is spent
+  // ISO timestamp; null until the email is successfully added to the Resend
+  // "Message Coach Leads" audience. Never set for a suppressed email. Sync is
+  // best-effort and this column lets a later job retry anyone still null.
+  resendSyncedAt: text("resend_synced_at"),
 });
 
 export const insertMessageCoachSignupSchema = createInsertSchema(messageCoachSignups).omit({ id: true });

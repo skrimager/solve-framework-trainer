@@ -8,6 +8,7 @@ import {
   scoreOutreachMessage,
   createMessageCoachCheckout,
   findPurchaseForCheckoutSession,
+  getOrCreateMessageCoachSignup,
   type MessageCoachResponder,
 } from "./messageCoach";
 
@@ -130,15 +131,7 @@ export function registerMessageCoachRoutes(
     const email = normalizeEmail(parsed.data.email);
     const name = parsed.data.name ?? null;
 
-    let signup = await storage.getMessageCoachSignupByEmail(email);
-    if (!signup) {
-      signup = await storage.createMessageCoachSignup({
-        email,
-        name,
-        createdAt: new Date().toISOString(),
-        freeScoreUsedAt: null,
-      });
-    }
+    const signup = await getOrCreateMessageCoachSignup(email, name);
 
     // --- Paid path: the visitor is quoting a completed Checkout Session.
     if (paidCheckoutSessionId) {
@@ -243,15 +236,7 @@ export function registerMessageCoachRoutes(
     }
     const email = normalizeEmail(parsed.data.email);
 
-    let signup = await storage.getMessageCoachSignupByEmail(email);
-    if (!signup) {
-      signup = await storage.createMessageCoachSignup({
-        email,
-        name: parsed.data.name ?? null,
-        createdAt: new Date().toISOString(),
-        freeScoreUsedAt: null,
-      });
-    }
+    const signup = await getOrCreateMessageCoachSignup(email, parsed.data.name ?? null);
 
     try {
       const url = await createMessageCoachCheckout({ signupId: signup.id, email });
