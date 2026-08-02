@@ -4,6 +4,8 @@ import type Stripe from "stripe";
 import type { ScoreCache, InsertScoreCache } from "@shared/schema";
 import { storage } from "./storage";
 import { getStripe, APP_URL } from "./stripe";
+import { addMessageCoachLeadToAudience } from "./notifications";
+import type { MessageCoachSignup } from "@shared/schema";
 
 // Message Coach v1 — scores, diagnoses and rewrites a single outreach message.
 //
@@ -37,6 +39,49 @@ export const MESSAGE_COACH_PAID_KIND = "message_coach_paid_score";
 
 // Shown to the buyer on the Stripe Checkout page and on their receipt.
 const MESSAGE_COACH_PRODUCT_NAME = "SOLVE Message Coach Score and Rewrite";
+
+// Finds or creates the message_coach_signups row for an email, then syncs a
+// newly created signup to the "Message Coach Leads" Resend audience. Both
+// route entry points (/score and /checkout) call this instead of duplicating
+// storage.getMessageCoachSignupByEmail / createMessageCoachSignup, so the sync
+// fires exactly once per unique email regardless of which entry point saw it
+// first.
+//
+// Suppressed emails (anyone in email_suppressions, e.g. a prior unsubscribe or
+// bounce) are never added to the audience, but the signup row is still
+// created normally — suppression only gates the marketing-list sync, not the
+// product itself.
+//
+// The sync is fire-and-forget from the caller's point of view: it never
+// throws, and a Resend failure leaves resendSyncedAt null for a later retry
+// rather than failing the score or checkout request.
+export async function getOrCreateMessageCoachSignup(
+  email: string,
+  name: string | null,
+): Promise<MessageCoachSignup> {
+  let signup = await storage.getMessageCoachSignupByEmail(email);
+  if (signup) return signup;
+
+  signup = await storage.createMessageCoachSignup({
+    email,
+    name,
+    createdAt: new Date().toISOString(),
+    freeScoreUsedAt: null,
+    resendSyncedAt: null,
+  });
+
+  const suppressed = await storage.getEmailSuppression(email);
+  if (!suppressed) {
+    const synced = await addMessageCoachLeadToAudience(email, name);
+    if (synced) {
+      signup = (await storage.updateMessageCoachSignup(signup.id, {
+        resendSyncedAt: new Date().toISOString(),
+      })) ?? signup;
+    }
+  }
+
+  return signup;
+}
 
 // Idempotency keys are namespaced before being written to billing_events, the
 // same discipline as DEMO_EVENT_KEY_PREFIX. Three handlers now run for every

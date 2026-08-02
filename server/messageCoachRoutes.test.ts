@@ -14,6 +14,7 @@ import type { Server } from "node:http";
 
 import { storage } from "./storage";
 import { __setStripeForTests } from "./stripe";
+import { __setFetchForTests } from "./notifications";
 import {
   registerMessageCoachRoutes,
   messageCoachEnabled,
@@ -40,6 +41,10 @@ let scores: MessageCoachScore[];
 let purchases: MessageCoachPaidPurchase[];
 let scoreCache: ScoreCache[];
 let users: User[];
+let suppressedEmails: Set<string>;
+// Every Resend audience-contacts call the route caused, so tests can assert
+// on sync behaviour without hitting the network.
+let audienceSyncCalls: { url: string; body: any }[];
 // Every prompt the route caused. Length is the assertion that matters most:
 // a refused request must never reach the model.
 let modelCalls: string[];
@@ -57,6 +62,19 @@ function patchStorage(): void {
   scoreCache = [];
   users = [];
   modelCalls = [];
+  suppressedEmails = new Set();
+  audienceSyncCalls = [];
+
+  (storage as any).getEmailSuppression = async (email: string) =>
+    suppressedEmails.has(email) ? { id: 1, email, suppressedAt: "2026-01-01T00:00:00.000Z" } : undefined;
+
+  __setFetchForTests((async (url: string, init?: any) => {
+    if (url.includes("/audiences/") && url.endsWith("/contacts")) {
+      audienceSyncCalls.push({ url, body: JSON.parse(init?.body ?? "{}") });
+      return { ok: true, text: async () => "" } as Response;
+    }
+    return { ok: true, text: async () => "" } as Response;
+  }) as any);
 
   (storage as any).getMessageCoachSignupByEmail = async (email: string) =>
     signups.find((s) => s.email === email);
@@ -161,12 +179,15 @@ describe("Message Coach routes", () => {
     patchStorage();
     seatAnswer = { ok: false, status: 402, message: "No active seat" };
     process.env.MESSAGE_COACH_ENABLED = "true";
+    process.env.RESEND_API_KEY = "re_test_key";
     __setStripeForTests(null);
   });
 
   afterEach(() => {
     delete process.env.MESSAGE_COACH_ENABLED;
     delete process.env.STRIPE_SECRET_KEY;
+    delete process.env.RESEND_API_KEY;
+    __setFetchForTests(null);
   });
 
   function post(path: string, body: unknown) {
@@ -403,6 +424,83 @@ describe("Message Coach routes", () => {
   // =========================================================================
   // The paid score
   // =========================================================================
+
+  describe("Resend audience sync (Message Coach Leads)", () => {
+    test("a new signup via the free path is synced to the Message Coach Leads audience", async () => {
+      const res = await post("/api/message-coach/score", {
+        name: "Dana Lee",
+        email: "dana@example.com",
+        message: "Are you ready to sell your house?",
+      });
+      assert.equal(res.status, 200);
+      assert.equal(audienceSyncCalls.length, 1);
+      assert.match(audienceSyncCalls[0].url, /\/audiences\/.+\/contacts$/);
+      assert.equal(audienceSyncCalls[0].body.email, "dana@example.com");
+      assert.equal(audienceSyncCalls[0].body.first_name, "Dana");
+      assert.equal(audienceSyncCalls[0].body.last_name, "Lee");
+      assert.equal(audienceSyncCalls[0].body.unsubscribed, false);
+      assert.ok(signups[0].resendSyncedAt, "resendSyncedAt must be stamped on success");
+    });
+
+    test("a repeat request for the same email does not sync again", async () => {
+      await post("/api/message-coach/score", { email: "repeat@example.com", message: "first" });
+      assert.equal(audienceSyncCalls.length, 1);
+
+      // Second call from the same email hits the 402 paywall, not a new signup.
+      await post("/api/message-coach/score", { email: "repeat@example.com", message: "second" });
+      assert.equal(audienceSyncCalls.length, 1, "must not re-sync an already-synced signup");
+    });
+
+    test("a suppressed email is never added to the audience, but the signup is still created", async () => {
+      suppressedEmails.add("optedout@example.com");
+      const res = await post("/api/message-coach/score", {
+        email: "optedout@example.com",
+        message: "a message",
+      });
+      assert.equal(res.status, 200, "suppression must not block the product itself");
+      assert.equal(audienceSyncCalls.length, 0, "a suppressed email must never be synced");
+      assert.equal(signups.length, 1);
+      assert.equal(signups[0].resendSyncedAt, null);
+    });
+
+    test("a checkout-path signup (no prior free score) is also synced", async () => {
+      process.env.STRIPE_SECRET_KEY = "sk_test_dummy";
+      __setStripeForTests({
+        checkout: {
+          sessions: {
+            create: async () => ({ id: "cs_new", url: "https://checkout.stripe.com/c/pay/cs_new" }),
+          },
+        },
+      });
+      (storage as any).createMessageCoachPaidPurchase = async (row: any) => {
+        const created = { id: purchases.length + 1, ...row } as MessageCoachPaidPurchase;
+        purchases.push(created);
+        return created;
+      };
+
+      const res = await post("/api/message-coach/checkout", {
+        email: "buyer@example.com",
+        name: "Buyer Bob",
+      });
+      assert.equal(res.status, 200);
+      assert.equal(audienceSyncCalls.length, 1);
+      assert.equal(audienceSyncCalls[0].body.email, "buyer@example.com");
+      assert.equal(signups.length, 1);
+      assert.ok(signups[0].resendSyncedAt);
+    });
+
+    test("a Resend outage never blocks the score response", async () => {
+      __setFetchForTests((async () => {
+        throw new Error("network down");
+      }) as any);
+      const res = await post("/api/message-coach/score", {
+        email: "resilient@example.com",
+        message: "a message",
+      });
+      assert.equal(res.status, 200, "a Resend failure must not fail the score request");
+      assert.equal(signups[0].resendSyncedAt, null, "a failed sync leaves resendSyncedAt null for retry");
+    });
+  });
 
   describe("POST /api/message-coach/score, paid path", () => {
     async function spentFreeScore(email: string): Promise<MessageCoachSignup> {
