@@ -1232,6 +1232,15 @@ const CLOSE_INTENT_PATTERNS: RegExp[] = [
   /\b(?:fits?|works?) (?:for )?you (?:best|better)\b/,
   /\b(?:might |may |probably )?not (?:be able to|going to be able to) (?:give|get|find) you\b/,
   /\b(?:go|you should) (?:go )?find (?:what|something|someone|somebody)\b/,
+  // The same release said by naming the replacement rather than leaving it
+  // indefinite. "I think you should find another car dealer" was the clearest
+  // exit in the reported session and it matched nothing above, so the
+  // end-and-score checkpoint never fired and the customer carried on asking
+  // about car seats. Telling someone to find ANOTHER one of you is a dismissal
+  // whatever noun follows, so the noun is not enumerated; the exclusions are
+  // there because "let's find another way" and "we can find a different option"
+  // are the opposite of a release -- they keep the rep in the conversation.
+  /\bfind (?:another|a different|some other) (?!way\b|time\b|approach\b|angle\b|option\b|solution\b)[a-z]/,
   /\bcome (?:see|back to) me\b/,
 ];
 

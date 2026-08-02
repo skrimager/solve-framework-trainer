@@ -361,6 +361,25 @@ describe("detectCloseIntent", () => {
     assert.equal(detectCloseIntent("So the budget is the main concern for you?"), false);
     assert.equal(detectCloseIntent(""), false);
   });
+
+  test("fires on a release that names the replacement instead of leaving it vague", () => {
+    // The reported gap. "find what/something/someone" was covered; naming the
+    // thing the customer should go to instead was not, so the clearest exit in
+    // the session went undetected and the conversation stayed open.
+    assert.equal(detectCloseIntent("I think you should find another car dealer."), true);
+    assert.equal(detectCloseIntent("Honestly, go find another dealership."), true);
+    assert.equal(detectCloseIntent("You need to find another consultant who can help you."), true);
+    assert.equal(detectCloseIntent("You'd be better off to find a different provider."), true);
+    assert.equal(detectCloseIntent("I'd find some other shop for this one."), true);
+  });
+
+  test("does NOT fire when 'find another' keeps the consultant in the conversation", () => {
+    // These are the opposite of a release: the rep is still working the problem.
+    assert.equal(detectCloseIntent("Let's find another way to make this work for you."), false);
+    assert.equal(detectCloseIntent("We can find another time that suits you better."), false);
+    assert.equal(detectCloseIntent("I'll find a different option in your range."), false);
+    assert.equal(detectCloseIntent("Let me find another approach to the financing."), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
