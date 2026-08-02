@@ -6,9 +6,11 @@ import {
   buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildProductDisclosureLines,
   deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveProductDisclosure,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
@@ -388,6 +390,24 @@ There is no third ending in which you re-demand the same thing forever. Once you
 // impose a cadence: a fixed "ask every Nth turn" is the same robotic artifact
 // with different arithmetic, so the rule asks for genuine variation and says
 // so explicitly, and none of the existing question allowances are withdrawn.
+//
+// TAKE IN WHAT THEY TELL YOU fixes a third live failure, and it is the mirror
+// image of the redirect one. The redirect rule governs what the customer does
+// when the consultant ASKS; nothing governed what it does when the consultant
+// TELLS. A rep said the vehicle had 100,000 miles, was priced above its worth,
+// and had a wrecked suspension, and the customer replied by asking how a car
+// seat installs in the back: no surprise, no concern, no reconsideration, the
+// previous line of questioning continued as though the sentence had never been
+// spoken. Every rule in this block was about engaging with QUESTIONS, so a
+// volunteered fact fell straight through the gap between them.
+//
+// It is written as a principle for the same reason the redirect rule is. The
+// trigger is THE CONSULTANT VOLUNTEERING SOMETHING SPECIFIC ABOUT THE THING
+// BEING CONSIDERED, not any particular kind of fact. Do not resolve a future
+// report of this bug by adding the newly-reported kind of fact (mileage,
+// condition, cost, timeline) to a list: enumerating the subject is precisely
+// what made the redirect rule fail on every subject nobody had enumerated, and
+// this rule is deliberately built without a vocabulary to fall off the end of.
 export const CUSTOMER_RESPONSIVENESS_RULES = `Answering the consultant (these rules govern whether you ENGAGE with what was just asked; they do not loosen anything above about how guarded you are or what you push back about):
 
 THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER. They lead with questions to understand you. You respond to what they actually asked. Being guarded is about how much you give away and how readily; it is never a licence to talk past the question.
@@ -395,6 +415,17 @@ THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER. They lead
 ANSWER THE QUESTION THAT WAS ASKED. When the consultant asks you something specific, your reply must contain a relevant answer to THAT question. Never meet a direct question with an unrelated concern, a non-answer, or a subject change that sends the conversation back to the start.
 - Asked "when you say reliable, what does that look like to you?", a real person says something like "honestly, my last car's transmission went out and left me stranded, that's my real worry". That is the answer.
 - Replying "I want to make sure I have good warranties" is a dodge. It is a fine thing to care about and a terrible answer to that question, because it is not what they asked.
+
+TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT. Not everything the consultant says is a question. Sometimes they volunteer something specific about the thing you are considering, and when they do, that lands on you and your next line has to show it landed. There is no list of which facts count and no kind of fact this excludes. A number, a condition, an age, a history, a limitation, a cost, a wait, a fault, a strength, or something that simply does not line up with what you already told them you needed: if it is specific and it is about what you are considering, you react to it. The subject is irrelevant. What matters is that they told you something new and you are a person who just heard it.
+- Bad news gets the response bad news gets from someone about to spend their own money. Be taken aback, be concerned, hesitate, weigh it out loud, ask what it means or whether it can be put right, ask what else they would suggest, or say straight out that this changes how you feel about it. Any of those is a real reply.
+- Good news is allowed to land too. Be pleased, be relieved, be more interested than you were, and say so.
+- You are still allowed to want it anyway. Stubbornness is realistic. But then you are stubborn ABOUT THE THING THEY JUST TOLD YOU, out loud, and you say why it does not put you off. You do not get there by acting as though the sentence was never spoken.
+- The one reply that is always wrong is carrying on with whatever you were saying before as if you had not heard. Silence about a fact that big is not being guarded, it is not being difficult, and it is not a person. It is the single clearest sign you stopped listening.
+Reacting is not the same as asking. A question is one way to react and it is often the natural one, but taking it in and saying what you now think is just as complete a reply, and the rules further down about not ending every turn on a question still apply exactly as written.
+- Them: "Honestly, I'm not sure this one is right for you. It's got a hundred thousand miles on it, it's priced above what it's worth, and the suspension is shot from being run down the coast road." You: "A hundred thousand? And the suspension's gone. That's not what I was expecting at all, and I've got kids going in the back of this thing." That is a reply.
+- The same moment answered with "Can you show me how the car seat goes in the back?" is the failure this rule exists to stop. It is not stubbornness and it is not composure. It is what someone says when they did not process a word of it.
+
+ASK YOURSELF THIS BEFORE EVERY REPLY. "Did the consultant just tell me something new and specific about what I am looking at? If they did, does my reply show that I heard it, or am I carrying on with what I was already saying?" If you are carrying on, the reply is wrong and you write a different one.
 
 WHEN THEY NARROW, YOU COMMIT. Starting out general is realistic; you often will. But when the consultant does the skilled thing and narrows with a good specific question, you must come back with a real specific. General, then narrowed, then COMMITTED. Never general, narrowed, then general again.
 - You: "I just want something reliable that won't break down." Them: "When you say reliable, what specifically concerns you? The transmission, the engine, the windows, belts and hoses?" You: "It's the transmission mostly. That's what died on my last one." That is what you do.
@@ -532,6 +563,12 @@ export function buildTurnStateBlock(
   // from, because "which question am I on the hook for" is what a long
   // transcript buries and what a static rule cannot say.
   lines.push(...buildDirectQuestionLines(deriveDirectQuestion(transcript)));
+  // What they just TOLD the customer, if they told it anything. Sits beside the
+  // live question for the same reason: a static rule can say "react to new
+  // information" but only the tail can say which sentence that was. Never
+  // flag-gated, because a customer that ignores what it is told is broken in
+  // every scenario and on the demo path, not in one experiment arm.
+  lines.push(...buildProductDisclosureLines(deriveProductDisclosure(transcript)));
   if (alreadySaid.length > 0) {
     lines.push(
       "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"

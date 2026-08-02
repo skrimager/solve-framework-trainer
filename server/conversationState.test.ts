@@ -9,9 +9,11 @@ import {
   buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildProductDisclosureLines,
   deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveProductDisclosure,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
 } from "./conversationState";
@@ -959,5 +961,158 @@ describe("product alignment gate: derivation is pure and additive", () => {
     const transcript = t("c: Just having a look.", "r: Which trim were you thinking?");
     deriveAlignmentGate(transcript);
     assert.deepEqual(buildConversationStateLines(deriveConversationState(transcript)), []);
+  });
+});
+
+describe("Rule N: the rep volunteering something about the product", () => {
+  test("the reported failure: three disqualifying facts in one message are caught", () => {
+    const disclosure = deriveProductDisclosure(
+      t(
+        "c: I really like this Explorer. Can you show me how a car seat goes in the back?",
+        "r: Honestly, I'm not sure this Explorer is right for your family. It's got 100,000 miles on it, it's overpriced, and the suspension is blown out from being driven through the desert.",
+      ),
+    );
+    assert.ok(disclosure);
+    assert.equal(disclosure.hasFigures, true);
+    const line = buildProductDisclosureLines(disclosure).join("\n");
+    // The rep's own words are handed back, so the model reacts to what was
+    // actually said rather than to a category the code guessed at.
+    assert.match(line, /100,000 miles/);
+    assert.match(line, /overpriced/);
+    assert.match(line, /suspension is blown out/);
+  });
+
+  test("a sentence that matches no frame rides along with one that does", () => {
+    // "it's not worth what we're asking" is a bare value judgement and matches
+    // nothing. It still reaches the model, because a message qualifies as a whole
+    // and every statement in it is then quoted. That is what spares the rule
+    // needing a vocabulary of adjectives to keep up with.
+    const disclosure = deriveProductDisclosure(
+      t("c: What do you think?", "r: The roof has two seasons left in it. Honestly it's not worth what we're asking."),
+    );
+    assert.ok(disclosure);
+    assert.match(buildProductDisclosureLines(disclosure).join("\n"), /not worth what we're asking/);
+  });
+});
+
+describe("Rule N: detection is by shape, so it holds in any vertical", () => {
+  // No two of these share a product noun, a fault noun, or a fact kind, and none
+  // of their subject matter appears in the rule's code or comments. If any one of
+  // them needed its own vocabulary entry, the rule would be a list again.
+  const acrossVerticals: Array<[string, string]> = [
+    ["equipment age", "r: The compressor on this unit was rebuilt twice before we took it in."],
+    ["staffing", "r: The nurse who covers that shift is retiring in April."],
+    ["capacity", "r: These panels only generate about 40 percent of what your barn draws."],
+    ["legal exposure", "r: The lease has a clause that lets the landlord reclaim the yard."],
+    ["timing", "r: The kilns aren't back from the foundry until late next spring."],
+    ["fit against a stated need", "r: This won't handle the load you described to me earlier."],
+    ["a cost", "r: All in, you're looking at $61,400 before we even touch the flooring."],
+    ["invented product entirely", "r: The gantry sled on that rig is warped and it doesn't track straight."],
+  ];
+
+  for (const [label, repLine] of acrossVerticals) {
+    test(`${label} is recognised as the rep telling the customer something`, () => {
+      const disclosure = deriveProductDisclosure(t("c: Tell me about it.", repLine));
+      assert.ok(disclosure, `expected a disclosure for: ${repLine}`);
+    });
+  }
+
+  test("good news counts as much as bad news", () => {
+    const disclosure = deriveProductDisclosure(
+      t("c: Any history on it?", "r: The previous owner kept every service record and the belts were done last month."),
+    );
+    assert.ok(disclosure);
+  });
+});
+
+describe("Rule N: what must not trigger it", () => {
+  test("a pure discovery question leaves the prompt exactly as it was", () => {
+    const disclosure = deriveProductDisclosure(
+      t("c: Just looking.", "r: What are you hoping this will do for you day to day?"),
+    );
+    assert.equal(disclosure, null);
+    assert.deepEqual(buildProductDisclosureLines(disclosure), []);
+  });
+
+  test("conversational filler is not a disclosure", () => {
+    assert.equal(
+      deriveProductDisclosure(
+        t("c: Is now a bad time to buy?", "r: That's a fair question. This is a good time to be looking."),
+      ),
+      null,
+    );
+  });
+
+  test("an imperative ask is an ask, not a telling", () => {
+    assert.equal(
+      deriveProductDisclosure(t("c: Sure.", "r: Walk me through how you use the current one.")),
+      null,
+    );
+  });
+
+  test("a redirected topic is not dragged back for the customer to chew on", () => {
+    // Rule 2 has just told the customer to drop warranty. Rule N must not turn
+    // round and pin the same sentence as something to react to.
+    assert.equal(
+      deriveProductDisclosure(
+        t(
+          "c: What does the warranty cover?",
+          "r: The warranty is handled by our service department, they walk you through all of that.",
+        ),
+      ),
+      null,
+    );
+  });
+
+  test("a sequenced topic is left sequenced", () => {
+    assert.equal(
+      deriveProductDisclosure(
+        t("c: What's the price?", "r: We'll get to pricing once I know what you actually need."),
+      ),
+      null,
+    );
+  });
+
+  test("it is turn-scoped: once the customer has replied, the disclosure stops being pinned", () => {
+    assert.equal(
+      deriveProductDisclosure(
+        t(
+          "c: How does it drive?",
+          "r: The gearbox is on its way out and the clutch is close behind.",
+          "c: That's a lot to take on. Is it worth fixing?",
+        ),
+      ),
+      null,
+    );
+  });
+
+  test("an empty transcript and a rep who has not spoken yield nothing", () => {
+    assert.equal(deriveProductDisclosure([]), null);
+    assert.equal(deriveProductDisclosure(t("c: Hello?")), null);
+  });
+});
+
+describe("Rule N: the line it writes, and derivation purity", () => {
+  const disclosed = t("c: Go on.", "r: The frame is cracked at the rear mount and the welds have been redone once already.");
+
+  test("the line does not demand a question back, so the cadence fix survives", () => {
+    const line = buildProductDisclosureLines(deriveProductDisclosure(disclosed)).join("\n");
+    assert.match(line, /You do not have to ask a question to react/);
+    assert.match(line, /ends on a statement is a complete reply/);
+  });
+
+  test("the line names the failure it exists to stop", () => {
+    const line = buildProductDisclosureLines(deriveProductDisclosure(disclosed)).join("\n");
+    assert.match(line, /must not do is continue whatever you were saying before/i);
+  });
+
+  test("the same transcript yields the same disclosure", () => {
+    assert.deepEqual(deriveProductDisclosure(disclosed), deriveProductDisclosure(disclosed));
+  });
+
+  test("it leaves the existing state derivations untouched", () => {
+    deriveProductDisclosure(disclosed);
+    assert.deepEqual(buildConversationStateLines(deriveConversationState(disclosed)), []);
+    assert.deepEqual(buildAlignmentGateLines(deriveAlignmentGate(disclosed)).length > 0, true);
   });
 });

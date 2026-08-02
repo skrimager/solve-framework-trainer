@@ -2297,6 +2297,123 @@ describe("buildTurnStateBlock - the live question is pinned into the volatile ta
   });
 });
 
+describe("CUSTOMER_RESPONSIVENESS_RULES - taking in what the rep volunteers", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("the rule exists and is stated as a principle about any subject", () => {
+    assert.match(rules, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+    assert.match(rules, /There is no list of which facts count/);
+    assert.match(rules, /The subject is irrelevant/);
+  });
+
+  test("it names the reaction, not the topic", () => {
+    assert.match(rules, /Be taken aback, be concerned, hesitate/);
+    assert.match(rules, /Good news is allowed to land too/);
+    assert.match(rules, /You are still allowed to want it anyway/);
+  });
+
+  test("the failing behaviour is named as the one wrong answer", () => {
+    assert.match(rules, /always wrong is carrying on with whatever you were saying before/i);
+    assert.match(rules, /you stopped listening/);
+  });
+
+  test("the per-turn self-check is in the prompt", () => {
+    assert.match(rules, /ASK YOURSELF THIS BEFORE EVERY REPLY/);
+    assert.match(rules, /Did the consultant just tell me something new and specific/);
+  });
+
+  test("it does not enumerate the facts from the bug report", () => {
+    // The whole point. If a future report gets fixed by appending its fact kind
+    // here, the rule becomes the topic list that failed before.
+    const enumerated = rules.match(/TAKE IN WHAT THEY TELL YOU[\s\S]*?ASK YOURSELF THIS/)?.[0] ?? "";
+    for (const word of ["mileage", "odometer", "warranty", "engine", "brakes", "square feet"]) {
+      assert.ok(!enumerated.toLowerCase().includes(word), `the rule must not name "${word}"`);
+    }
+  });
+
+  test("it does not reintroduce the every-turn question habit the cadence fix removed", () => {
+    assert.match(rules, /Reacting is not the same as asking/);
+    assert.match(rules, /rules further down about not ending every turn on a question still apply/);
+    assert.match(rules, /A QUESTION IS NOT HOW YOU END A TURN/);
+  });
+
+  test("it reaches every difficulty, every tier and the flag-off prompt", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, tier, "", false);
+        assert.match(prompt, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+      }
+    }
+  });
+
+  test("it is in the cacheable prefix, so it costs nothing per turn", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    assert.match(prefix, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+  });
+});
+
+describe("buildTurnStateBlock - what the rep volunteered is pinned into the tail", () => {
+  const explorer = [
+    turn("customer", "I love this Explorer. How does a car seat install in the back?"),
+    turn(
+      "consultant",
+      "I'm not sure this Explorer is right for your family. It's got 100,000 miles on it, it's overpriced, and the suspension is blown out from being driven through the desert.",
+    ),
+  ];
+
+  test("the disclosure is quoted back and a reaction is demanded", () => {
+    const block = buildTurnStateBlock(explorer);
+    assert.match(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/);
+    assert.match(block, /100,000 miles/);
+    assert.match(block, /suspension is blown out/);
+  });
+
+  test("it is NOT flag-gated, because ignoring bad news is broken everywhere", () => {
+    for (const layers of [false, true]) {
+      assert.match(
+        buildTurnStateBlock(explorer, layers),
+        /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/,
+      );
+    }
+  });
+
+  test("a rep turn that only asks adds no disclosure line", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need something for my commute."),
+      turn("consultant", "How long is that commute each way?"),
+    ]);
+    assert.doesNotMatch(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+  });
+
+  test("it stays out of the cacheable prefix", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const prompt = buildCustomerReplyPrompt(PERSONA, explorer, "intermediate");
+    assert.ok(prompt.startsWith(prefix));
+    assert.doesNotMatch(prefix, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+    assert.match(prompt, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+  });
+
+  test("it sits with the live question, before the older state facts", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need it to tow."),
+      turn("consultant", "The tow rating on this one is well under what you described. What are you pulling?"),
+    ]);
+    assert.ok(
+      block.indexOf("THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT") <
+        block.indexOf("Lines you have ALREADY said"),
+    );
+  });
+
+  test("a rep telling the customer something in another vertical is caught the same way", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "We'd want the whole crew in there by autumn."),
+      turn("consultant", "The kilns aren't back from the foundry until late next spring."),
+    ]);
+    assert.match(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/);
+    assert.match(block, /kilns aren't back from the foundry/);
+  });
+});
+
 // The spec's first worked example, verbatim. This is the teachable rep skill:
 // the customer starts general, the rep narrows, and the customer must reward it
 // with a real specific instead of restarting the loop.

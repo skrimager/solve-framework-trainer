@@ -990,6 +990,109 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Rule N: the consultant TELLING rather than asking.
+//
+// Every rule above is about what the customer does with a QUESTION. Nothing
+// covered what it does with a volunteered fact, so a rep who said the vehicle
+// had 100,000 miles, was priced above its worth and had a wrecked suspension
+// got a reply asking how a car seat installs in the back. The information did
+// not register at all.
+//
+// Detection is by SENTENCE SHAPE, never by subject. There is deliberately no
+// vocabulary of fact kinds here: no mileage, no condition, no cost, no defect
+// words. A sentence counts as the rep telling the customer something when it
+// predicates a property of the thing under discussion, or asserts that the
+// thing does not line up with what the customer said they needed, or carries a
+// concrete figure. Those are grammatical frames, and they hold whether the
+// product is a truck, a house, a policy, or a service contract. Enumerating
+// subjects is exactly what made the redirect rule fail on every subject nobody
+// had enumerated, and repeating that here would reproduce the bug one report
+// later.
+// ---------------------------------------------------------------------------
+
+// A property predicated of the item: determiner, one or two words of noun
+// phrase, then a state verb. Requiring at least one word between the determiner
+// and the verb is what keeps bare conversational fillers out, since "this is a
+// good time to buy" and "that's a fair question" have nothing in that slot.
+const ATTRIBUTE_CLAIM =
+  /\b(?:the|this|that|these|those|its|his|her|their|our)\s+(?:[a-z][a-z'-]*\s+){1,2}(?:is|are|was|were|isn'?t|aren'?t|has|have|had|hasn'?t|haven'?t|comes?|came|needs?|needed|runs?|ran|gets?|got|sits?|starts?|goes?|went|does|doesn'?t)\b/i;
+
+// The rep saying the thing does not line up with what the customer told them.
+// Also pure shape: a negation or a comparison against what the customer said,
+// with no claim about which attribute is at fault.
+const MISMATCH_CLAIM: RegExp[] = [
+  /\b(?:i'?m|i am) not sure (?:this|that|it|these|those)\b/i,
+  /\b(?:isn'?t|aren'?t|is not|are not|not really|not quite)\b[^.!?]{0,40}\b(?:right|the right|a good fit|going to work|what you|for you|for your)\b/i,
+  /\b(?:won'?t|wouldn'?t|will not|can'?t|cannot)\b[^.!?]{0,40}\b(?:work|fit|handle|hold|take|cover|last|get you|be enough|be able)\b/i,
+  /\b(?:doesn'?t|does not|don'?t|do not)\b[^.!?]{0,40}\b(?:fit|work|have|come with|match|line up|include|support|cover)\b/i,
+  /\b(?:more|less|higher|lower|older|smaller|bigger) than (?:you|what you)\b/i,
+  /\bnot going to\b/i,
+];
+
+// Ordering and hand-off sentences belong to Rules 2 and S. Excluding them here
+// is what stops this rule telling the customer to chew over a topic the other
+// two just told it to drop.
+function isRedirectSentence(sentence: string): boolean {
+  return (
+    matchesAny(sentence, REDIRECT_MARKERS) ||
+    matchesAny(sentence, SEQUENCING_MARKERS) ||
+    matchesAny(sentence, RELEVANCE_CONDITIONING_MARKERS)
+  );
+}
+
+function isAskSentence(sentence: string): boolean {
+  return sentence.endsWith("?") || matchesAny(sentence, IMPERATIVE_ASK_MARKERS);
+}
+
+export interface ProductDisclosureState {
+  // The rep's telling sentences this turn, quoted back verbatim.
+  statements: string[];
+  // True when at least one of them carries a figure. Only used to make the
+  // prompt line concrete; a disclosure counts either way.
+  hasFigures: boolean;
+}
+
+// What the consultant just volunteered about the thing under discussion, or null
+// when their last message only asked, only redirected, or has not happened yet.
+// Turn-scoped like Rule G: once the customer has spoken, the disclosure has had
+// its moment and stops being pinned.
+export function deriveProductDisclosure(
+  transcript: TranscriptMessage[],
+): ProductDisclosureState | null {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+  const last = spoken.at(-1);
+  if (!last || last.role !== "consultant") return null;
+
+  const statements = splitSentences(last.content.trim()).filter(
+    (s) => !isAskSentence(s) && !isRedirectSentence(s) && s.split(/\s+/).length >= 4,
+  );
+  if (statements.length === 0) return null;
+
+  const figures = statements.filter(
+    (s) => QUOTED_FACT_PATTERN.test(s) || parseMoneyAmounts(s).length > 0,
+  );
+  const tells =
+    figures.length > 0 ||
+    statements.some((s) => ATTRIBUTE_CLAIM.test(s) || matchesAny(s, MISMATCH_CLAIM));
+  if (!tells) return null;
+
+  return { statements, hasFigures: figures.length > 0 };
+}
+
+// Renders the disclosure as prompt lines. Empty array when the rep told the
+// customer nothing this turn, so a pure discovery question produces exactly the
+// prompt it produced before this rule existed.
+export function buildProductDisclosureLines(
+  disclosure: ProductDisclosureState | null,
+): string[] {
+  if (!disclosure) return [];
+  const quoted = disclosure.statements.map((s) => `"${s}"`).join(" ");
+  return [
+    `- THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING, they did not only ask you something: ${quoted} That is new information and it has to land somewhere in your reply. Show that you heard it before you go anywhere else: name the part of it that struck you, say what you now think, or ask what it means for you. If it is bad news, be concerned, be put off, weigh whether this is still the one, or say why you want it anyway despite that specific thing. If it is good news, let it count for something. You do not have to ask a question to react, and a reaction that ends on a statement is a complete reply. What you must not do is continue whatever you were saying before as though this sentence was never spoken.`,
+  ];
+}
+
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
   return {
     deflectedTopics: deriveDeflectedTopics(transcript),
