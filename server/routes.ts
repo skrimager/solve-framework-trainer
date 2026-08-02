@@ -133,6 +133,8 @@ import {
   addDashboard,
 } from "./billing";
 import { handleDemoPaymentEvent } from "./demoPayments";
+import { handleMessageCoachPaymentEvent } from "./messageCoach";
+import { registerMessageCoachRoutes } from "./messageCoachRoutes";
 import { generateUniqueInviteCode } from "./invite";
 import {
   evaluatePracticeCap,
@@ -442,13 +444,15 @@ export async function registerRoutes(
       return res.status(400).json({ message: `Webhook signature verification failed` });
     }
     try {
-      // Two independent handlers run for every delivery, one per payment domain:
-      // office subscriptions (billing.ts) and one-time demo practice-session
-      // purchases (demoPayments.ts). Each no-ops on events it does not own and
-      // keeps its own idempotency record, so neither can break or swallow the
-      // other. One endpoint, one STRIPE_WEBHOOK_SECRET.
+      // Three independent handlers run for every delivery, one per payment
+      // domain: office subscriptions (billing.ts), one-time demo
+      // practice-session purchases (demoPayments.ts), and one-time Message Coach
+      // score purchases (messageCoach.ts). Each no-ops on events it does not own
+      // and keeps its own namespaced idempotency record, so none can break or
+      // swallow another. One endpoint, one STRIPE_WEBHOOK_SECRET.
       await handleStripeEvent(event);
       await handleDemoPaymentEvent(event);
+      await handleMessageCoachPaymentEvent(event);
       res.json({ received: true });
     } catch (err: any) {
       // A processing error should return 5xx so Stripe retries later.
@@ -1536,6 +1540,13 @@ export async function registerRoutes(
   registerPublicDemoDashboardRoute(app);
 
   registerPublicAndAdminRoutes(app);
+
+  // Message Coach v1. Every route inside 404s unless MESSAGE_COACH_ENABLED is
+  // "true", so registering it unconditionally still leaves the feature dark by
+  // default. checkSeatAccess is passed in rather than imported over there, to
+  // keep the two modules from importing each other and to keep exactly one
+  // implementation of the seat gate.
+  registerMessageCoachRoutes(app, { seatGate: checkSeatAccess });
 
   // Start the Opportunity Intelligence drip sender (every ~20 min it sends any
   // scheduled+due outreach via the existing Resend transport). Guarded against
