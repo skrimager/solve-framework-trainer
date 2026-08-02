@@ -170,6 +170,45 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
 }
 
+// Real rep turns arrive from voice transcription with no terminal punctuation
+// whatsoever, so splitSentences hands back a whole several-hundred-word
+// monologue as a single "sentence". Quoting that back in full buries the figure
+// the customer is supposed to react to under the rep's throat-clearing,
+// profanity and self-contradiction, and it pins the same wall of text into the
+// prompt once for every mechanism that noticed it. So quote a window around the
+// part that actually matched instead of the whole run-on. Text that is already
+// short is returned untouched, which is every properly punctuated sentence, so
+// typed transcripts are quoted exactly as they were before.
+const EXCERPT_WINDOW_WORDS = 18;
+
+function excerptAround(text: string, anchors: RegExp[]): string {
+  const words = text.split(/\s+/);
+  if (words.length <= EXCERPT_WINDOW_WORDS * 2 + 1) return text;
+
+  // Anchors are tried in priority order rather than by position, so the window
+  // centres on the most concrete thing in the text: a figure if there is one,
+  // and only then a looser claim. That also makes two callers with different
+  // anchor lists agree on identical text whenever the higher-priority anchor
+  // matches, which is what lets the state block recognise and drop a quote it
+  // has already made. With no match at all the head of the text is as good a
+  // guess as any, and still better than the entire monologue.
+  let at = -1;
+  for (const pattern of anchors) {
+    const match = pattern.exec(text);
+    if (match) {
+      at = match.index;
+      break;
+    }
+  }
+  const before = at === -1 ? "" : text.slice(0, at).trim();
+  const anchorWord = before.length === 0 ? 0 : before.split(/\s+/).length;
+
+  const start = Math.max(0, anchorWord - EXCERPT_WINDOW_WORDS);
+  const end = Math.min(words.length, anchorWord + EXCERPT_WINDOW_WORDS + 1);
+  const body = words.slice(start, end).join(" ");
+  return `${start > 0 ? "... " : ""}${body}${end < words.length ? " ..." : ""}`;
+}
+
 function mentionsTopic(text: string, topic: DeflectableTopic): boolean {
   return matchesAny(text, TOPIC_PATTERNS[topic]);
 }
@@ -792,10 +831,17 @@ export function hasCustomerAcceptedProposal(transcript: TranscriptMessage[]): bo
   return deriveAcceptedSolutionLine(transcript) !== null;
 }
 
+// Excerpted rather than quoted whole: this list grows by one entry per rep turn
+// that mentions a figure, so on a voice transcript it was reaching five full
+// turns of raw speech in a single prompt. The figure is the part the customer
+// must not ask for again; the paragraph around it was never the point.
+// Deduplicated because a rep who repeats the same number across turns otherwise
+// contributes the same line to the block more than once.
 function deriveQuotedFacts(transcript: TranscriptMessage[]): string[] {
   return transcript
     .filter((m) => m.role === "consultant" && QUOTED_FACT_PATTERN.test(m.content))
-    .map((m) => m.content.trim());
+    .map((m) => excerptAround(m.content.trim(), [QUOTED_FACT_PATTERN]))
+    .filter((fact, i, all) => all.indexOf(fact) === i);
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,7 +1092,9 @@ function isAskSentence(sentence: string): boolean {
 }
 
 export interface ProductDisclosureState {
-  // The rep's telling sentences this turn, quoted back verbatim.
+  // The rep's telling sentences this turn. Verbatim, except that a run-on with
+  // no punctuation in it is trimmed to a window around the claim (see
+  // excerptAround) rather than quoted at full length.
   statements: string[];
   // True when at least one of them carries a figure. Only used to make the
   // prompt line concrete; a disclosure counts either way.
@@ -1077,7 +1125,12 @@ export function deriveProductDisclosure(
     statements.some((s) => ATTRIBUTE_CLAIM.test(s) || matchesAny(s, MISMATCH_CLAIM));
   if (!tells) return null;
 
-  return { statements, hasFigures: figures.length > 0 };
+  return {
+    statements: statements.map((s) =>
+      excerptAround(s, [QUOTED_FACT_PATTERN, ATTRIBUTE_CLAIM, ...MISMATCH_CLAIM]),
+    ),
+    hasFigures: figures.length > 0,
+  };
 }
 
 // Renders the disclosure as prompt lines. Empty array when the rep told the
@@ -1110,7 +1163,16 @@ export function deriveConversationState(transcript: TranscriptMessage[]): Conver
 // block. Returns an empty array when nothing was detected, so a conversation with
 // none of these situations produces byte-identical prompts to the pre-change
 // behavior.
-export function buildConversationStateLines(state: ConversationState): string[] {
+// `alreadyQuoted` is text some earlier line in the same state block has already
+// put in front of the model, and is dropped from the figures list rather than
+// repeated. The rep's latest message routinely arrives here three times over --
+// as the most recent message, as the disclosure the customer has to react to,
+// and as a figure it must not ask for again -- and three copies of the same
+// paragraph dilute every other instruction in the block.
+export function buildConversationStateLines(
+  state: ConversationState,
+  alreadyQuoted: string[] = [],
+): string[] {
   const lines: string[] = [];
 
   for (const t of state.deflectedTopics) {
@@ -1165,11 +1227,12 @@ export function buildConversationStateLines(state: ConversationState): string[] 
     );
   }
 
-  if (state.quotedFacts.length > 0) {
+  const freshFacts = state.quotedFacts.filter((fact) => !alreadyQuoted.includes(fact));
+  if (freshFacts.length > 0) {
     lines.push(
       "- Concrete numbers and answers the consultant has ALREADY given you. You know these. Never ask for any of them again as though you had not heard them; react to them instead:"
     );
-    for (const fact of state.quotedFacts) lines.push(`  - "${fact}"`);
+    for (const fact of freshFacts) lines.push(`  - "${fact}"`);
   }
 
   return lines;

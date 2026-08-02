@@ -568,7 +568,8 @@ export function buildTurnStateBlock(
   // information" but only the tail can say which sentence that was. Never
   // flag-gated, because a customer that ignores what it is told is broken in
   // every scenario and on the demo path, not in one experiment arm.
-  lines.push(...buildProductDisclosureLines(deriveProductDisclosure(transcript)));
+  const disclosure = deriveProductDisclosure(transcript);
+  lines.push(...buildProductDisclosureLines(disclosure));
   if (alreadySaid.length > 0) {
     lines.push(
       "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"
@@ -579,7 +580,14 @@ export function buildTurnStateBlock(
   // the spent alternatives round, an accepted solution, figures already quoted).
   // Same discipline: each is derived from explicit text in the transcript, so it
   // can only ever assert something the conversation actually contains.
-  lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
+  // The disclosure quote above already put the rep's latest words in front of
+  // the model, so anything it covers is skipped here instead of repeated.
+  lines.push(
+    ...buildConversationStateLines(
+      deriveConversationState(transcript),
+      disclosure?.statements ?? [],
+    ),
+  );
   // The product alignment gate: which of the four basics are still unestablished,
   // and whether the consultant has jumped to product detail without them. Last,
   // because it is about where the conversation should be rather than what it

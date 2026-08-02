@@ -1116,3 +1116,97 @@ describe("Rule N: the line it writes, and derivation purity", () => {
     assert.deepEqual(buildAlignmentGateLines(deriveAlignmentGate(disclosed)).length > 0, true);
   });
 });
+
+describe("quoting a voice transcript: the run-on gets a window, not the whole monologue", () => {
+  // Real rep turns arrive with zero terminal punctuation, so the sentence
+  // splitter hands back the entire turn as one "sentence". Shape and cadence
+  // below are copied from the reported session, not tidied up.
+  const runOn =
+    "While trying to tell you that this for explore you're looking at is not a very good " +
+    "it's old it's been rent has 180,000 miles on it it's over priced and it's not something " +
+    "that even if you could put your car seat in it is not something that you would want for " +
+    "your family as your consultant I'm trying to save you time and money but you keep asking " +
+    "about safety equipment in this car that's not a good fit for your family based on the " +
+    "information that you told me";
+
+  test("a punctuated sentence is still quoted exactly as it was", () => {
+    // The cap must be invisible to every typed transcript, or it is a rewrite of
+    // existing behavior rather than a bound on a pathological case.
+    const short = "It's got 100,000 miles on it and the suspension is blown out.";
+    const disclosure = deriveProductDisclosure(t("c: What do you think?", `r: ${short}`));
+    assert.ok(disclosure);
+    assert.deepEqual(disclosure.statements, [short]);
+  });
+
+  test("the unpunctuated run-on is cut down to a readable excerpt", () => {
+    const disclosure = deriveProductDisclosure(t("c: Can I see the car seat fit?", `r: ${runOn}`));
+    assert.ok(disclosure);
+    assert.equal(disclosure.statements.length, 1);
+    const excerpt = disclosure.statements[0];
+    assert.ok(
+      excerpt.split(/\s+/).length < runOn.split(/\s+/).length / 2,
+      `expected an excerpt, got ${excerpt.split(/\s+/).length} of ${runOn.split(/\s+/).length} words`,
+    );
+    // It has to keep the disqualifying figure, which is the whole point of
+    // quoting anything back at all.
+    assert.match(excerpt, /180,000 miles/);
+    // And it has to drop the rep's frustration at the tail, which is not a fact
+    // about the vehicle and is not something the customer should be reacting to.
+    assert.doesNotMatch(excerpt, /save you time and money/);
+    assert.match(excerpt, /\.\.\./);
+  });
+
+  test("the window centres on the figure rather than the start of the turn", () => {
+    const buried = `${"filler word here ".repeat(30)}the unit is priced at $61,400 all in ${"and more talking ".repeat(30)}`;
+    const disclosure = deriveProductDisclosure(t("c: Go on.", `r: ${buried}`));
+    assert.ok(disclosure);
+    assert.match(disclosure.statements[0], /\$61,400/);
+  });
+
+  test("figures the consultant already gave are excerpted too, and not repeated", () => {
+    // quotedFacts grows by one entry per rep turn carrying a number. On a voice
+    // transcript that was five whole turns of raw speech in a single prompt.
+    const state = deriveConversationState(
+      t("c: What have you got?", `r: ${runOn}`, "c: I hear you.", `r: ${runOn}`),
+    );
+    assert.equal(state.quotedFacts.length, 1, "the same words twice is still one fact");
+    assert.ok(state.quotedFacts[0].split(/\s+/).length < 45);
+    assert.match(state.quotedFacts[0], /180,000 miles/);
+  });
+
+  test("the disclosure quote and the figures list agree, so the block can drop the duplicate", () => {
+    const transcript = t("c: Can I see the car seat fit?", `r: ${runOn}`);
+    const disclosure = deriveProductDisclosure(transcript);
+    const state = deriveConversationState(transcript);
+    assert.ok(disclosure);
+    // Both mechanisms saw the same turn. They must excerpt it identically, or the
+    // de-duplication in buildTurnStateBlock silently stops working.
+    assert.deepEqual(state.quotedFacts, [disclosure.statements[0]]);
+
+    const withDuplicate = buildConversationStateLines(state);
+    const deduped = buildConversationStateLines(state, disclosure.statements);
+    assert.ok(withDuplicate.some((l) => l.includes("180,000 miles")));
+    assert.ok(
+      !deduped.some((l) => l.includes("180,000 miles")),
+      "a fact already quoted as the disclosure must not be listed again",
+    );
+    assert.ok(!deduped.some((l) => l.includes("Concrete numbers")));
+  });
+
+  test("figures the disclosure did not quote are still listed", () => {
+    // De-duplication must not swallow the rest of the history.
+    const transcript = t(
+      "c: What's the budget look like?",
+      "r: We can get you into something around $40,000.",
+      "c: That works.",
+      "r: This one has 180,000 miles on it and the frame is cracked.",
+    );
+    const disclosure = deriveProductDisclosure(transcript);
+    const deduped = buildConversationStateLines(
+      deriveConversationState(transcript),
+      disclosure?.statements ?? [],
+    ).join("\n");
+    assert.match(deduped, /\$40,000/);
+    assert.doesNotMatch(deduped, /180,000 miles on it and the frame/);
+  });
+});
