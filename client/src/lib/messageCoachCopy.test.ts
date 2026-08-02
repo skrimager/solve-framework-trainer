@@ -129,28 +129,35 @@ describe("Message Coach page wiring", () => {
     }
   });
 
-  // The email gate comes before any result is revealed, the same place in the
-  // flow as the demo's email step.
-  test("the score button cannot be pressed before the email gate is filled", () => {
+  // An anonymous visitor must verify their email with a 6-digit code before
+  // the message/industry form unlocks; a signed-in member skips this
+  // entirely. Same place in the flow as the demo's email step used to be,
+  // now gated on isVerified rather than a bare filled-in email.
+  test("the score button cannot be pressed before the email is verified", () => {
     const code = pageSource.replace(/\/\/.*$/gm, "");
-    assert.match(
-      code,
-      /message\.trim\(\)\.length > 0 && \(isMember \|\| \(email\.trim\(\)\.length > 0 && name\.trim\(\)\.length > 0\)\)/,
-    );
+    assert.match(code, /const isVerified = isMember \|\| Boolean\(verificationToken\)/);
+    assert.match(code, /const canSubmit = message\.trim\(\)\.length > 0 && isVerified/);
     assert.match(code, /disabled=\{!canSubmit \|\| scoreMutation\.isPending\}/);
   });
 
-  // A member is already captured as a user and must not be asked again.
-  test("a signed-in member is not shown the email gate", () => {
+  // A signed-in member is already captured as a user and must not be asked
+  // to verify their email at all.
+  test("a signed-in member is not shown the email verification gate", () => {
     const code = pageSource.replace(/\/\/.*$/gm, "");
     assert.match(code, /const isMember = Boolean\(user\?\.id\)/);
-    assert.match(code, /\{!isMember && \(/);
+    assert.match(code, /\{!isMember && !isVerified && verifyStep === "email" && \(/);
+    assert.match(code, /\{!isMember && !isVerified && verifyStep === "code" && \(/);
+    assert.match(code, /\{isVerified && \(/);
   });
 
-  test("the paywall opens Stripe Checkout and parks the draft first", () => {
+  test("the paywall opens Stripe Checkout, forwards the verification token, and parks the draft first", () => {
     const code = pageSource.replace(/\/\/.*$/gm, "");
     assert.match(code, /messageCoachApi\.checkout\(/);
-    assert.match(code, /parkDraftForCheckout\(\{ message, industry, name, email \}\)/);
+    assert.match(code, /verificationToken,/);
+    assert.match(
+      code,
+      /parkDraftForCheckout\(\{ message, industry, name, email, verificationToken \}\)/,
+    );
     assert.match(code, /window\.location\.href = url/);
     assert.match(code, /disabled=\{checkoutMutation\.isPending \|\| !email\.trim\(\)\}/);
   });

@@ -61,6 +61,7 @@ export const messageCoachApi = {
     industry?: string | null;
     paidCheckoutSessionId?: string | null;
     userId?: number | null;
+    verificationToken?: string | null;
   }): Promise<MessageCoachResult | MessageCoachRefusal> {
     const { ok, status, data } = await post("/api/message-coach/score", {
       name: args.name,
@@ -69,6 +70,7 @@ export const messageCoachApi = {
       industry: args.industry ?? undefined,
       paidCheckoutSessionId: args.paidCheckoutSessionId ?? undefined,
       userId: args.userId ?? undefined,
+      verificationToken: args.verificationToken ?? undefined,
     });
     if (ok) return data as MessageCoachResult;
     if (status === 402) {
@@ -82,10 +84,11 @@ export const messageCoachApi = {
     );
   },
 
-  async checkout(args: { email: string; name?: string }): Promise<string> {
+  async checkout(args: { email: string; name?: string; verificationToken?: string | null }): Promise<string> {
     const { ok, data } = await post("/api/message-coach/checkout", {
       email: args.email,
       name: args.name,
+      verificationToken: args.verificationToken ?? undefined,
     });
     if (!ok || typeof data.url !== "string") {
       throw new MessageCoachError(
@@ -93,5 +96,27 @@ export const messageCoachApi = {
       );
     }
     return data.url;
+  },
+
+  // Step 1 of the anonymous-visitor email gate: request a 6-digit code.
+  async requestCode(email: string): Promise<{ ok: true }> {
+    const { ok, data } = await post("/api/message-coach/request-code", { email });
+    if (!ok) {
+      throw new MessageCoachError(
+        data.message ?? "We couldn't send your code. Please try again.",
+      );
+    }
+    return data as { ok: true };
+  },
+
+  // Step 2: submit the code, get back the token that unlocks score/checkout.
+  async verifyCode(email: string, code: string): Promise<{ verified: true; token: string }> {
+    const { ok, data } = await post("/api/message-coach/verify-code", { email, code });
+    if (!ok || typeof data.token !== "string") {
+      throw new MessageCoachError(
+        data.message ?? "That code is incorrect or has expired.",
+      );
+    }
+    return data as { verified: true; token: string };
   },
 };

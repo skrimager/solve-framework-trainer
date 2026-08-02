@@ -1,10 +1,11 @@
 import OpenAI from "openai";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type Stripe from "stripe";
 import type { ScoreCache, InsertScoreCache } from "@shared/schema";
 import { storage } from "./storage";
 import { getStripe, APP_URL } from "./stripe";
 import { addMessageCoachLeadToAudience } from "./notifications";
+import { normalizeEmail } from "./demo";
 import type { MessageCoachSignup } from "@shared/schema";
 
 // Message Coach v1 — scores, diagnoses and rewrites a single outreach message.
@@ -89,6 +90,85 @@ export async function getOrCreateMessageCoachSignup(
 // "demo_paid_session:<id>", this file records "message_coach_paid:<id>"). Each
 // guards on its own key, so no handler can skip an event it never processed.
 const MESSAGE_COACH_EVENT_KEY_PREFIX = "message_coach_paid:";
+
+// ---------------------------------------------------------------------------
+// Email verification gate (anonymous visitors only)
+//
+// Every anonymous visitor must verify their email with a 6-digit code before
+// the /score or /checkout endpoints will act on that email at all. This is an
+// ACCESS gate, not a new usage cap: freeScoreUsedAt/paid-purchase economics
+// are unchanged underneath it. Logged-in members with an active seat never
+// hit this (the route checks userId+seatGate first and returns before any of
+// this is consulted).
+//
+// Code generation/expiry/constant-time-comparison are NOT reimplemented here.
+// They are imported from demo.ts (generateVerificationCode, codeExpiryFrom,
+// isCodeValid), which already has this exact logic for demo_signups. Only the
+// signed access token below is new, and it is deliberately namespaced
+// ("message_coach" baked into the signed payload) so a token minted for the
+// free voice demo can never be replayed here even if someone crossed the two
+// secrets by mistake.
+// ---------------------------------------------------------------------------
+
+// A verified visitor's token is short-lived on purpose: it only needs to
+// survive one sitting at the tool (fill in the message, maybe pay, score it),
+// not to act as a remember-me across visits. Re-verifying is one code request
+// away if it lapses.
+const MESSAGE_COACH_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function messageCoachSecret(): string {
+  return process.env.DEMO_SESSION_SECRET || "solve-demo-dev-secret-change-me";
+}
+
+type MessageCoachTokenPayload = { purpose: "message_coach"; email: string; exp: number };
+
+function b64url(input: Buffer | string): string {
+  return Buffer.from(input).toString("base64url");
+}
+
+// Issued once verify-code succeeds. The frontend carries this token and sends
+// it with every subsequent /score or /checkout call for that sitting so the
+// server never has to re-trust a bare, unverified email again.
+export function signMessageCoachToken(email: string, now = Date.now()): string {
+  const payload: MessageCoachTokenPayload = {
+    purpose: "message_coach",
+    email: normalizeEmail(email),
+    exp: now + MESSAGE_COACH_TOKEN_TTL_MS,
+  };
+  const body = b64url(JSON.stringify(payload));
+  const sig = createHmac("sha256", messageCoachSecret()).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+// Returns the verified email the token proves, or null if the token is
+// missing, malformed, mis-signed, expired, from a different purpose (e.g. a
+// demo token), or does not match the email the caller claims to be scoring
+// for. That last check matters: without it a visitor could verify email A and
+// then submit a score request claiming to be email B.
+export function verifyMessageCoachToken(
+  token: string | undefined,
+  claimedEmail: string,
+  now = Date.now(),
+): boolean {
+  if (!token || typeof token !== "string") return false;
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) return false;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = createHmac("sha256", messageCoachSecret()).update(body).digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString()) as MessageCoachTokenPayload;
+    if (payload.purpose !== "message_coach") return false;
+    if (typeof payload.exp !== "number" || payload.exp < now) return false;
+    if (typeof payload.email !== "string") return false;
+    return payload.email === normalizeEmail(claimedEmail);
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Model plumbing (rubric-agnostic)

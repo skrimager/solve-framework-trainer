@@ -856,6 +856,15 @@ export const messageCoachSignups = pgTable("message_coach_signups", {
   // "Message Coach Leads" audience. Never set for a suppressed email. Sync is
   // best-effort and this column lets a later job retry anyone still null.
   resendSyncedAt: text("resend_synced_at"),
+  // Email-verification gate for anonymous scoring, same shape as demoSignups:
+  // code is the current 6-digit code (nullable once consumed/expired),
+  // codeExpiresAt is the ISO timestamp past which it is invalid, verified
+  // flips true once any code is confirmed. This gates ACCESS to the free/paid
+  // scoring flow; it does not add a new usage cap on top of freeScoreUsedAt.
+  code: text("code"),
+  codeExpiresAt: text("code_expires_at"),
+  verified: boolean("verified").notNull().default(false),
+  lastSentAt: text("last_sent_at"), // ISO timestamp of the most recent code email
 });
 
 export const insertMessageCoachSignupSchema = createInsertSchema(messageCoachSignups).omit({ id: true });

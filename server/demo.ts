@@ -414,3 +414,17 @@ export function buildVerificationEmail(code: string): { subject: string; html: s
 </div>`;
   return { subject, html };
 }
+
+// Message Coach's verification email. Same shape and copy conventions as
+// buildVerificationEmail above (10-minute code, same font/layout), with its
+// own subject and body text so a visitor sees which tool asked for the code.
+export function buildMessageCoachVerificationEmail(code: string): { subject: string; html: string } {
+  const subject = `Your SOLVE Message Coach code: ${code}`;
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#111;">
+  <h2 style="margin:0 0 12px;">Your Message Coach verification code</h2>
+  <p style="margin:0 0 16px;">Enter this code to score your message:</p>
+  <p style="font-size:30px;font-weight:bold;letter-spacing:6px;margin:0 0 16px;">${code}</p>
+  <p style="margin:0;color:#555;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
+</div>`;
+  return { subject, html };
+}
