@@ -9,14 +9,17 @@ import {
   buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildDisclosureGateLines,
   buildProductDisclosureLines,
   deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveDisclosureGate,
   deriveProductDisclosure,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
 } from "./conversationState";
+import { gatedTopicsFor } from "./personaVariants";
 
 // Terse transcript builder: "c: ..." is the customer, "r: ..." is the rep.
 function t(...lines: string[]): TranscriptMessage[] {
@@ -1208,5 +1211,174 @@ describe("quoting a voice transcript: the run-on gets a window, not the whole mo
     ).join("\n");
     assert.match(deduped, /\$40,000/);
     assert.doesNotMatch(deduped, /180,000 miles on it and the frame/);
+  });
+});
+
+// The disclosure gate. The production defect it exists for: the pregnant-SUV
+// persona opened with exact crash ratings and car-seat installation within a
+// turn or two of the greeting, before the consultant had asked anything that
+// reached toward either subject. The persona prose already asked for that not to
+// happen; these tests cover the machine-checkable version of the same sentence.
+describe("disclosure gate: the reported failure", () => {
+  const PRIYA = gatedTopicsFor("auto-sales-growing-family-suv");
+
+  test("the persona declares the two subjects the incident turned on", () => {
+    assert.equal(PRIYA.length, 2);
+    assert.match(PRIYA[0].label, /safe/i);
+    assert.match(PRIYA[1].label, /car seat|stroller/i);
+  });
+
+  test("nothing is earned when the consultant has not reached toward it", () => {
+    // A real opening: warm, on-topic, and about none of the gated subjects.
+    const gate = deriveDisclosureGate(
+      t(
+        "c: We're expecting in March, so we want the biggest SUV you've got.",
+        "r: Congratulations! What brings you in today?",
+        "c: Just seeing what's out there really.",
+        "r: Sure. Have you got a sense of what you'd like to spend?",
+      ),
+      PRIYA,
+    );
+    assert.deepEqual(
+      gate.topics.map((x) => x.earned),
+      [false, false],
+    );
+    assert.equal(gate.withheld.length, 2);
+
+    const line = buildDisclosureGateLines(gate).join("\n");
+    assert.match(line, /Do not raise any of that yourself this turn/);
+    assert.match(line, /safe/i);
+    assert.match(line, /car seat/i);
+    // The customer must stay natural while withholding: no stonewalling, no
+    // teasing that there is something else. A gate that produces either of those
+    // is worse than the defect it replaces.
+    assert.match(line, /Never say that you are not ready/);
+    assert.match(line, /never hint/i);
+  });
+
+  test("a relevant discovery question opens exactly the subject it reached for", () => {
+    const gate = deriveDisclosureGate(
+      t(
+        "c: We're expecting in March, so we want the biggest SUV you've got.",
+        "r: Congratulations! What would actually put your mind at ease about how safe the car is?",
+      ),
+      PRIYA,
+    );
+    assert.equal(gate.topics[0].earned, true);
+    assert.match(gate.topics[0].openedBy ?? "", /put your mind at ease/);
+    // The other subject was not asked about, so it stays shut.
+    assert.equal(gate.topics[1].earned, false);
+    assert.equal(gate.withheld.length, 1);
+    assert.doesNotMatch(buildDisclosureGateLines(gate).join("\n"), /safe/i);
+  });
+
+  test("once both have been asked about the gate writes nothing at all", () => {
+    const gate = deriveDisclosureGate(
+      t(
+        "c: We want the biggest SUV you've got.",
+        "r: What's worrying you most about safety?",
+        "c: I suppose everything, honestly.",
+        "r: How are you picturing getting a car seat in and out day to day?",
+      ),
+      PRIYA,
+    );
+    assert.deepEqual(gate.withheld, []);
+    assert.deepEqual(buildDisclosureGateLines(gate), []);
+  });
+
+  test("a consultant who states the fact has not asked for it", () => {
+    // Telling the customer the car has a good rating is not an invitation to
+    // open up about what would reassure her, so it must not unlock the subject.
+    // Rule N already covers what the consultant volunteers.
+    const gate = deriveDisclosureGate(
+      t(
+        "c: We want the biggest SUV you've got.",
+        "r: This one has a five-star safety rating and the car seat anchors are easy to reach.",
+      ),
+      PRIYA,
+    );
+    assert.deepEqual(gate.withheld.length, 2);
+  });
+
+  test("the customer raising it herself does not count as being asked", () => {
+    const gate = deriveDisclosureGate(
+      t("c: Is this one safe? Will a car seat fit?", "r: Let me pull up a few options."),
+      PRIYA,
+    );
+    assert.equal(gate.withheld.length, 2);
+  });
+});
+
+describe("disclosure gate: the mechanism is general", () => {
+  test("a persona with no gated topics produces no gate at all", () => {
+    // The no-op guarantee: every persona that has not adopted this yet gets a
+    // prompt byte-identical to the one it got before the gate existed.
+    const gate = deriveDisclosureGate(t("c: Hello.", "r: What can I help with?"));
+    assert.deepEqual(gate.topics, []);
+    assert.deepEqual(buildDisclosureGateLines(gate), []);
+  });
+
+  test("it works on subject matter that appears nowhere in its own code", () => {
+    const topics = [
+      { label: "the payroll audit that is hanging over you", keywords: ["payroll", "audit"] },
+      { label: "how long your notice period actually runs", keywords: ["notice period", "resign"] },
+    ];
+    const before = deriveDisclosureGate(t("r: Tell me about the business."), topics);
+    assert.equal(before.withheld.length, 2);
+
+    const after = deriveDisclosureGate(t("r: Who's handling payroll for you at the moment?"), topics);
+    assert.deepEqual(after.topics.map((x) => x.earned), [true, false]);
+  });
+
+  test("a keyword containing punctuation is matched literally, not as a pattern", () => {
+    // Keywords are an author-facing extension point, so an unescaped "401(k)"
+    // would silently compile to a regex that matches "401k" and never the thing
+    // the author wrote.
+    const topics = [{ label: "your retirement savings", keywords: ["401(k)"] }];
+    assert.equal(deriveDisclosureGate(t("r: What are you doing with your 401(k)?"), topics).withheld.length, 0);
+    assert.equal(deriveDisclosureGate(t("r: What are you doing with your 401k?"), topics).withheld.length, 1);
+  });
+
+  test("a keyword matches its plural", () => {
+    const topics = [{ label: "the ratings", keywords: ["rating"] }];
+    assert.equal(deriveDisclosureGate(t("r: Which ratings matter to you?"), topics).withheld.length, 0);
+  });
+
+  test("an imperative ask counts, because it asks", () => {
+    const topics = [{ label: "your knees", keywords: ["knee", "stairs"] }];
+    assert.equal(
+      deriveDisclosureGate(t("r: Tell me how you get up and down those stairs."), topics).withheld.length,
+      0,
+    );
+  });
+
+  test("a substring of a longer word is not a match", () => {
+    const topics = [{ label: "the latch", keywords: ["latch"] }];
+    assert.equal(deriveDisclosureGate(t("r: Have you seen the hatchback?"), topics).withheld.length, 1);
+  });
+});
+
+describe("disclosure gate: derivation is pure, additive and monotonic", () => {
+  const topics = [{ label: "your budget worries", keywords: ["budget", "afford"] }];
+
+  test("a subject that has been opened never closes again", () => {
+    const opened = t("r: What's the budget?", "c: About forty.", "r: Let me show you these.");
+    assert.equal(deriveDisclosureGate(opened, topics).withheld.length, 0);
+  });
+
+  test("the same transcript yields the same gate", () => {
+    const transcript = t("c: Just looking.", "r: What's the budget?");
+    assert.deepEqual(deriveDisclosureGate(transcript, topics), deriveDisclosureGate(transcript, topics));
+  });
+
+  test("it does not disturb the existing conversation state", () => {
+    const transcript = t("c: Just looking.", "r: Which trim were you thinking?");
+    deriveDisclosureGate(transcript, topics);
+    assert.deepEqual(buildConversationStateLines(deriveConversationState(transcript)), []);
+  });
+
+  test("empty messages are ignored rather than counted as turns", () => {
+    const transcript = t("c: Just looking.", "r: ", "r: What's the budget?");
+    assert.equal(deriveDisclosureGate(transcript, topics).withheld.length, 0);
   });
 });

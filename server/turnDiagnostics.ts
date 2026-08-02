@@ -14,8 +14,10 @@ import {
   deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveDisclosureGate,
 } from "./conversationState";
 import { buildTurnStateBlock, informationLayersEnabled } from "./llm";
+import type { GatedTopic } from "./persona";
 import type { TranscriptMessage } from "@shared/schema";
 
 export const TURN_DIAGNOSTICS_FLAG = "TURN_DIAGNOSTICS";
@@ -36,6 +38,10 @@ export interface TurnDiagnosticsContext {
   difficulty: string;
   escalationTier: number;
   history: TranscriptMessage[];
+  // This scenario's gated Layer 2/3 subjects, if it declares any. Passed in
+  // rather than looked up from the scenario id so the log shows the exact list
+  // the prompt builder was handed on this turn.
+  gatedTopics?: GatedTopic[];
 }
 
 // Long free text is quoted and fenced rather than truncated. A state block cut
@@ -65,6 +71,19 @@ function summarizeAlignmentGate(history: TranscriptMessage[], active: boolean): 
   // where the flag was off. That distinction is the whole question when a rule
   // appears not to have worked.
   return `alignmentGate: ${active ? "ACTIVE" : "derived-but-INACTIVE(flag off)"} ${state}`;
+}
+
+function summarizeDisclosureGate(history: TranscriptMessage[], topics: GatedTopic[]): string {
+  if (topics.length === 0) return "disclosureGate: (persona declares no gated topics)";
+  const g = deriveDisclosureGate(history, topics);
+  return [
+    `disclosureGate: withheld=${g.withheld.length}/${g.topics.length}`,
+    ...g.topics.map(
+      (t) =>
+        `    ${t.earned ? "EARNED " : "WITHHELD"} ${JSON.stringify(t.label)}` +
+        (t.openedBy ? ` openedBy=${JSON.stringify(t.openedBy)}` : ""),
+    ),
+  ].join("\n  ");
 }
 
 function summarizeConversationState(history: TranscriptMessage[]): string {
@@ -97,6 +116,8 @@ export function logTurnInputs(ctx: TurnDiagnosticsContext): void {
     const consultantTurns = ctx.history.filter((m) => m.role === "consultant").length;
     const last = [...ctx.history].reverse().find((m) => m.role === "consultant");
 
+    const gatedTopics = ctx.gatedTopics ?? [];
+
     const parts = [
       `${TAG} msgId=${ctx.msgId} scenario=${ctx.scenarioId ?? "?"} difficulty=${ctx.difficulty}`,
       `  flags: informationLayers=${layers} alignmentGateActive=${layers} escalationTier=${ctx.escalationTier}`,
@@ -104,11 +125,12 @@ export function logTurnInputs(ctx: TurnDiagnosticsContext): void {
       `  ${fence("  lastConsultantMessage", last ? last.content.trim() : "(none)")}`,
       `  ${summarizeDirectQuestion(ctx.history)}`,
       `  ${summarizeAlignmentGate(ctx.history, layers)}`,
+      `  ${summarizeDisclosureGate(ctx.history, gatedTopics)}`,
       `  ${summarizeConversationState(ctx.history)}`,
       // The exact text appended to the prompt. This is the ground truth for
       // "which rules produced output this turn": every state-block builder,
       // including any added later, shows up here without this file changing.
-      `  ${fence("  stateBlockAppendedToPrompt", buildTurnStateBlock(ctx.history, layers) || "(empty)")}`,
+      `  ${fence("  stateBlockAppendedToPrompt", buildTurnStateBlock(ctx.history, layers, gatedTopics) || "(empty)")}`,
     ];
     console.log(parts.join("\n"));
   } catch (err) {

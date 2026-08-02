@@ -6,13 +6,16 @@ import {
   buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildDisclosureGateLines,
   buildProductDisclosureLines,
   deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveDisclosureGate,
   deriveProductDisclosure,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
+import type { GatedTopic } from "./persona";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
 
@@ -546,7 +549,11 @@ export function buildCustomerReplyStablePrefix(
 // transcript, so the cacheable stable prefix is unaffected.
 export function buildTurnStateBlock(
   transcript: TranscriptMessage[],
-  informationLayers: boolean = informationLayersEnabled()
+  informationLayers: boolean = informationLayersEnabled(),
+  // This persona's gated Layer 2/3 subjects. Defaults to none, which is what
+  // every persona that has not adopted the gate passes, and which produces a
+  // byte-identical block to the pre-gate one.
+  gatedTopics: GatedTopic[] = []
 ): string {
   const lastConsultant = [...transcript].reverse().find((m) => m.role === "consultant");
   const alreadySaid = transcript
@@ -593,6 +600,15 @@ export function buildTurnStateBlock(
   // because it is about where the conversation should be rather than what it
   // contains, and gated so the flag-off prompt is unchanged.
   if (informationLayers) lines.push(...buildAlignmentGateLines(deriveAlignmentGate(transcript)));
+  // The disclosure gate: which of this persona's hidden subjects the consultant
+  // has not asked about yet. Last, so it is the final word before the output
+  // instruction, and deliberately NOT behind the information-layers flag. That
+  // flag exists so the flag-off prompt stays byte-identical, and this clears
+  // that bar on its own terms: a persona with no gated topics produces no lines
+  // either way. Gating it as well would mean shipping an off-by-default fix for
+  // a defect that is live in production now, which is what the layer PROSE
+  // being flag-gated already left unaddressed.
+  lines.push(...buildDisclosureGateLines(deriveDisclosureGate(transcript, gatedTopics)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
@@ -614,14 +630,15 @@ export function buildCustomerReplyPrompt(
   // volatile transcript. Empty string reproduces the pre-variation prompt byte
   // for byte, so scenarios without variant pools are unaffected.
   variantSection: string = "",
-  informationLayers: boolean = informationLayersEnabled()
+  informationLayers: boolean = informationLayersEnabled(),
+  gatedTopics: GatedTopic[] = []
 ): string {
   const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier, informationLayers);
 
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
-  const stateBlock = buildTurnStateBlock(transcript, informationLayers);
+  const stateBlock = buildTurnStateBlock(transcript, informationLayers, gatedTopics);
   const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";
@@ -634,9 +651,18 @@ export async function getCustomerReply(
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
   escalationTier: number = 0,
-  variantSection: string = ""
+  variantSection: string = "",
+  gatedTopics: GatedTopic[] = []
 ): Promise<string> {
-  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
+  const input = buildCustomerReplyPrompt(
+    customerPersona,
+    transcript,
+    difficulty,
+    escalationTier,
+    variantSection,
+    informationLayersEnabled(),
+    gatedTopics,
+  );
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -664,8 +690,17 @@ export async function streamCustomerReply(
   escalationTier: number = 0,
   variantSection: string = "",
   onSentence: (sentence: string, index: number) => void = () => {},
+  gatedTopics: GatedTopic[] = [],
 ): Promise<string> {
-  const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
+  const input = buildCustomerReplyPrompt(
+    customerPersona,
+    transcript,
+    difficulty,
+    escalationTier,
+    variantSection,
+    informationLayersEnabled(),
+    gatedTopics,
+  );
   const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
 
   const stream = await client.responses.create({

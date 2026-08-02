@@ -31,6 +31,7 @@
 // mouth, so every pattern requires an explicit lexical marker rather than a guess.
 
 import type { TranscriptMessage } from "@shared/schema";
+import type { GatedTopic } from "./persona";
 
 // Topics that genuinely belong to another department in these role-plays. The rep
 // is being graded on discovery, not on quoting warranty terms or loan APRs, so
@@ -1432,4 +1433,109 @@ export function buildAlignmentGateLines(state: AlignmentGateState): string[] {
   }
 
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// The disclosure gate: has this subject been ASKED ABOUT yet?
+//
+// INFORMATION_LAYER_RULES tells the customer to hold Layer 2/3 material until
+// someone earns it, and every persona's prose says "reveal ONLY if the
+// consultant asks good discovery questions". Both are requests. Nothing read
+// the transcript and checked, so whether the rule held came down to how the
+// model felt about the wording that turn.
+//
+// It did not hold. In production the auto-sales SUV persona (Priya) opened with
+// the exact safety-rating and car-seat material her own prose called hidden,
+// within a turn or two of the greeting, because a separate clause in that same
+// prose described those specifics as things she wanted to interrogate. The
+// prose has been fixed, but a persona is one bad sentence away from the same
+// failure at any time, and 89 other personas carry the same shape of hidden
+// material. So this is the code-level half: the persona declares which subjects
+// are gated, and this decides per turn whether the consultant has actually
+// asked, from the transcript rather than from the model's judgement.
+//
+// It is conservative in the direction that matters. A subject the consultant
+// has plausibly raised is treated as earned, because a gate that wrongly stays
+// shut puts the customer in the strange position of refusing to discuss what it
+// was just asked about, which is worse for the conversation than an early
+// reveal. Undetected asking therefore degrades to the pre-gate behavior.
+// ---------------------------------------------------------------------------
+
+export interface GatedTopicState {
+  label: string;
+  // True once a consultant question has touched this subject. Monotonic: a
+  // subject cannot become unearned later in the conversation.
+  earned: boolean;
+  // The consultant question that opened it, quoted for the diagnostics log.
+  // Null while the subject is still withheld.
+  openedBy: string | null;
+}
+
+export interface DisclosureGateState {
+  topics: GatedTopicState[];
+  // Convenience for callers that only care whether anything is still shut.
+  withheld: string[];
+}
+
+// Regex-escaped so a persona author can write a keyword containing punctuation
+// ("f-150", "401(k)") without silently producing a broken or over-broad pattern.
+// The boundary anchors are applied per end, and only where that end of the
+// keyword is itself a word character: \b between two non-word characters can
+// never match, so anchoring both ends unconditionally would leave "401(k)"
+// matching nothing at all, which is a worse failure than the over-matching the
+// anchors exist to prevent.
+function keywordPattern(keyword: string): RegExp {
+  const trimmed = keyword.trim();
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const lead = /^\w/.test(trimmed) ? "\\b" : "";
+  // The optional plural only applies to a keyword ending in a word character,
+  // and it carries the trailing boundary when it is present.
+  const tail = /\w$/.test(trimmed) ? "s?\\b" : "";
+  return new RegExp(`${lead}${escaped}${tail}`, "i");
+}
+
+// True when the consultant ASKED about the subject. Restricted to asks, using
+// the same extractAsks the rest of this file uses, because a consultant who
+// merely says the word ("this one has great safety scores") has told the
+// customer something rather than invited them to open up about it. That case is
+// already handled by deriveProductDisclosure.
+function askedAbout(topic: GatedTopic, transcript: TranscriptMessage[]): string | null {
+  const patterns = topic.keywords.map(keywordPattern);
+  for (const m of transcript) {
+    if (m.role !== "consultant") continue;
+    const hit = extractAsks(m.content).find((ask) => matchesAny(ask, patterns));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Which of this persona's gated subjects the consultant has earned so far.
+// `topics` comes from the persona (gatedTopicsFor), so a persona that declares
+// none produces an empty state and, downstream, no prompt lines at all.
+export function deriveDisclosureGate(
+  transcript: TranscriptMessage[],
+  topics: GatedTopic[] = [],
+): DisclosureGateState {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+  const states = topics.map((topic) => {
+    const openedBy = askedAbout(topic, spoken);
+    return { label: topic.label, earned: openedBy !== null, openedBy };
+  });
+  return { topics: states, withheld: states.filter((t) => !t.earned).map((t) => t.label) };
+}
+
+// Renders the still-withheld subjects as a prompt line. Returns an empty array
+// once every subject has been asked about (and for any persona that declares
+// none), so a conversation where the consultant did the work reads exactly as
+// it did before this existed.
+//
+// Phrased the same way buildAlignmentGateLines is: state the situation the
+// customer is in, never the rule. A customer that says "I'm not ready to talk
+// about that yet" has broken character just as thoroughly as one that
+// volunteers the material, so the line closes by forbidding that too.
+export function buildDisclosureGateLines(state: DisclosureGateState): string[] {
+  if (state.withheld.length === 0) return [];
+  return [
+    `- Nobody has asked you anything about: ${state.withheld.join("; ")}. Do not raise any of that yourself this turn. It is not that you are hiding it; it is that you have not been asked, you would not think to lead with it, and putting it into words unprompted is not something you would do with someone you just met. If the consultant asks about it, or asks something that plainly reaches toward it, answer properly and in full. Never say that you are not ready to discuss something, never hint that there is more you are not saying, and never mention that you were not asked.`,
+  ];
 }

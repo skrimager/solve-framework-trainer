@@ -191,6 +191,54 @@ describe("buildTurnStateBlock", () => {
   });
 });
 
+// The disclosure gate reaching the prompt. The derivation itself is covered in
+// conversationState.test.ts; what matters here is that a persona's gated
+// subjects actually arrive in the text the model is handed, and that a persona
+// that declares none is left byte-identical to how it was before the gate
+// existed.
+describe("buildTurnStateBlock - disclosure gate", () => {
+  const CAR_SEAT = [
+    { label: "the practical business of getting a car seat in and out", keywords: ["car seat", "stroller"] },
+  ];
+  const transcript = [
+    msg("customer", "We're expecting in March, so we want the biggest SUV you've got."),
+    msg("consultant", "Congratulations! What brings you in today?"),
+  ];
+
+  test("a subject nobody has asked about is named as off limits this turn", () => {
+    const block = buildTurnStateBlock(transcript, false, CAR_SEAT);
+    assert.ok(block.includes("the practical business of getting a car seat in and out"));
+    assert.ok(block.includes("Do not raise any of that yourself this turn"));
+  });
+
+  test("a relevant question removes it, leaving the rest of the block untouched", () => {
+    const asked = [...transcript, msg("consultant", "How are you picturing the car seat going in day to day?")];
+    const block = buildTurnStateBlock(asked, false, CAR_SEAT);
+    assert.ok(!block.includes("Do not raise any of that yourself this turn"));
+    assert.ok(block.includes("most recent message"));
+  });
+
+  test("a persona with no gated subjects gets the identical block it always got", () => {
+    assert.equal(buildTurnStateBlock(transcript, false, []), buildTurnStateBlock(transcript, false));
+  });
+
+  test("it is not behind the information-layers flag", () => {
+    // The defect the gate fixes is live in production, so an off-by-default fix
+    // would not fix it. It is inert for untagged personas on its own terms.
+    const off = buildTurnStateBlock(transcript, false, CAR_SEAT);
+    const on = buildTurnStateBlock(transcript, true, CAR_SEAT);
+    assert.ok(off.includes("Do not raise any of that yourself this turn"));
+    assert.ok(on.includes("Do not raise any of that yourself this turn"));
+  });
+
+  test("it reaches the assembled reply prompt, in the volatile tail", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "beginner", 0, "", false, CAR_SEAT);
+    const stable = buildCustomerReplyStablePrefix(PERSONA, "beginner");
+    assert.ok(prompt.includes("Do not raise any of that yourself this turn"));
+    assert.ok(!stable.includes("Do not raise any of that yourself this turn"));
+  });
+});
+
 // The exact repro from the auto-sales price-shopper bug report: the customer
 // re-demanded the out-the-door price after the consultant had promised to fetch
 // it, and again after it had already been quoted. The model call itself is not

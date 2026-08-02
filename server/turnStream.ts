@@ -15,6 +15,7 @@ import fs from "node:fs/promises";
 
 import { streamCustomerReply, synthesizeSpeech } from "./llm";
 import { personaCoreFor } from "./persona";
+import { gatedTopicsFor } from "./personaVariants";
 import { logTurnInputs, logTurnResponse } from "./turnDiagnostics";
 import { sentenceAudioPath, sentenceAudioUrl } from "./audioCache";
 import type { Scenario, TranscriptMessage } from "@shared/schema";
@@ -106,6 +107,8 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
     });
   };
 
+  const gatedTopics = gatedTopicsFor(scenario.slug);
+
   let fullText = "";
   try {
     logTurnInputs({
@@ -114,6 +117,7 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
       difficulty: scenario.difficulty,
       escalationTier,
       history,
+      gatedTopics,
     });
     fullText = await deps.streamReply(
       personaCoreFor(scenario),
@@ -122,6 +126,7 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
       escalationTier,
       variantSection,
       handleSentence,
+      gatedTopics,
     );
     await emitChain;
     logTurnResponse(msgId, fullText);
