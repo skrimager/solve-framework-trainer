@@ -36,6 +36,26 @@ export const INPUT_COPY = {
   errorMessage: "We couldn't score that message. Please try again.",
 } as const;
 
+// The two-step email verification gate shown to anonymous visitors before the
+// message/industry form unlocks. Members never see this (isMember bypass).
+export const VERIFY_COPY = {
+  emailHeading: "Where should we send your access code?",
+  emailBody: "Enter your name and email and we'll send a 6-digit code to score your message.",
+  sendButtonLabel: "Send my code",
+  sendButtonPendingLabel: "Sending code...",
+  codeHeading: "Enter your 6-digit code",
+  codeBody: "We sent a code to",
+  codeExpiry: "It expires in 10 minutes.",
+  codeHint:
+    "Check your email for your verification code. If it's not in your inbox, look in your spam or junk folder.",
+  verifyButtonLabel: "Verify code",
+  verifyButtonPendingLabel: "Verifying...",
+  backLabel: "Use a different email",
+  resendLabel: "Resend code",
+  resendPendingLabel: "Resending...",
+  resentNote: "A new code is on its way.",
+} as const;
+
 // The industry dropdown. Values are sent to the server verbatim and must match
 // the enum in server/messageCoachRoutes.ts.
 export const INDUSTRY_OPTIONS = [

@@ -20,7 +20,7 @@ import {
   messageCoachEnabled,
   type SeatGate,
 } from "./messageCoachRoutes";
-import { MESSAGE_COACH_PRICE_CENTS } from "./messageCoach";
+import { MESSAGE_COACH_PRICE_CENTS, signMessageCoachToken } from "./messageCoach";
 import type {
   MessageCoachPaidPurchase,
   MessageCoachScore,
@@ -82,7 +82,18 @@ function patchStorage(): void {
     if (signups.some((s) => s.email === row.email)) {
       throw new Error("duplicate email"); // mirrors the DB unique constraint
     }
-    const created = { id: signups.length + 1, ...row } as MessageCoachSignup;
+    // Mirrors the real table's column defaults (code/codeExpiresAt/lastSentAt
+    // nullable, verified defaults false) for any field the caller omits, the
+    // same way getOrCreateMessageCoachSignup relies on the DB default rather
+    // than setting verified itself.
+    const created = {
+      id: signups.length + 1,
+      code: null,
+      codeExpiresAt: null,
+      verified: false,
+      lastSentAt: null,
+      ...row,
+    } as MessageCoachSignup;
     signups.push(created);
     return created;
   };
@@ -190,7 +201,27 @@ describe("Message Coach routes", () => {
     __setFetchForTests(null);
   });
 
-  function post(path: string, body: unknown) {
+  // Auto-attaches a valid verificationToken for any body with an `email`,
+  // unless the caller already set verificationToken explicitly (including to
+  // undefined, which the gate tests use to prove the check actually runs).
+  // This keeps every pre-existing free/paid/member-path test exercising the
+  // same behavior it always has, while the gate itself is covered by its own
+  // dedicated tests below.
+  function post(path: string, body: any) {
+    const withToken =
+      body && typeof body === "object" && "email" in body && !("verificationToken" in body)
+        ? { ...body, verificationToken: signMessageCoachToken(body.email) }
+        : body;
+    return fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withToken),
+    });
+  }
+
+  // For tests that need to send a request with no auto-injected token, e.g.
+  // to prove the gate rejects an anonymous request that never verified.
+  function postRaw(path: string, body: unknown) {
     return fetch(`${baseUrl}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -262,6 +293,269 @@ describe("Message Coach routes", () => {
         "Home Services",
         "Other",
       ]);
+    });
+  });
+
+  // =========================================================================
+  // Email verification: request-code, verify-code, and the gate on
+  // score/checkout that requires a valid token for the anonymous path.
+  // =========================================================================
+
+  describe("POST /api/message-coach/request-code", () => {
+    test("sends a code and stores it on the signup", async () => {
+      const res = await postRaw("/api/message-coach/request-code", {
+        email: "Coder@Example.com ",
+      });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true });
+
+      assert.equal(signups.length, 1);
+      assert.equal(signups[0].email, "coder@example.com");
+      assert.ok(signups[0].code, "a code must be stored");
+      assert.equal(signups[0].code?.length, 6);
+      assert.ok(signups[0].codeExpiresAt);
+      assert.ok(signups[0].lastSentAt);
+      assert.equal(signups[0].verified, false, "requesting a code does not verify the email");
+    });
+
+    test("reuses the existing signup rather than creating a second one", async () => {
+      await post("/api/message-coach/score", { email: "existing@example.com", message: "free one" });
+      assert.equal(signups.length, 1);
+
+      const res = await postRaw("/api/message-coach/request-code", { email: "existing@example.com" });
+      assert.equal(res.status, 200);
+      assert.equal(signups.length, 1, "must not create a second signup for the same email");
+      assert.ok(signups[0].code);
+    });
+
+    test("a disposable email is rejected before a code is generated", async () => {
+      const res = await postRaw("/api/message-coach/request-code", { email: "throwaway@mailinator.com" });
+      assert.equal(res.status, 400);
+      assert.equal(signups.length, 0);
+    });
+
+    test("a missing or malformed email is rejected", async () => {
+      for (const body of [{}, { email: "not-an-email" }]) {
+        const res = await postRaw("/api/message-coach/request-code", body);
+        assert.equal(res.status, 400);
+      }
+      assert.equal(signups.length, 0);
+    });
+
+    test("a Resend send failure surfaces a retryable 502 rather than a fake success", async () => {
+      delete process.env.RESEND_API_KEY;
+      const res = await postRaw("/api/message-coach/request-code", { email: "nosend@example.com" });
+      assert.equal(res.status, 502);
+      assert.equal((await res.json()).retryable, true);
+      // The signup and code are still stored, so a retry does not start over.
+      assert.equal(signups.length, 1);
+      assert.ok(signups[0].code);
+    });
+
+    test("404s while the feature flag is off", async () => {
+      delete process.env.MESSAGE_COACH_ENABLED;
+      const res = await postRaw("/api/message-coach/request-code", { email: "off@example.com" });
+      assert.equal(res.status, 404);
+      assert.equal(signups.length, 0);
+    });
+  });
+
+  describe("POST /api/message-coach/verify-code", () => {
+    async function requestedCode(email: string): Promise<string> {
+      await postRaw("/api/message-coach/request-code", { email });
+      const signup = signups.find((s) => s.email === email);
+      return signup!.code!;
+    }
+
+    test("a correct code returns a token and marks the signup verified", async () => {
+      const code = await requestedCode("goodcode@example.com");
+      const res = await postRaw("/api/message-coach/verify-code", {
+        email: "goodcode@example.com",
+        code,
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.verified, true);
+      assert.ok(typeof body.token === "string" && body.token.length > 0);
+
+      const signup = signups.find((s) => s.email === "goodcode@example.com")!;
+      assert.equal(signup.verified, true);
+      assert.equal(signup.code, null, "the code must be consumed (single-use)");
+      assert.equal(signup.codeExpiresAt, null);
+    });
+
+    test("the returned token passes the score gate for that same email", async () => {
+      const code = await requestedCode("tokenholder@example.com");
+      const verifyRes = await postRaw("/api/message-coach/verify-code", {
+        email: "tokenholder@example.com",
+        code,
+      });
+      const { token } = await verifyRes.json();
+
+      const res = await postRaw("/api/message-coach/score", {
+        email: "tokenholder@example.com",
+        message: "hello there",
+        verificationToken: token,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(modelCalls.length, 1);
+    });
+
+    test("a wrong code is rejected and does not consume the real one", async () => {
+      const code = await requestedCode("wrongcode@example.com");
+      const res = await postRaw("/api/message-coach/verify-code", {
+        email: "wrongcode@example.com",
+        code: code === "000000" ? "111111" : "000000",
+      });
+      assert.equal(res.status, 400);
+
+      const signup = signups.find((s) => s.email === "wrongcode@example.com")!;
+      assert.equal(signup.code, code, "an incorrect attempt must not consume the real code");
+      assert.equal(signup.verified, false);
+    });
+
+    test("an expired code is rejected", async () => {
+      await postRaw("/api/message-coach/request-code", { email: "expired@example.com" });
+      const signup = signups.find((s) => s.email === "expired@example.com")!;
+      // Force the stored code into the past, as if the 10 minute window lapsed.
+      signup.codeExpiresAt = new Date(Date.now() - 1000).toISOString();
+
+      const res = await postRaw("/api/message-coach/verify-code", {
+        email: "expired@example.com",
+        code: signup.code!,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(signups.find((s) => s.email === "expired@example.com")!.verified, false);
+    });
+
+    test("a code cannot be used twice", async () => {
+      const code = await requestedCode("reuse@example.com");
+      const first = await postRaw("/api/message-coach/verify-code", { email: "reuse@example.com", code });
+      assert.equal(first.status, 200);
+
+      const second = await postRaw("/api/message-coach/verify-code", { email: "reuse@example.com", code });
+      assert.equal(second.status, 400, "a consumed code must not verify a second time");
+    });
+
+    test("verifying with no prior code request is rejected", async () => {
+      const res = await postRaw("/api/message-coach/verify-code", {
+        email: "nevercalled@example.com",
+        code: "123456",
+      });
+      assert.equal(res.status, 400);
+      assert.equal(signups.length, 0);
+    });
+
+    test("404s while the feature flag is off", async () => {
+      const code = await requestedCode("stillon@example.com");
+      delete process.env.MESSAGE_COACH_ENABLED;
+      const res = await postRaw("/api/message-coach/verify-code", { email: "stillon@example.com", code });
+      assert.equal(res.status, 404);
+    });
+  });
+
+  describe("Verification gate on score/checkout (anonymous path)", () => {
+    test("score is refused with 401 verification_required when no token is sent", async () => {
+      const res = await postRaw("/api/message-coach/score", {
+        email: "unverified@example.com",
+        message: "hello",
+      });
+      assert.equal(res.status, 401);
+      assert.equal((await res.json()).code, "verification_required");
+      assert.equal(modelCalls.length, 0, "an unverified request must never reach the model");
+      assert.equal(signups.length, 0, "an unverified request must not create a signup or spend the free score");
+    });
+
+    test("score is refused when the token is for a different email", async () => {
+      const res = await postRaw("/api/message-coach/score", {
+        email: "victim@example.com",
+        message: "hello",
+        verificationToken: signMessageCoachToken("attacker@example.com"),
+      });
+      assert.equal(res.status, 401);
+      assert.equal(modelCalls.length, 0);
+      assert.equal(signups.length, 0);
+    });
+
+    test("score is refused when the token is expired", async () => {
+      const staleToken = signMessageCoachToken("stale@example.com", Date.now() - 2 * 60 * 60 * 1000);
+      const res = await postRaw("/api/message-coach/score", {
+        email: "stale@example.com",
+        message: "hello",
+        verificationToken: staleToken,
+      });
+      assert.equal(res.status, 401);
+      assert.equal(modelCalls.length, 0);
+    });
+
+    test("score is refused when the token is garbage", async () => {
+      const res = await postRaw("/api/message-coach/score", {
+        email: "garbage@example.com",
+        message: "hello",
+        verificationToken: "not-a-real-token",
+      });
+      assert.equal(res.status, 401);
+      assert.equal(modelCalls.length, 0);
+    });
+
+    test("a valid token for the claimed email allows the free score", async () => {
+      const res = await postRaw("/api/message-coach/score", {
+        email: "legit@example.com",
+        message: "hello",
+        verificationToken: signMessageCoachToken("legit@example.com"),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(modelCalls.length, 1);
+    });
+
+    test("a member with an active seat is never asked to verify", async () => {
+      users.push({ id: 77, officeId: 3 } as User);
+      seatAnswer = { ok: true };
+      const res = await postRaw("/api/message-coach/score", { userId: 77, message: "member message" });
+      assert.equal(res.status, 200);
+      assert.equal((await res.json()).source, "member");
+      assert.equal(signups.length, 0);
+    });
+
+    test("checkout is refused with 401 verification_required when no token is sent", async () => {
+      process.env.STRIPE_SECRET_KEY = "sk_test_dummy";
+      __setStripeForTests({
+        checkout: {
+          sessions: {
+            create: async () => {
+              throw new Error("Stripe must not be called for an unverified checkout");
+            },
+          },
+        },
+      });
+      const res = await postRaw("/api/message-coach/checkout", { email: "unverified@example.com" });
+      assert.equal(res.status, 401);
+      assert.equal((await res.json()).code, "verification_required");
+      assert.equal(signups.length, 0);
+      assert.equal(purchases.length, 0);
+    });
+
+    test("checkout succeeds with a valid token for the claimed email", async () => {
+      process.env.STRIPE_SECRET_KEY = "sk_test_dummy";
+      __setStripeForTests({
+        checkout: {
+          sessions: {
+            create: async () => ({ id: "cs_verified", url: "https://checkout.stripe.com/c/pay/cs_verified" }),
+          },
+        },
+      });
+      (storage as any).createMessageCoachPaidPurchase = async (row: any) => {
+        const created = { id: purchases.length + 1, ...row } as MessageCoachPaidPurchase;
+        purchases.push(created);
+        return created;
+      };
+
+      const res = await postRaw("/api/message-coach/checkout", {
+        email: "verifiedbuyer@example.com",
+        verificationToken: signMessageCoachToken("verifiedbuyer@example.com"),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(purchases.length, 1);
     });
   });
 
@@ -369,7 +663,11 @@ describe("Message Coach routes", () => {
       const res = await fetch(`${brokenUrl}/api/message-coach/score`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "unlucky@example.com", message: "hello" }),
+        body: JSON.stringify({
+          email: "unlucky@example.com",
+          message: "hello",
+          verificationToken: signMessageCoachToken("unlucky@example.com"),
+        }),
       });
       assert.equal(res.status, 502);
       assert.equal(attempts, 1);
@@ -614,6 +912,7 @@ describe("Message Coach routes", () => {
         body: JSON.stringify({
           email: "paid-unlucky@example.com",
           message: "hello",
+          verificationToken: signMessageCoachToken("paid-unlucky@example.com"),
           paidCheckoutSessionId: purchase.stripeCheckoutSessionId,
         }),
       });

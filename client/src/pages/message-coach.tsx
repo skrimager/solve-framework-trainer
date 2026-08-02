@@ -22,6 +22,7 @@ import {
   POSITIONING_COPY,
   RESULT_COPY,
   UNAVAILABLE_COPY,
+  VERIFY_COPY,
 } from "@/lib/messageCoachCopy";
 
 // Public Message Coach page. No auth: an anonymous visitor gets one free score
@@ -38,7 +39,13 @@ const ORANGE = "#E06D00";
 // keeps it to this tab and this visit, matching how the demo parks its token.
 const PAID_ROUND_TRIP_KEY = "solve-message-coach-round-trip";
 
-type ParkedDraft = { message: string; industry: string | null; name: string; email: string };
+type ParkedDraft = {
+  message: string;
+  industry: string | null;
+  name: string;
+  email: string;
+  verificationToken: string | null;
+};
 
 function parkDraftForCheckout(draft: ParkedDraft): void {
   try {
@@ -60,6 +67,8 @@ function takeParkedDraft(): ParkedDraft | null {
       industry: typeof parsed.industry === "string" ? parsed.industry : null,
       name: typeof parsed.name === "string" ? parsed.name : "",
       email: parsed.email,
+      verificationToken:
+        typeof parsed.verificationToken === "string" ? parsed.verificationToken : null,
     };
   } catch {
     return null;
@@ -85,6 +94,16 @@ export default function MessageCoach() {
   const [paywall, setPaywall] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Anonymous visitors must verify their email with a 6-digit code before the
+  // message/industry form unlocks. Members skip this entirely (see isMember
+  // below). Holds the signed token returned by verify-code, which is then
+  // forwarded on every score/checkout call.
+  const [verificationToken, setVerificationToken] = useState<string | null>(null);
+  const [verifyStep, setVerifyStep] = useState<"email" | "code">("email");
+  const [code, setCode] = useState("");
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [codeResent, setCodeResent] = useState(false);
 
   // Set on the return trip from Stripe. Holds the Checkout Session id, which the
   // server resolves to the purchase; the client never handles a database id.
@@ -112,6 +131,10 @@ export default function MessageCoach() {
         setIndustry(parked.industry);
         setName(parked.name);
         setEmail(parked.email);
+        if (parked.verificationToken) {
+          setVerificationToken(parked.verificationToken);
+          setVerifyStep("code");
+        }
       }
       setPaidSessionId(params.get("session_id"));
       setPaywall(false);
@@ -128,6 +151,7 @@ export default function MessageCoach() {
         industry,
         paidCheckoutSessionId: args.useCheckoutSession ? paidSessionId : null,
         userId: user?.id ?? null,
+        verificationToken,
       }),
     onSuccess: (data) => {
       if ("kind" in data) {
@@ -152,18 +176,51 @@ export default function MessageCoach() {
   });
 
   const checkoutMutation = useMutation({
-    mutationFn: () => messageCoachApi.checkout({ email: email.trim(), name: name.trim() || undefined }),
+    mutationFn: () =>
+      messageCoachApi.checkout({
+        email: email.trim(),
+        name: name.trim() || undefined,
+        verificationToken,
+      }),
     onSuccess: (url) => {
-      parkDraftForCheckout({ message, industry, name, email });
+      parkDraftForCheckout({ message, industry, name, email, verificationToken });
       window.location.href = url;
     },
     onError: (e: Error) => setError(e.message || PAYWALL_COPY.errorMessage),
   });
 
-  // Members are already identified, so the email gate does not apply to them.
+  const requestCodeMutation = useMutation({
+    mutationFn: () => messageCoachApi.requestCode(email.trim()),
+    onSuccess: () => {
+      setVerifyError(null);
+      setVerifyStep("code");
+    },
+    onError: (e: Error) => setVerifyError(e.message),
+  });
+
+  const resendCodeMutation = useMutation({
+    mutationFn: () => messageCoachApi.requestCode(email.trim()),
+    onSuccess: () => {
+      setVerifyError(null);
+      setCodeResent(true);
+    },
+    onError: (e: Error) => setVerifyError(e.message),
+  });
+
+  const verifyCodeMutation = useMutation({
+    mutationFn: () => messageCoachApi.verifyCode(email.trim(), code.trim()),
+    onSuccess: (data) => {
+      setVerifyError(null);
+      setVerificationToken(data.token);
+    },
+    onError: (e: Error) => setVerifyError(e.message),
+  });
+
+  // Members are already identified, so the email verification gate does not
+  // apply to them at all.
   const isMember = Boolean(user?.id);
-  const canSubmit =
-    message.trim().length > 0 && (isMember || (email.trim().length > 0 && name.trim().length > 0));
+  const isVerified = isMember || Boolean(verificationToken);
+  const canSubmit = message.trim().length > 0 && isVerified;
 
   if (config.isLoading) {
     return (
@@ -209,91 +266,209 @@ export default function MessageCoach() {
           </CardContent>
         </Card>
 
-        <form
-          className="space-y-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (canSubmit && !scoreMutation.isPending) {
-              scoreMutation.mutate({ useCheckoutSession: Boolean(paidSessionId) });
-            }
-          }}
-        >
-          <div className="space-y-1.5">
-            <Label htmlFor="message-coach-message">{INPUT_COPY.messageLabel}</Label>
-            <Textarea
-              id="message-coach-message"
-              rows={7}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder={INPUT_COPY.messagePlaceholder}
-              data-testid="input-message-coach-message"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="message-coach-industry">{INPUT_COPY.industryLabel}</Label>
-            <select
-              id="message-coach-industry"
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
-              value={industry ?? ""}
-              onChange={(e) => setIndustry(e.target.value || null)}
-              data-testid="select-message-coach-industry"
-            >
-              <option value="">Choose one</option>
-              {INDUSTRY_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">{INPUT_COPY.industryHint}</p>
-          </div>
-
-          {/* Email capture gate: shown before any result is revealed, the same
-              place in the flow as the demo's email step. Members skip it. */}
-          {!isMember && (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="message-coach-name">{INPUT_COPY.nameLabel}</Label>
-                <Input
-                  id="message-coach-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={INPUT_COPY.namePlaceholder}
-                  data-testid="input-message-coach-name"
-                />
+        {/* Anonymous visitors verify their email with a 6-digit code before the
+            message/industry form appears at all. Members skip this entirely. */}
+        {!isMember && !isVerified && verifyStep === "email" && (
+          <Card data-testid="card-message-coach-verify-email">
+            <CardContent className="space-y-4 pt-6">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold" data-testid="text-message-coach-verify-email-heading">
+                  {VERIFY_COPY.emailHeading}
+                </h2>
+                <p className="text-sm text-muted-foreground">{VERIFY_COPY.emailBody}</p>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="message-coach-email">{INPUT_COPY.emailLabel}</Label>
-                <Input
-                  id="message-coach-email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder={INPUT_COPY.emailPlaceholder}
-                  data-testid="input-message-coach-email"
-                />
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (name.trim() && email.trim() && !requestCodeMutation.isPending) {
+                    requestCodeMutation.mutate();
+                  }
+                }}
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="message-coach-name">{INPUT_COPY.nameLabel}</Label>
+                    <Input
+                      id="message-coach-name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder={INPUT_COPY.namePlaceholder}
+                      data-testid="input-message-coach-name"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="message-coach-email">{INPUT_COPY.emailLabel}</Label>
+                    <Input
+                      id="message-coach-email"
+                      type="email"
+                      autoComplete="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder={INPUT_COPY.emailPlaceholder}
+                      data-testid="input-message-coach-email"
+                    />
+                  </div>
+                </div>
+                {verifyError && (
+                  <p className="text-sm text-destructive" data-testid="text-message-coach-verify-email-error">
+                    {verifyError}
+                  </p>
+                )}
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={!name.trim() || !email.trim() || requestCodeMutation.isPending}
+                  data-testid="button-message-coach-send-code"
+                >
+                  {requestCodeMutation.isPending
+                    ? VERIFY_COPY.sendButtonPendingLabel
+                    : VERIFY_COPY.sendButtonLabel}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+
+        {!isMember && !isVerified && verifyStep === "code" && (
+          <Card data-testid="card-message-coach-verify-code">
+            <CardContent className="space-y-4 pt-6">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold" data-testid="text-message-coach-verify-code-heading">
+                  {VERIFY_COPY.codeHeading}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {VERIFY_COPY.codeBody} <span className="font-medium text-foreground">{email}</span>.{" "}
+                  {VERIFY_COPY.codeExpiry}
+                </p>
               </div>
-              <p className="text-xs text-muted-foreground sm:col-span-2">{INPUT_COPY.gateNote}</p>
-            </div>
-          )}
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (code.trim() && !verifyCodeMutation.isPending) {
+                    verifyCodeMutation.mutate();
+                  }
+                }}
+              >
+                <div className="space-y-1.5">
+                  <Label htmlFor="message-coach-code">{VERIFY_COPY.codeHeading}</Label>
+                  <Input
+                    id="message-coach-code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    placeholder="Enter your 6-digit code"
+                    maxLength={6}
+                    data-testid="input-message-coach-code"
+                  />
+                  <p className="text-sm text-muted-foreground">{VERIFY_COPY.codeHint}</p>
+                </div>
+                {verifyError && (
+                  <p className="text-sm text-destructive" data-testid="text-message-coach-verify-code-error">
+                    {verifyError}
+                  </p>
+                )}
+                {codeResent && !verifyError && (
+                  <p className="text-sm text-muted-foreground">{VERIFY_COPY.resentNote}</p>
+                )}
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={!code.trim() || verifyCodeMutation.isPending}
+                  data-testid="button-message-coach-verify-code"
+                >
+                  {verifyCodeMutation.isPending
+                    ? VERIFY_COPY.verifyButtonPendingLabel
+                    : VERIFY_COPY.verifyButtonLabel}
+                </Button>
+              </form>
+              <div className="flex items-center justify-between text-sm">
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    setVerifyStep("email");
+                    setCode("");
+                    setVerifyError(null);
+                    setCodeResent(false);
+                  }}
+                  data-testid="button-message-coach-verify-back"
+                >
+                  {VERIFY_COPY.backLabel}
+                </button>
+                <button
+                  type="button"
+                  className="text-primary hover:underline disabled:opacity-50"
+                  onClick={() => resendCodeMutation.mutate()}
+                  disabled={resendCodeMutation.isPending}
+                  data-testid="button-message-coach-resend-code"
+                >
+                  {resendCodeMutation.isPending ? VERIFY_COPY.resendPendingLabel : VERIFY_COPY.resendLabel}
+                </button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
-          {error && (
-            <p className="text-sm text-destructive" data-testid="text-message-coach-error">
-              {error}
-            </p>
-          )}
-
-          <Button
-            type="submit"
-            className="w-full"
-            disabled={!canSubmit || scoreMutation.isPending}
-            data-testid="button-message-coach-submit"
+        {isVerified && (
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (canSubmit && !scoreMutation.isPending) {
+                scoreMutation.mutate({ useCheckoutSession: Boolean(paidSessionId) });
+              }
+            }}
           >
-            {scoreMutation.isPending ? INPUT_COPY.submitPendingLabel : INPUT_COPY.submitLabel}
-          </Button>
-        </form>
+            <div className="space-y-1.5">
+              <Label htmlFor="message-coach-message">{INPUT_COPY.messageLabel}</Label>
+              <Textarea
+                id="message-coach-message"
+                rows={7}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder={INPUT_COPY.messagePlaceholder}
+                data-testid="input-message-coach-message"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="message-coach-industry">{INPUT_COPY.industryLabel}</Label>
+              <select
+                id="message-coach-industry"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+                value={industry ?? ""}
+                onChange={(e) => setIndustry(e.target.value || null)}
+                data-testid="select-message-coach-industry"
+              >
+                <option value="">Choose one</option>
+                {INDUSTRY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">{INPUT_COPY.industryHint}</p>
+            </div>
+
+            {error && (
+              <p className="text-sm text-destructive" data-testid="text-message-coach-error">
+                {error}
+              </p>
+            )}
+
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={!canSubmit || scoreMutation.isPending}
+              data-testid="button-message-coach-submit"
+            >
+              {scoreMutation.isPending ? INPUT_COPY.submitPendingLabel : INPUT_COPY.submitLabel}
+            </Button>
+          </form>
+        )}
 
         {confirming && (
           <Card data-testid="card-message-coach-confirming">

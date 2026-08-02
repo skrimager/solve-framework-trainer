@@ -1,5 +1,5 @@
 import type { Lead } from "@shared/schema";
-import { buildVerificationEmail } from "./demo";
+import { buildVerificationEmail, buildMessageCoachVerificationEmail } from "./demo";
 import { APP_URL } from "./stripe";
 
 // Lead-notification emails via the Resend HTTP API. No SDK dependency: we POST
@@ -418,6 +418,49 @@ export async function sendDemoVerificationCode(email: string, code: string): Pro
     return true;
   } catch (err) {
     console.warn(`[notifications] Failed to send demo verification code to ${email}:`, err);
+    return false;
+  }
+}
+
+// Sends Message Coach's 6-digit verification code to the visitor's own email.
+// Same transport and same "return whether it actually sent" contract as
+// sendDemoVerificationCode above (the code IS the access gate, so the caller
+// must know if it failed to send and offer a retry rather than silently
+// stranding the visitor).
+export async function sendMessageCoachVerificationCode(email: string, code: string): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn(
+      "[notifications] RESEND_API_KEY is not set; cannot send Message Coach verification code.",
+    );
+    return false;
+  }
+
+  try {
+    const { subject, html } = buildMessageCoachVerificationEmail(code);
+    const res = await getFetch()(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_ADDRESS,
+        to: [email],
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(
+        `[notifications] Resend returned ${res.status} for Message Coach code to ${email}: ${detail}`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[notifications] Failed to send Message Coach verification code to ${email}:`, err);
     return false;
   }
 }

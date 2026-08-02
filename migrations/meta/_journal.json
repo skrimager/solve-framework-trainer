@@ -218,6 +218,13 @@
       "when": 1783106667500,
       "tag": "0030_message_coach_resend_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1783106668000,
+      "tag": "0031_message_coach_verification",
+      "breakpoints": true
     }
   ]
 }
