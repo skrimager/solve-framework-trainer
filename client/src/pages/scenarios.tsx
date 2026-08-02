@@ -11,7 +11,7 @@ import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles, FlaskConical } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles, FlaskConical, MessageSquare } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
 import { isInternalTestScenario } from "@shared/internalTestScenarios";
 import { REQUIRED_QUALIFYING, QUALIFYING_SCORE } from "@/lib/progression";
@@ -452,6 +452,46 @@ export default function Scenarios() {
                   data-testid="button-open-real-conversation"
                 >
                   Score a Real Conversation
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+          {/* Members with an active seat get unlimited access to Message Coach
+              (score an outbound text or email) right from the practice
+              screen, at every level. Gated on seatActive rather than just
+              being logged in, because a pending/inactive seat would fall
+              through to the anonymous paid path server-side and "Unlimited
+              with your membership" would be inaccurate for that user.
+              Routes to the same /message-coach page; the backend's member
+              path (an active seat) already skips the email-verification
+              gate and the $4.99 paywall entirely, so this is truly
+              unlimited for a logged-in member with an active seat. */}
+          {user?.seatActive && (
+            <Card
+              className="border-2 shadow-[0_0_20px_rgba(224,109,0,0.25)]"
+              style={{ borderColor: "#E06D00" }}
+              data-testid="card-score-outbound-message"
+            >
+              <CardHeader>
+                <div className="flex items-center gap-2">
+                  <MessageSquare className="h-5 w-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
+                  <CardTitle className="text-lg" style={{ color: "#FBF9F5" }}>
+                    Score an Outbound Text or Email
+                  </CardTitle>
+                </div>
+                <CardDescription className="pt-1">
+                  Paste in a text or email before you send it and get an instant score,
+                  coaching, and a rewrite against the same SOLVE rubric. Unlimited with
+                  your membership.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button
+                  onClick={() => navigate("/message-coach")}
+                  style={{ backgroundColor: "#E06D00", color: "white" }}
+                  data-testid="button-open-message-coach"
+                >
+                  Score a Message
                 </Button>
               </CardContent>
             </Card>
