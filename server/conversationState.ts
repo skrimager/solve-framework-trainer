@@ -435,7 +435,13 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
     if (!text) continue;
 
     if (m.role === "customer") {
-      if (matchesAny(text, ASK_MARKERS)) {
+      // SOFT_ASK_MARKERS, not ASK_MARKERS. Rule S already recognizes "can you
+      // please tell me a little more about the safety features" as an ask, so
+      // gating Rule 2 on the stricter list left the same sentence about
+      // WARRANTY invisible to the department mechanism. A closed topic that
+      // only stays closed when the customer phrases the question tidily is not
+      // closed, and the department topics are the ones it matters most for.
+      if (matchesAny(text, SOFT_ASK_MARKERS)) {
         for (const topic of topics) {
           if (mentionsTopic(text, topic)) {
             everAsked.add(topic);
@@ -841,6 +847,34 @@ const IMPERATIVE_ASK_MARKERS: RegExp[] = [
   // verb has to be about acquiring information now, which is what keeps "let's
   // come back to that" out: parking a topic is not asking for anything.
   /\blet'?s (?:figure out|find out|work out|dig into|go through|talk through|understand|hear)\b/i,
+  /\blet me ask\b/i,
+];
+
+// A rep sentence carrying an interrogative CLAUSE rather than an interrogative
+// topic. Subject-auxiliary inversion ("does that sound", "were you hoping",
+// "how many kids do you have") is what makes an English sentence a question, so
+// matching on the inversion matches the grammar instead of a list of subjects
+// the rep might be asking about. This is the only signal left when a voice
+// transcript arrives as one unpunctuated run-on and the whole reply is a single
+// "sentence" with no trailing question mark.
+//
+// This was the gap on the reported must-pass shape: the rep answers with real
+// data and closes with a check-in — "...28 on the highway and 21 in the city
+// which for your commute would be a real improvement does that sound like what
+// you were expecting or were you hoping to do better than that" — which carries
+// no "?", no "tell me", and no hortative, so nothing recognized it as an ask
+// and the customer was never told which question it owed an answer to.
+const INTERROGATIVE_CLAUSE_MARKERS: RegExp[] = [
+  // Auxiliary inverted over "you". Second person is who the rep is asking.
+  // Ordinary declaratives put the pronoun first ("if you can", "you are"), so
+  // requiring the auxiliary to lead is what keeps them out.
+  /\b(?:do|does|did|are|is|was|were|have|has|can|could|will|would|should)\s+you\b/i,
+  // Auxiliary inverted over a demonstrative, closed by a check-in verb. This is
+  // the rep confirming that what they just put in front of the customer landed.
+  /\b(?:do|does|is|was|would|will)\s+(?:that|this|it|these|those)\s+(?:sound|seem|feel|work|help|fit|match|line up|come close|make sense|get you)\b/i,
+  // Wh-word followed by an inverted auxiliary. Catches "what does that look
+  // like" without catching "that's what we do" or "show me what I can get".
+  /\b(?:what|how|when|where|which|why|who)\b[^.!?]{0,20}\b(?:do|does|did|are|is|was|were|have|has|can|could|will|would|should)\s+(?:i|we|you|he|she|they|that|this|it)\b/i,
 ];
 
 // The rep NARROWING: asking the customer to convert something general into a
@@ -909,7 +943,10 @@ export interface DirectQuestionState {
 
 function extractAsks(text: string): string[] {
   return splitSentences(text).filter(
-    (s) => s.endsWith("?") || matchesAny(s, IMPERATIVE_ASK_MARKERS),
+    (s) =>
+      s.endsWith("?") ||
+      matchesAny(s, IMPERATIVE_ASK_MARKERS) ||
+      matchesAny(s, INTERROGATIVE_CLAUSE_MARKERS),
   );
 }
 
@@ -933,8 +970,10 @@ export function deriveDirectQuestion(transcript: TranscriptMessage[]): DirectQue
       .find((m) => m.role === "customer")
       ?.content.trim() ?? "";
 
+  // Kept on the same ask list as Rule 2 above and as the Rule S branch below, so
+  // one spoken question cannot be an ask for one rule and not for the other.
   const redirected =
-    matchesAny(text, REDIRECT_MARKERS) && matchesAny(previous, ASK_MARKERS)
+    matchesAny(text, REDIRECT_MARKERS) && matchesAny(previous, SOFT_ASK_MARKERS)
       ? (Object.keys(TOPIC_PATTERNS) as DeflectableTopic[]).find((topic) => mentionsTopic(previous, topic))
       : undefined;
 
