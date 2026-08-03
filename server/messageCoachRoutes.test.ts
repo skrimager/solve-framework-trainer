@@ -29,12 +29,21 @@ import type {
   User,
 } from "@shared/schema";
 
-const GOOD_REPLY = JSON.stringify({
+const GOOD_REPLY_OBJECT = {
   score: 31,
   stalledStep: "asked for a decision before any discovery",
   coaching: 'You opened with "ready to sell", which asks a stranger to decide.',
   rewrite: "Hi [their name], quick question about your place. Reply STOP to opt out.",
-});
+};
+const GOOD_REPLY = JSON.stringify(GOOD_REPLY_OBJECT);
+// scoreOutreachMessage's internal rewrite verification re-scores the rewrite
+// through this same responder before returning it. These route tests are not
+// about that loop (server/messageCoach.test.ts owns that), they are about
+// routing, gating and persistence, so this reply always clears the floor on
+// the first check: every second call this responder sees is the loop's
+// verification call, and it reports a passing score so no retry fires and
+// call counts below stay meaningful for what the routes themselves do.
+const GOOD_REPLY_VERIFIED = JSON.stringify({ ...GOOD_REPLY_OBJECT, score: 92 });
 
 let signups: MessageCoachSignup[];
 let scores: MessageCoachScore[];
@@ -172,7 +181,7 @@ describe("Message Coach routes", () => {
     registerMessageCoachRoutes(app, {
       responder: async (input: string) => {
         modelCalls.push(input);
-        return GOOD_REPLY;
+        return modelCalls.length % 2 === 1 ? GOOD_REPLY : GOOD_REPLY_VERIFIED;
       },
       seatGate: async () => seatAnswer,
     });
@@ -398,7 +407,8 @@ describe("Message Coach routes", () => {
         verificationToken: token,
       });
       assert.equal(res.status, 200);
-      assert.equal(modelCalls.length, 1);
+      // 1 call to score, 1 to verify the rewrite clears the floor.
+      assert.equal(modelCalls.length, 2);
     });
 
     test("a wrong code is rejected and does not consume the real one", async () => {
@@ -505,7 +515,7 @@ describe("Message Coach routes", () => {
         verificationToken: signMessageCoachToken("legit@example.com"),
       });
       assert.equal(res.status, 200);
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
     });
 
     test("a member with an active seat is never asked to verify", async () => {
@@ -576,7 +586,7 @@ describe("Message Coach routes", () => {
       assert.equal(body.score, 31);
       assert.equal(body.source, "free");
       assert.match(body.rewrite, /Reply STOP to opt out\./);
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
 
       assert.equal(signups.length, 1);
       assert.equal(signups[0].email, "first@example.com", "the email must be normalized");
@@ -599,7 +609,7 @@ describe("Message Coach routes", () => {
         message: "first message",
       });
       assert.equal(first.status, 200);
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
 
       const second = await post("/api/message-coach/score", {
         email: "repeat@example.com",
@@ -611,7 +621,7 @@ describe("Message Coach routes", () => {
       assert.match(body.message, /free score/);
       assert.ok(!body.message.includes("—"), "no em dash in the paywall message");
 
-      assert.equal(modelCalls.length, 1, "the refused request must not have called the model");
+      assert.equal(modelCalls.length, 2, "the refused request must not have called the model");
       assert.equal(scores.length, 1);
       assert.equal(signups.length, 1);
     });
@@ -628,7 +638,7 @@ describe("Message Coach routes", () => {
         402,
       );
       assert.equal(signups.length, 1);
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
     });
 
     test("a different email still gets its own free score", async () => {
@@ -639,7 +649,7 @@ describe("Message Coach routes", () => {
       });
       assert.equal(other.status, 200);
       assert.equal(signups.length, 2);
-      assert.equal(modelCalls.length, 2);
+      assert.equal(modelCalls.length, 4);
     });
 
     // A model failure is our fault, not the visitor's, so the free score is
@@ -819,7 +829,7 @@ describe("Message Coach routes", () => {
       assert.equal(res.status, 200);
       const body = await res.json();
       assert.equal(body.source, "paid");
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
       assert.equal(purchases[0].status, "consumed");
       assert.ok(purchases[0].consumedAt);
       assert.equal(purchases[0].consumedByScoreId, scores[1].id);
@@ -832,7 +842,7 @@ describe("Message Coach routes", () => {
         paidCheckoutSessionId: purchase.stripeCheckoutSessionId,
       });
       assert.equal(again.status, 409);
-      assert.equal(modelCalls.length, 1, "a spent purchase must not reach the model");
+      assert.equal(modelCalls.length, 2, "a spent purchase must not reach the model");
       assert.equal(scores.length, 2);
     });
 
@@ -943,7 +953,7 @@ describe("Message Coach routes", () => {
         assert.equal(res.status, 200);
         assert.equal((await res.json()).source, "member");
       }
-      assert.equal(modelCalls.length, 3);
+      assert.equal(modelCalls.length, 6);
       assert.equal(scores.length, 3);
       // A member is already captured as a user, so no lead row is created and
       // no free-score allowance is touched.
@@ -985,7 +995,7 @@ describe("Message Coach routes", () => {
         message: "second",
       });
       assert.equal(second.status, 402);
-      assert.equal(modelCalls.length, 1);
+      assert.equal(modelCalls.length, 2);
     });
   });
 

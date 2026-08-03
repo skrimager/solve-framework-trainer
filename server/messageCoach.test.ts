@@ -111,6 +111,29 @@ const GOOD_REPLY = {
   rewrite: "Hi [their name], quick question about your place. Reply STOP to opt out.",
 };
 
+// A responder for tests that are not about the rewrite verification loop
+// itself (cache behaviour, prompt construction, etc). Every call, including
+// the loop's internal re-check of the rewrite, returns a rewrite that clears
+// MESSAGE_COACH_REWRITE_FLOOR on the first check, so exactly one extra
+// verification call happens beyond the original score call and callers of
+// this helper do not need to reason about retries.
+function passingRewriteResponder(
+  overrides: Partial<typeof GOOD_REPLY> = {},
+): MessageCoachResponder & { calls: { input: string; cacheKey: string }[] } {
+  const original = { ...GOOD_REPLY, ...overrides };
+  const passingCheck = { ...original, score: 92 };
+  const calls: { input: string; cacheKey: string }[] = [];
+  const fn = (async (input: string, cacheKey: string) => {
+    calls.push({ input, cacheKey });
+    // Call 1 (per scored message): the original score. Call 2: the rewrite
+    // verification check, always passing so no retry is triggered.
+    const reply = calls.length % 2 === 1 ? original : passingCheck;
+    return JSON.stringify(reply);
+  }) as MessageCoachResponder & { calls: typeof calls };
+  fn.calls = calls;
+  return fn;
+}
+
 function fakeStripe(calls: any[] = [], retrieved: Record<string, any> = {}): void {
   __setStripeForTests({
     checkout: {
@@ -189,6 +212,19 @@ describe("cold outreach rubric prompt", () => {
     assert.match(p, /Never invent facts/);
     assert.match(p, /placeholder in square brackets/);
     assert.match(p, /Never use fake urgency, false scarcity, invented deadlines/);
+  });
+
+  // The catch-22 the customer described directly: a rewrite that chases a
+  // perfect 100 can lose the reader before any of that thoroughness pays
+  // off, so the rubric must ask for a realistic ceiling instead of maximum
+  // score, and the coaching must connect the two scores, not just describe
+  // the rewrite in the abstract.
+  test("targets a realistic 90 to 95 rewrite instead of a maximal 100, and ties coaching to the score gap", () => {
+    const p = MESSAGE_COACH_COLD_OUTREACH_SYSTEM;
+    assert.match(p, /it would score at least 90/);
+    assert.match(p, /Aim for a realistic 90 to 95, not a maximal 100/);
+    assert.match(p, /a longer first-contact message loses the reader's attention/);
+    assert.match(p, /must also name the specific gap between the original's score and what the rewrite fixes/);
   });
 
   test("asks the model for the house voice: no dashes anywhere in its output", () => {
@@ -336,14 +372,16 @@ describe("stripEmDashes", () => {
 describe("score cache", () => {
   test("an identical message and industry returns the stored result with no model call", async () => {
     const cache = fakeCache();
-    const first = spyResponder(GOOD_REPLY);
+    const first = passingRewriteResponder();
     const original = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
       responder: first,
       cache,
     });
-    assert.equal(first.calls.length, 1);
+    // One call for the original score, one to verify the rewrite clears the
+    // floor. The rewrite passes on the first check here, so no retry fires.
+    assert.equal(first.calls.length, 2);
 
-    const second = spyResponder({ ...GOOD_REPLY, score: 99 });
+    const second = passingRewriteResponder({ score: 99 });
     const repeat = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
       responder: second,
       cache,
@@ -354,12 +392,13 @@ describe("score cache", () => {
 
   test("a different message or a different industry is a different result", async () => {
     const cache = fakeCache();
-    const r = spyResponder(GOOD_REPLY);
+    const r = passingRewriteResponder();
     await scoreOutreachMessage("message A", "Auto", { responder: r, cache });
     await scoreOutreachMessage("message B", "Auto", { responder: r, cache });
     await scoreOutreachMessage("message A", "Mortgage", { responder: r, cache });
     await scoreOutreachMessage("message A", null, { responder: r, cache });
-    assert.equal(r.calls.length, 4);
+    // 4 distinct scores, 2 model calls each (score + rewrite verification).
+    assert.equal(r.calls.length, 8);
     assert.equal(new Set(cache.rows.map((row) => row.contentHash)).size, 4);
   });
 
@@ -367,7 +406,7 @@ describe("score cache", () => {
   // ours and must never be read by, or collide with, transcript scoring.
   test("writes rows tagged so they cannot be confused with transcript scores", async () => {
     const cache = fakeCache();
-    await scoreOutreachMessage("hello", "Auto", { responder: spyResponder(GOOD_REPLY), cache });
+    await scoreOutreachMessage("hello", "Auto", { responder: passingRewriteResponder(), cache });
     assert.equal(cache.rows[0].track, "message_coach");
     assert.equal(cache.rows[0].difficulty, "cold_outreach");
     assert.equal(cache.rows[0].overall, 34);
@@ -393,6 +432,103 @@ describe("score cache", () => {
     const fixed = spyResponder(GOOD_REPLY);
     const result = await scoreOutreachMessage("hello", "Auto", { responder: fixed, cache });
     assert.equal(result.score, 34);
+  });
+});
+
+// ===========================================================================
+// The rewrite self-verification loop
+// ===========================================================================
+//
+// The bug this guards against: a customer copies the coach's own rewrite
+// back into the coach and it scores below the pass line, which makes the
+// tool look hypocritical (it coached them to something that fails its own
+// rubric). scoreOutreachMessage now re-scores the rewrite it just generated,
+// through the identical rubric, before ever returning it, and retries once
+// with corrective feedback if the rewrite falls short.
+
+// A responder scripted by exact call number, for tests that need to control
+// precisely what each of the (up to 3) calls in the verification loop
+// returns: 1) the original score/rewrite, 2) the first rewrite check,
+// 3) the retry's replacement rewrite (only reached if call 2 fails), and any
+// further calls the loop makes (its final re-check of the retry).
+function scriptedResponder(
+  replies: Array<Record<string, unknown> | string>,
+): MessageCoachResponder & { calls: { input: string; cacheKey: string }[] } {
+  const calls: { input: string; cacheKey: string }[] = [];
+  const fn = (async (input: string, cacheKey: string) => {
+    const reply = replies[Math.min(calls.length, replies.length - 1)];
+    calls.push({ input, cacheKey });
+    return typeof reply === "string" ? reply : JSON.stringify(reply);
+  }) as MessageCoachResponder & { calls: typeof calls };
+  fn.calls = calls;
+  return fn;
+}
+
+describe("rewrite self-verification loop", () => {
+  test("a rewrite that already clears the floor is used as is, with one verification call", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const passingCheck = { ...original, score: 93 };
+    const responder = scriptedResponder([original, passingCheck]);
+    const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder,
+      cache: fakeCache(),
+    });
+    assert.equal(responder.calls.length, 2, "no retry should fire once the rewrite passes");
+    assert.equal(result.rewrite, original.rewrite);
+    // The score shown to the customer describes their ORIGINAL message, not
+    // the internal check of the rewrite.
+    assert.equal(result.score, GOOD_REPLY.score);
+  });
+
+  test("a rewrite that misses the floor triggers exactly one corrective retry, and the passing version is used", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
+    const failingCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
+    const passingCheck = { ...corrected, score: 91 };
+    const responder = scriptedResponder([original, failingCheck, corrected, passingCheck]);
+    const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder,
+      cache: fakeCache(),
+    });
+    assert.equal(responder.calls.length, 4);
+    assert.equal(result.rewrite, corrected.rewrite, "the corrected, passing rewrite must be the one returned");
+
+    // The retry call must tell the model exactly what the previous rewrite
+    // scored and why, not just ask again from scratch.
+    const retryInput = responder.calls[2].input;
+    assert.match(retryInput, /only scored 58/);
+    assert.match(retryInput, /still demands a yes or no/);
+    assert.match(retryInput, /Selling soon\? Let me know\./);
+  });
+
+  test("if even the retry misses the floor, the best-scoring version seen is kept rather than looping forever", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
+    const firstCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const corrected = { ...original, rewrite: "Any thoughts on selling this year? Reply STOP to opt out." };
+    const secondCheck = { ...corrected, score: 74, stalledStep: "reply threshold still asks for a plan, not a word" };
+    const responder = scriptedResponder([original, firstCheck, corrected, secondCheck]);
+    const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder,
+      cache: fakeCache(),
+    });
+    // Exactly 2 rewrite attempts checked (original + 1 retry), no further
+    // retries even though neither cleared the floor.
+    assert.equal(responder.calls.length, 4);
+    // 74 beats 58, so the corrected version, not the original, is kept even
+    // though it did not clear MESSAGE_COACH_REWRITE_FLOOR.
+    assert.equal(result.rewrite, corrected.rewrite);
+  });
+
+  test("caches only the final, verified rewrite, not the first draft", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
+    const failingCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
+    const passingCheck = { ...corrected, score: 91 };
+    const responder = scriptedResponder([original, failingCheck, corrected, passingCheck]);
+    const cache = fakeCache();
+    await scoreOutreachMessage("Are you ready to sell?", "Real Estate", { responder, cache });
+    const stored = JSON.parse(cache.rows[0].rubric) as { rewrite: string };
+    assert.equal(stored.rewrite, corrected.rewrite);
   });
 });
 
