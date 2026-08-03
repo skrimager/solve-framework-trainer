@@ -34,6 +34,7 @@ import {
   personaCoreFor,
   sessionVariantSection,
 } from "./persona";
+import { gatedTopicsFor } from "./personaVariants";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { AUDIO_DIR, audioPathForMsg } from "./audioCache";
 import { historyForTurn, runReplyStream, type MsgAudioStatus } from "./turnStream";
@@ -1121,7 +1122,7 @@ export async function registerRoutes(
       const escalationTier = await computeSessionEscalationTier(session, scenario);
 
       const variantSection = sessionVariantSection(scenario, session);
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
+      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection, gatedTopicsFor(scenario.slug));
 
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",

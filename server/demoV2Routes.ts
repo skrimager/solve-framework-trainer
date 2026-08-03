@@ -54,6 +54,7 @@ import {
 } from "./llm";
 import { deriveStalledStep } from "./realConversations";
 import { personaCoreFor, sessionVariantSection } from "./persona";
+import { gatedTopicsFor } from "./personaVariants";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { historyForTurn, runReplyStream } from "./turnStream";
 import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type Scenario, type TranscriptMessage } from "@shared/schema";
@@ -361,7 +362,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       }
 
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
+      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection, gatedTopicsFor(scenario.slug));
       transcript.push(
         transcriptMessageSchema.parse({
           role: "customer",

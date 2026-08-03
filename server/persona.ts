@@ -16,6 +16,19 @@ export interface ScenarioPersonaVariants {
   objectionPool: string[];
 }
 
+// A Layer 2/3 subject this persona must not raise before the consultant has
+// asked about it. The prose in `core` already says "reveal ONLY if the
+// consultant asks", but prose is a request; this is the machine-checkable
+// version of the same sentence, so deriveDisclosureGate can look at the actual
+// transcript and see whether the asking happened.
+export interface GatedTopic {
+  // Named in the second person, because it is quoted straight into the prompt.
+  label: string;
+  // A consultant question containing any of these counts as having asked. Match
+  // is whole-word and plural-tolerant, so keep entries as the bare noun.
+  keywords: string[];
+}
+
 // The one-time structured rewrite of a scenario's persona: the fixed core prose
 // plus the three variation pools. Stored in server/personaVariants.ts keyed by
 // scenario slug and merged into the seed rows / backfilled onto existing rows.
@@ -24,6 +37,10 @@ export interface PersonaVariantSeed {
   personalities: string[];
   motivations: string[];
   objections: string[];
+  // Optional, and absent for most personas. A persona with no gated topics
+  // produces no gate lines at all, so the prompt is byte-identical to what it
+  // was before the gate existed. Personas adopt this incrementally.
+  gatedTopics?: GatedTopic[];
 }
 
 // One objection drawn for a session, tagged with roughly where in the

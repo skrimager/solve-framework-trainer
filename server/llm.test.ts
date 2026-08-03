@@ -6,6 +6,8 @@ import {
   buildCustomerReplyStablePrefix,
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
+  INFORMATION_LAYERS_FLAG,
+  informationLayersEnabled,
   computeScoreCacheHash,
   scoreTranscript,
   type ScoreResponder,
@@ -189,6 +191,54 @@ describe("buildTurnStateBlock", () => {
   });
 });
 
+// The disclosure gate reaching the prompt. The derivation itself is covered in
+// conversationState.test.ts; what matters here is that a persona's gated
+// subjects actually arrive in the text the model is handed, and that a persona
+// that declares none is left byte-identical to how it was before the gate
+// existed.
+describe("buildTurnStateBlock - disclosure gate", () => {
+  const CAR_SEAT = [
+    { label: "the practical business of getting a car seat in and out", keywords: ["car seat", "stroller"] },
+  ];
+  const transcript = [
+    msg("customer", "We're expecting in March, so we want the biggest SUV you've got."),
+    msg("consultant", "Congratulations! What brings you in today?"),
+  ];
+
+  test("a subject nobody has asked about is named as off limits this turn", () => {
+    const block = buildTurnStateBlock(transcript, false, CAR_SEAT);
+    assert.ok(block.includes("the practical business of getting a car seat in and out"));
+    assert.ok(block.includes("Do not raise any of that yourself this turn"));
+  });
+
+  test("a relevant question removes it, leaving the rest of the block untouched", () => {
+    const asked = [...transcript, msg("consultant", "How are you picturing the car seat going in day to day?")];
+    const block = buildTurnStateBlock(asked, false, CAR_SEAT);
+    assert.ok(!block.includes("Do not raise any of that yourself this turn"));
+    assert.ok(block.includes("most recent message"));
+  });
+
+  test("a persona with no gated subjects gets the identical block it always got", () => {
+    assert.equal(buildTurnStateBlock(transcript, false, []), buildTurnStateBlock(transcript, false));
+  });
+
+  test("it is not behind the information-layers flag", () => {
+    // The defect the gate fixes is live in production, so an off-by-default fix
+    // would not fix it. It is inert for untagged personas on its own terms.
+    const off = buildTurnStateBlock(transcript, false, CAR_SEAT);
+    const on = buildTurnStateBlock(transcript, true, CAR_SEAT);
+    assert.ok(off.includes("Do not raise any of that yourself this turn"));
+    assert.ok(on.includes("Do not raise any of that yourself this turn"));
+  });
+
+  test("it reaches the assembled reply prompt, in the volatile tail", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, transcript, "beginner", 0, "", false, CAR_SEAT);
+    const stable = buildCustomerReplyStablePrefix(PERSONA, "beginner");
+    assert.ok(prompt.includes("Do not raise any of that yourself this turn"));
+    assert.ok(!stable.includes("Do not raise any of that yourself this turn"));
+  });
+});
+
 // The exact repro from the auto-sales price-shopper bug report: the customer
 // re-demanded the out-the-door price after the consultant had promised to fetch
 // it, and again after it had already been quoted. The model call itself is not
@@ -358,6 +408,25 @@ describe("detectCloseIntent", () => {
     assert.equal(detectCloseIntent("Tell me more about how your current setup is working."), false);
     assert.equal(detectCloseIntent("So the budget is the main concern for you?"), false);
     assert.equal(detectCloseIntent(""), false);
+  });
+
+  test("fires on a release that names the replacement instead of leaving it vague", () => {
+    // The reported gap. "find what/something/someone" was covered; naming the
+    // thing the customer should go to instead was not, so the clearest exit in
+    // the session went undetected and the conversation stayed open.
+    assert.equal(detectCloseIntent("I think you should find another car dealer."), true);
+    assert.equal(detectCloseIntent("Honestly, go find another dealership."), true);
+    assert.equal(detectCloseIntent("You need to find another consultant who can help you."), true);
+    assert.equal(detectCloseIntent("You'd be better off to find a different provider."), true);
+    assert.equal(detectCloseIntent("I'd find some other shop for this one."), true);
+  });
+
+  test("does NOT fire when 'find another' keeps the consultant in the conversation", () => {
+    // These are the opposite of a release: the rep is still working the problem.
+    assert.equal(detectCloseIntent("Let's find another way to make this work for you."), false);
+    assert.equal(detectCloseIntent("We can find another time that suits you better."), false);
+    assert.equal(detectCloseIntent("I'll find a different option in your range."), false);
+    assert.equal(detectCloseIntent("Let me find another approach to the financing."), false);
   });
 });
 
@@ -1946,17 +2015,35 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
     assert.match(rules, /I just want to make sure none of those things happen/);
   });
 
-  test("Rule 3: a premature question is redirected once and the customer returns to answering", () => {
-    assert.match(rules, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
-    assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics/);
+  test("Rule 3: a redirect toward discovery is followed and the customer returns to answering", () => {
+    assert.match(rules, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
     assert.match(rules, /Do not keep pushing the parked topic/);
+    assert.match(rules, /consultant sequencing discovery is doing the job correctly, not dodging you/);
   });
 
-  test("Rule 3: the department topics are a worked example, not the whole list", () => {
-    // The closed four-topic list is what let the safety-ratings loop through, so
-    // the rule has to state the general principle alongside the examples.
-    assert.match(rules, /Those are the clearest cases, not the whole list/);
-    assert.match(rules, /a consultant sequencing discovery is doing the job correctly, not dodging you/);
+  test("Rule 3: the trigger is the redirect itself, not a list of named topics", () => {
+    // Enumerating topics is what caused this bug twice (safety ratings, then car
+    // seat installation): the model treated the list as the scope and ignored
+    // redirects on anything absent from it. The rule must key off the
+    // consultant's move and say so for ANY subject.
+    assert.match(rules, /regardless of what topic you were redirected away from/);
+    assert.match(rules, /This applies to ANY topic/);
+    assert.match(rules, /There is no fixed list of topics this covers/);
+    assert.match(rules, /not named as an example anywhere in these rules/);
+  });
+
+  test("Rule 3: the per-turn self-check is stated explicitly", () => {
+    assert.match(rules, /APPLY THIS TEST ON EVERY SINGLE TURN/);
+    assert.match(rules, /does my response answer THAT question, or does it pivot/);
+    assert.match(rules, /it does not matter what the pivot topic is/);
+  });
+
+  test("Rule 3: two attempts allowed, then the topic is dropped on any subject", () => {
+    assert.match(rules, /HOW MANY TIMES YOU MAY PRESS BEFORE YOU MUST STOP/);
+    assert.match(rules, /you may reasonably ask ONE more time, and that is attempt two/);
+    assert.match(rules, /After the SECOND redirect from the consultant, you drop it entirely/);
+    assert.match(rules, /There is no third attempt/);
+    assert.match(rules, /This holds on ANY subject/);
   });
 
   test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
@@ -1981,6 +2068,271 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
     assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
     assert.match(advanced, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
     assert.match(escalationAddon(2), /tougher objection/i);
+  });
+});
+
+// The customer ended nearly every turn with a question back at the rep. The
+// rules only ever said questions were permitted, and three separate
+// instructions pushed toward motion without saying a statement counts as
+// motion, so a trailing question satisfied all of them at once.
+describe("CUSTOMER_RESPONSIVENESS_RULES - question discipline", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("a turn is allowed to end without a question", () => {
+    assert.match(rules, /A QUESTION IS NOT HOW YOU END A TURN/);
+    assert.match(rules, /Asking is the exception in this conversation, not its rhythm/);
+    assert.match(rules, /A reply that ends on a period is a complete reply/);
+    assert.match(rules, /makes you an interrogator rather than someone weighing a decision/);
+  });
+
+  test("the worked example ends on a statement and names the staple-on as the error", () => {
+    assert.match(rules, /My old one was closer to 18, so that by itself would save me something/);
+    assert.match(rules, /That is the whole reply/);
+    assert.match(rules, /Do not staple "so what else do you have in that range\?" onto the end of it/);
+    assert.match(rules, /is padding, not curiosity/);
+  });
+
+  test("a question is warranted by genuine curiosity, never manufactured", () => {
+    assert.match(rules, /Ask when you would really ask/);
+    assert.match(rules, /genuinely surprised you, worried you, or does not add up/);
+    assert.match(rules, /Do not manufacture them/);
+  });
+
+  test("the fix asks for variation, not a replacement cadence", () => {
+    // A fixed "ask every Nth turn" is the same robotic artifact with different
+    // arithmetic, so the rule has to rule that out as explicitly as it rules
+    // out asking every turn.
+    assert.match(rules, /do not ration them on a schedule/);
+    assert.match(rules, /there is no quota to fill and no every-other-turn rhythm to hit/);
+    assert.match(rules, /run several turns at a stretch with no customer question in them at all/);
+    assert.match(rules, /Let it vary the way it really would/);
+  });
+
+  test("advancing the conversation is decoupled from asking", () => {
+    assert.match(rules, /MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION/);
+    assert.match(rules, /none of that means "ask something"/);
+    assert.match(rules, /conceding a point, revealing a detail you had been holding back/);
+    assert.match(rules, /only when the honest version of your next turn happens to be one/);
+  });
+
+  test("guardrail: no existing question allowance is withdrawn", () => {
+    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
+    assert.match(rules, /None of that changes/);
+    assert.match(rules, /answer first, then ask/);
+    assert.match(rules, /Never ask instead of answering/);
+  });
+
+  test("it reaches every scenario, difficulty, escalation tier, and the demo path", () => {
+    // Same composition point the redirect rule relies on: routes.ts and
+    // demoV2Routes.ts both build their prompt from the stable prefix.
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        assert.match(
+          buildCustomerReplyPrompt(PERSONA, [], difficulty, tier),
+          /A QUESTION IS NOT HOW YOU END A TURN/,
+          `${difficulty}/tier ${tier} must inherit question discipline`,
+        );
+      }
+    }
+  });
+
+  test("it lives in the cacheable stable prefix", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.match(prefix, /A QUESTION IS NOT HOW YOU END A TURN/);
+    assert.match(prefix, /MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION/);
+  });
+
+  test("guardrail: the redirect generalization is untouched", () => {
+    assert.match(rules, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
+    assert.match(rules, /There is no fixed list of topics this covers/);
+    assert.match(rules, /APPLY THIS TEST ON EVERY SINGLE TURN/);
+  });
+});
+
+describe("information layers - the flag", () => {
+  test("it is off unless the environment explicitly turns it on", () => {
+    assert.equal(informationLayersEnabled({}), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "0" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "false" }), false);
+    assert.equal(informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: "off" }), false);
+  });
+
+  test("the usual truthy spellings turn it on", () => {
+    for (const value of ["1", "true", "TRUE", "on", "yes", " true "]) {
+      assert.equal(
+        informationLayersEnabled({ [INFORMATION_LAYERS_FLAG]: value }),
+        true,
+        `${JSON.stringify(value)} should enable the feature`,
+      );
+    }
+  });
+
+  test("with the flag off the prompt carries none of the new behavior", () => {
+    // The whole point of the flag: someone comparing pre- and post-change
+    // behavior has to be comparing the same prompt, not a nearly-identical one.
+    const transcript = [
+      turn("consultant", "What's the towing capacity you need?"),
+      turn("customer", "I honestly haven't thought about it."),
+      turn("consultant", "Which trim were you looking at?"),
+    ];
+    const off = buildCustomerReplyPrompt(PERSONA, transcript, "advanced", 1, "", false);
+    for (const marker of [
+      "HOW MUCH OF YOURSELF YOU HAND OVER",
+      "LAYER ONE",
+      "LAYER TWO",
+      "LAYER THREE",
+      "Nobody has established any of this yet",
+      "memorized the catalogue",
+    ]) {
+      assert.ok(!off.includes(marker), `flag-off prompt must not contain "${marker}"`);
+    }
+  });
+
+  test("the flag-off prompt survives intact inside the flag-on one", () => {
+    // Additive means additive: every line the old prompt had is still there in
+    // the same order, with the new material appended rather than interleaved.
+    const transcript = [
+      turn("customer", "I'm just having a look at the sports cars."),
+      turn("consultant", "Which trim did you have in mind?"),
+    ];
+    const offPrefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 1, false);
+    const onPrefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 1, true);
+    assert.ok(onPrefix.startsWith(offPrefix));
+
+    const offBlock = buildTurnStateBlock(transcript, false);
+    const onBlock = buildTurnStateBlock(transcript, true);
+    assert.ok(onBlock.startsWith(offBlock), "gate lines must be appended after the existing state lines");
+    assert.ok(onBlock.length > offBlock.length);
+  });
+
+  test("turning it on is purely additive: nothing that was there is removed", () => {
+    const off = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, false);
+    const on = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, true);
+    assert.ok(on.startsWith(off), "the flag-on prefix must extend the flag-off prefix, not rewrite it");
+    assert.ok(on.length > off.length);
+  });
+
+  test("it reaches every difficulty, escalation tier, and the demo path", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        assert.match(
+          buildCustomerReplyPrompt(PERSONA, [], difficulty, tier, "", true),
+          /HOW MUCH OF YOURSELF YOU HAND OVER, AND WHEN/,
+          `${difficulty}/tier ${tier} must inherit the layer rules`,
+        );
+      }
+    }
+  });
+
+  test("it lives in the cacheable stable prefix, after the rules it has to defer to", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2, true);
+    assert.match(prefix, /HOW MUCH OF YOURSELF YOU HAND OVER/);
+    assert.ok(
+      prefix.indexOf("FOLLOW A REDIRECT BACK TO DISCOVERY") < prefix.indexOf("HOW MUCH OF YOURSELF YOU HAND OVER"),
+      "the layer rules must come after the responsiveness rules they must not override",
+    );
+  });
+});
+
+describe("information layers - the three layers", () => {
+  const rules = buildCustomerReplyStablePrefix(PERSONA, "intermediate", 0, true);
+
+  test("layer one is volunteered readily", () => {
+    assert.match(rules, /LAYER ONE, THE THINGS YOU LEAD WITH/);
+    assert.match(rules, /This costs you nothing/);
+    assert.match(rules, /Volunteer it early and readily/);
+    assert.match(rules, /Being cagey about Layer One is not being guarded, it is being annoying/);
+  });
+
+  test("layer two opens to a specific question, not a generic prompt", () => {
+    assert.match(rules, /LAYER TWO, THE THINGS SOMEONE HAS TO ASK FOR/);
+    assert.match(rules, /"Tell me more", "anything else\?"/);
+    assert.match(rules, /are not keys to this layer/);
+    assert.match(rules, /it picks up something specific you actually said and asks about that thing/);
+    // Once earned, it must actually open. A layer that never opens is just a
+    // stonewall with extra steps.
+    assert.match(rules, /do not make them ask three times for something they have already earned once/);
+  });
+
+  test("layer three is gated on earned trust and closed by a premature pitch", () => {
+    assert.match(rules, /LAYER THREE, THE THINGS YOU DO NOT TELL STRANGERS/);
+    assert.match(rules, /money trouble, a decision you regret, a time you got taken advantage of/);
+    assert.match(rules, /roughly two or three questions/);
+    assert.match(rules, /they have NOT jumped to selling you something/);
+    assert.match(rules, /If they pitch, recommend, or start steering you toward a product before they have done that, the door closes/);
+  });
+
+  test("a revealed layer three is said once, not turned into a refrain", () => {
+    assert.match(rules, /say it once, plainly/);
+    assert.match(rules, /Do not re-announce it every turn afterward/);
+  });
+
+  test("guardrail: a closed layer is never an excuse for a non-answer", () => {
+    assert.match(rules, /WHILE A LAYER IS STILL CLOSED, YOU ARE STILL HONEST/);
+    assert.match(rules, /This is not permission to stonewall, deflect, or answer with nothing/);
+    assert.match(rules, /you give them the true but shallower version of it/);
+    assert.match(rules, /these layers govern HOW MUCH you say and WHEN, never WHETHER you engage/);
+    assert.match(rules, /never a reason to give a non-answer, to change the subject, or to bounce their question back/);
+  });
+
+  test("the gate is never narrated out loud", () => {
+    assert.match(rules, /NEVER NARRATE ANY OF THIS/);
+    assert.match(rules, /do not say they have not earned it/);
+    assert.match(rules, /You do not know you have layers/);
+    assert.match(rules, /Do this silently/);
+  });
+
+  test("guardrail: it does not soften the customer or name a scenario", () => {
+    // It has to work for every vertical, so it must sort whatever persona it was
+    // handed rather than reference one.
+    for (const word of ["vehicle", "SUV", "dealership", "mortgage", "insurance"]) {
+      assert.ok(
+        !new RegExp(`\\b${word}\\b`, "i").test(rules.slice(rules.indexOf("HOW MUCH OF YOURSELF"))),
+        `the layer rules must not name a vertical, found "${word}"`,
+      );
+    }
+  });
+});
+
+describe("product alignment gate - reaches the volatile tail only when flagged on", () => {
+  const early = [
+    turn("customer", "I'm looking at that convertible in the window."),
+    turn("consultant", "Great choice. Which trim were you thinking, the base or the fully loaded one?"),
+  ];
+
+  test("with the flag off, the gate contributes nothing", () => {
+    const block = buildTurnStateBlock(early, false);
+    assert.ok(!block.includes("Nobody has established"));
+    assert.ok(!block.includes("you are the buyer, not the person who memorized the catalogue"));
+  });
+
+  test("with the flag on, the unestablished basics are named", () => {
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Nobody has established any of this yet: what you actually need it for/);
+    assert.match(block, /who else this has to work for besides you/);
+    assert.match(block, /why you are doing this at all right now/);
+    assert.match(block, /what you are worried about or what went wrong last time/);
+  });
+
+  test("a feature dive before the basics produces an in-character redirect, not an announcement", () => {
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Which trim were you thinking, the base or the fully loaded one\?/);
+    assert.match(block, /You are the buyer, not the person who memorized the catalogue/);
+    assert.match(block, /the honest answer is usually that you do not know/);
+    assert.match(block, /puts the conversation back on ground you can speak to/);
+    assert.match(block, /do not lecture them about asking the wrong question/);
+    // The customer must never say the quiet part out loud.
+    assert.match(block, /Never say out loud that something has to happen first/);
+    assert.match(block, /never announce an order to this conversation/);
+  });
+
+  test("the gate never overrides the standing duty to answer the live question", () => {
+    // buildDirectQuestionLines still demands a real answer in the same block, so
+    // the gate has to be compatible with it rather than contradict it.
+    const block = buildTurnStateBlock(early, true);
+    assert.match(block, /Answering THAT is your job this turn/);
+    assert.match(block, /That is a real answer to their question, not a dodge/);
   });
 });
 
@@ -2009,6 +2361,123 @@ describe("buildTurnStateBlock - the live question is pinned into the volatile ta
     assert.ok(prompt.startsWith(prefix));
     assert.doesNotMatch(prefix, /JUST ASKED YOU SOMETHING DIRECTLY/);
     assert.match(prompt, /JUST ASKED YOU SOMETHING DIRECTLY/);
+  });
+});
+
+describe("CUSTOMER_RESPONSIVENESS_RULES - taking in what the rep volunteers", () => {
+  const rules = CUSTOMER_RESPONSIVENESS_RULES;
+
+  test("the rule exists and is stated as a principle about any subject", () => {
+    assert.match(rules, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+    assert.match(rules, /There is no list of which facts count/);
+    assert.match(rules, /The subject is irrelevant/);
+  });
+
+  test("it names the reaction, not the topic", () => {
+    assert.match(rules, /Be taken aback, be concerned, hesitate/);
+    assert.match(rules, /Good news is allowed to land too/);
+    assert.match(rules, /You are still allowed to want it anyway/);
+  });
+
+  test("the failing behaviour is named as the one wrong answer", () => {
+    assert.match(rules, /always wrong is carrying on with whatever you were saying before/i);
+    assert.match(rules, /you stopped listening/);
+  });
+
+  test("the per-turn self-check is in the prompt", () => {
+    assert.match(rules, /ASK YOURSELF THIS BEFORE EVERY REPLY/);
+    assert.match(rules, /Did the consultant just tell me something new and specific/);
+  });
+
+  test("it does not enumerate the facts from the bug report", () => {
+    // The whole point. If a future report gets fixed by appending its fact kind
+    // here, the rule becomes the topic list that failed before.
+    const enumerated = rules.match(/TAKE IN WHAT THEY TELL YOU[\s\S]*?ASK YOURSELF THIS/)?.[0] ?? "";
+    for (const word of ["mileage", "odometer", "warranty", "engine", "brakes", "square feet"]) {
+      assert.ok(!enumerated.toLowerCase().includes(word), `the rule must not name "${word}"`);
+    }
+  });
+
+  test("it does not reintroduce the every-turn question habit the cadence fix removed", () => {
+    assert.match(rules, /Reacting is not the same as asking/);
+    assert.match(rules, /rules further down about not ending every turn on a question still apply/);
+    assert.match(rules, /A QUESTION IS NOT HOW YOU END A TURN/);
+  });
+
+  test("it reaches every difficulty, every tier and the flag-off prompt", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      for (const tier of [0, 1, 2]) {
+        const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, tier, "", false);
+        assert.match(prompt, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+      }
+    }
+  });
+
+  test("it is in the cacheable prefix, so it costs nothing per turn", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    assert.match(prefix, /TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT/);
+  });
+});
+
+describe("buildTurnStateBlock - what the rep volunteered is pinned into the tail", () => {
+  const explorer = [
+    turn("customer", "I love this Explorer. How does a car seat install in the back?"),
+    turn(
+      "consultant",
+      "I'm not sure this Explorer is right for your family. It's got 100,000 miles on it, it's overpriced, and the suspension is blown out from being driven through the desert.",
+    ),
+  ];
+
+  test("the disclosure is quoted back and a reaction is demanded", () => {
+    const block = buildTurnStateBlock(explorer);
+    assert.match(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/);
+    assert.match(block, /100,000 miles/);
+    assert.match(block, /suspension is blown out/);
+  });
+
+  test("it is NOT flag-gated, because ignoring bad news is broken everywhere", () => {
+    for (const layers of [false, true]) {
+      assert.match(
+        buildTurnStateBlock(explorer, layers),
+        /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/,
+      );
+    }
+  });
+
+  test("a rep turn that only asks adds no disclosure line", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need something for my commute."),
+      turn("consultant", "How long is that commute each way?"),
+    ]);
+    assert.doesNotMatch(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+  });
+
+  test("it stays out of the cacheable prefix", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "intermediate");
+    const prompt = buildCustomerReplyPrompt(PERSONA, explorer, "intermediate");
+    assert.ok(prompt.startsWith(prefix));
+    assert.doesNotMatch(prefix, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+    assert.match(prompt, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT/);
+  });
+
+  test("it sits with the live question, before the older state facts", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I need it to tow."),
+      turn("consultant", "The tow rating on this one is well under what you described. What are you pulling?"),
+    ]);
+    assert.ok(
+      block.indexOf("THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT") <
+        block.indexOf("Lines you have ALREADY said"),
+    );
+  });
+
+  test("a rep telling the customer something in another vertical is caught the same way", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "We'd want the whole crew in there by autumn."),
+      turn("consultant", "The kilns aren't back from the foundry until late next spring."),
+    ]);
+    assert.match(block, /THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING/);
+    assert.match(block, /kilns aren't back from the foundry/);
   });
 });
 
@@ -2084,7 +2553,7 @@ describe("worked example (spec): the premature warranty question", () => {
     assert.match(prompt, /what are you driving\?/);
     assert.match(prompt, /Accept that redirect/);
     assert.match(prompt, /do not spend this turn pushing warranty or service coverage again/);
-    assert.match(prompt, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
+    assert.match(prompt, /FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS/);
   });
 
   test("PR #87's one-more-ask allowance is preserved, it is just not this turn's move", () => {
