@@ -609,6 +609,21 @@ export default function MessageCoach() {
                 </CardContent>
               </Card>
             )}
+
+            {/* Members land here after scrolling through a scored result,
+                well past the header's exit button. Without a second exit
+                control at the bottom, the only way out is the phone's back
+                button, which is exactly the gap a member reported. */}
+            {isMember && (
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => navigate("/scenarios")}
+                data-testid="button-message-coach-back-to-practice-bottom"
+              >
+                <ArrowLeft className="mr-2 h-4 w-4" /> Back to SOLVE Academy
+              </Button>
+            )}
           </div>
         )}
       </div>
