@@ -252,6 +252,16 @@ export default function MessageCoach() {
     <div className="min-h-dvh bg-background text-foreground">
       <div className="mx-auto w-full max-w-2xl space-y-6 px-4 py-10">
         <header className="space-y-2">
+          {isMember && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/scenarios")}
+              data-testid="button-message-coach-back-to-practice"
+            >
+              <ArrowLeft className="mr-2 h-4 w-4" /> Back to SOLVE Academy
+            </Button>
+          )}
           <h1 className="text-2xl font-bold tracking-tight" data-testid="text-message-coach-title">
             {MESSAGE_COACH_HEADER.title}
           </h1>
@@ -571,27 +581,34 @@ export default function MessageCoach() {
               </CardContent>
             </Card>
 
-            <Card>
-              <CardContent className="space-y-3 pt-6 text-center">
-                <p className="font-semibold">{FUNNEL_COPY.headline}</p>
-                <p className="text-sm text-muted-foreground">{FUNNEL_COPY.body}</p>
-                <div className="flex flex-col gap-2 sm:flex-row sm:justify-center">
-                  <Button
-                    onClick={() => navigate(FUNNEL_COPY.demoPath)}
-                    data-testid="button-message-coach-demo"
-                  >
-                    {FUNNEL_COPY.demoLabel}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => navigate(FUNNEL_COPY.pricingPath)}
-                    data-testid="button-message-coach-pricing"
-                  >
-                    {FUNNEL_COPY.pricingLabel}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+            {/* This upsell (try the demo / see pricing) is for anonymous
+                visitors only. Members are already customers, so showing it
+                to them after every score reads as a confusing "did my
+                account not go through" moment rather than a natural next
+                step. */}
+            {!isMember && (
+              <Card>
+                <CardContent className="space-y-3 pt-6 text-center">
+                  <p className="font-semibold">{FUNNEL_COPY.headline}</p>
+                  <p className="text-sm text-muted-foreground">{FUNNEL_COPY.body}</p>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:justify-center">
+                    <Button
+                      onClick={() => navigate(FUNNEL_COPY.demoPath)}
+                      data-testid="button-message-coach-demo"
+                    >
+                      {FUNNEL_COPY.demoLabel}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => navigate(FUNNEL_COPY.pricingPath)}
+                      data-testid="button-message-coach-pricing"
+                    >
+                      {FUNNEL_COPY.pricingLabel}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )}
       </div>
