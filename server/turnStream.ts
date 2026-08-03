@@ -15,6 +15,7 @@ import fs from "node:fs/promises";
 
 import { streamCustomerReply, synthesizeSpeech } from "./llm";
 import { personaCoreFor } from "./persona";
+import { logTurnInputs, logTurnResponse } from "./turnDiagnostics";
 import { sentenceAudioPath, sentenceAudioUrl } from "./audioCache";
 import type { Scenario, TranscriptMessage } from "@shared/schema";
 
@@ -107,6 +108,13 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
 
   let fullText = "";
   try {
+    logTurnInputs({
+      msgId,
+      scenarioId: scenario.id,
+      difficulty: scenario.difficulty,
+      escalationTier,
+      history,
+    });
     fullText = await deps.streamReply(
       personaCoreFor(scenario),
       history,
@@ -116,6 +124,7 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
       handleSentence,
     );
     await emitChain;
+    logTurnResponse(msgId, fullText);
     await persist(fullText, anyAudio ? "ready" : "failed");
     sse("done", { msgId, text: fullText });
   } catch (err) {

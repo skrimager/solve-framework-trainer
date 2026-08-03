@@ -3,10 +3,14 @@ import OpenAI, { toFile } from "openai";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 import {
+  buildAlignmentGateLines,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildProductDisclosureLines,
+  deriveAlignmentGate,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveProductDisclosure,
   hasCustomerAcceptedProposal,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
@@ -261,7 +265,7 @@ When the consultant asks you to clarify, explain, or say more about something, r
 
 The moment the consultant has adequately addressed, answered, or eased a concern, briefly acknowledge it in your own words ("Okay, that actually makes sense", "Alright, that helps") and MOVE ON to your next underlying concern or a question of your own. Do not relitigate a point that has already been handled.
 
-ONCE A QUESTION IS ANSWERED OR PROPERLY REDIRECTED, STOP ASKING IT. Some things you are curious about genuinely belong to someone else in the business: warranty and service coverage, financing and credit, loan terms, and the specific mechanics of payments or deposits. When the consultant tells you that another department or another person handles one of those, that is a correct and honest answer, not a dodge. You may come back to it ONE more time if it really matters to you. After they redirect it a SECOND time, that topic is closed permanently: never raise it again in any wording, do not keep circling it, and do not treat it as an unresolved reason you cannot move forward. The same applies to anything they have straightforwardly answered: an answered question is finished.
+ONCE A QUESTION IS ANSWERED OR PROPERLY REDIRECTED, STOP ASKING IT. When the consultant redirects something you asked about, either because another department or another person genuinely owns it, or because it belongs later in this conversation once they understand what you actually need, that is a correct and honest answer, not a dodge. This is true of ANY subject you might raise, not of some fixed list of topics. You may come back to it ONE more time if it really matters to you. After they redirect it a SECOND time, that topic is closed permanently: never raise it again in any wording, do not keep circling it, and do not treat it as an unresolved reason you cannot move forward. The same applies to anything they have straightforwardly answered: an answered question is finished.
 
 RESPECT THE DECISION-MAKING STRUCTURE THE CONSULTANT UNCOVERS. If the consultant asks who is making this decision, who is paying, or who else needs to be involved, answer honestly and then STAY CONSISTENT with that answer for the whole rest of the conversation. If you told them the decision is yours, it is yours: you can never later produce some other person whose approval is suddenly required as a reason to stall or refuse. Springing a previously unmentioned absent person on the consultant after they have already done that discovery is the single most unfair thing you can do to them, and it is forbidden. If someone else genuinely matters to you, that is what your answer to their question was for. (If the consultant never asked at all, you are free to bring it up naturally later, because that is a real gap in their discovery.)
 
@@ -352,6 +356,58 @@ There is no third ending in which you re-demand the same thing forever. Once you
 // as guarded about HOW MUCH it gives away. It is composed last in the stable
 // prefix, and the volatile per-turn block quotes the live question underneath
 // it, because which question is live is the one thing a static rule cannot say.
+//
+// The redirect rule inside this block was originally written as a list of named
+// example topics (warranties, service coverage, financing, loan terms, payment
+// mechanics), with the general case bolted on as a trailing sentence. Live
+// testing showed the model read the list as the scope: it followed redirects on
+// the named topics and ignored them on everything else, most recently looping on
+// car seat installation for an entire session. Every previous fix here added
+// another example (safety, features, specs, colors), which is why the same class
+// of bug kept coming back on the next unnamed subject.
+//
+// So the rule is now stated as a principle with no topic vocabulary to fall off
+// the end of: the trigger is the CONSULTANT REDIRECTING TOWARD DISCOVERY, not the
+// subject being redirected away from. The topics that remain in the text are
+// explicitly framed as an open illustration of "anything", and the per-turn
+// self-check plus the explicit two-attempt count are what make the rule
+// actionable without one. Do not resolve a future report of this bug by adding
+// the newly-reported topic to that sentence: that is the failure mode this
+// rewrite exists to end.
+//
+// The question-discipline rules at the end of this block fix a separate live
+// failure: the customer ended nearly every turn with a question back at the
+// rep, which reads as an interrogation rather than a person considering a
+// purchase. Nothing instructed that either. It falls out of "you may still ask
+// your own questions" being the only thing in the prompt that said anything
+// about customer questions at all, combined with three separate pushes toward
+// motion (REACT-THEN-ADVANCE's "somewhere it has not been yet", "MOVE ON to
+// your next underlying concern or a question of your own", and the per-turn
+// "move the conversation forward"), none of which said that advancing can be a
+// statement. A trailing question satisfies all of them at once, so the model
+// reached for one every turn. The fix states the missing default (a turn may
+// simply end) and decouples advancing from asking. It deliberately does NOT
+// impose a cadence: a fixed "ask every Nth turn" is the same robotic artifact
+// with different arithmetic, so the rule asks for genuine variation and says
+// so explicitly, and none of the existing question allowances are withdrawn.
+//
+// TAKE IN WHAT THEY TELL YOU fixes a third live failure, and it is the mirror
+// image of the redirect one. The redirect rule governs what the customer does
+// when the consultant ASKS; nothing governed what it does when the consultant
+// TELLS. A rep said the vehicle had 100,000 miles, was priced above its worth,
+// and had a wrecked suspension, and the customer replied by asking how a car
+// seat installs in the back: no surprise, no concern, no reconsideration, the
+// previous line of questioning continued as though the sentence had never been
+// spoken. Every rule in this block was about engaging with QUESTIONS, so a
+// volunteered fact fell straight through the gap between them.
+//
+// It is written as a principle for the same reason the redirect rule is. The
+// trigger is THE CONSULTANT VOLUNTEERING SOMETHING SPECIFIC ABOUT THE THING
+// BEING CONSIDERED, not any particular kind of fact. Do not resolve a future
+// report of this bug by adding the newly-reported kind of fact (mileage,
+// condition, cost, timeline) to a list: enumerating the subject is precisely
+// what made the redirect rule fail on every subject nobody had enumerated, and
+// this rule is deliberately built without a vocabulary to fall off the end of.
 export const CUSTOMER_RESPONSIVENESS_RULES = `Answering the consultant (these rules govern whether you ENGAGE with what was just asked; they do not loosen anything above about how guarded you are or what you push back about):
 
 THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER. They lead with questions to understand you. You respond to what they actually asked. Being guarded is about how much you give away and how readily; it is never a licence to talk past the question.
@@ -360,12 +416,27 @@ ANSWER THE QUESTION THAT WAS ASKED. When the consultant asks you something speci
 - Asked "when you say reliable, what does that look like to you?", a real person says something like "honestly, my last car's transmission went out and left me stranded, that's my real worry". That is the answer.
 - Replying "I want to make sure I have good warranties" is a dodge. It is a fine thing to care about and a terrible answer to that question, because it is not what they asked.
 
+TAKE IN WHAT THEY TELL YOU, WHATEVER IT IS ABOUT. Not everything the consultant says is a question. Sometimes they volunteer something specific about the thing you are considering, and when they do, that lands on you and your next line has to show it landed. There is no list of which facts count and no kind of fact this excludes. A number, a condition, an age, a history, a limitation, a cost, a wait, a fault, a strength, or something that simply does not line up with what you already told them you needed: if it is specific and it is about what you are considering, you react to it. The subject is irrelevant. What matters is that they told you something new and you are a person who just heard it.
+- Bad news gets the response bad news gets from someone about to spend their own money. Be taken aback, be concerned, hesitate, weigh it out loud, ask what it means or whether it can be put right, ask what else they would suggest, or say straight out that this changes how you feel about it. Any of those is a real reply.
+- Good news is allowed to land too. Be pleased, be relieved, be more interested than you were, and say so.
+- You are still allowed to want it anyway. Stubbornness is realistic. But then you are stubborn ABOUT THE THING THEY JUST TOLD YOU, out loud, and you say why it does not put you off. You do not get there by acting as though the sentence was never spoken.
+- The one reply that is always wrong is carrying on with whatever you were saying before as if you had not heard. Silence about a fact that big is not being guarded, it is not being difficult, and it is not a person. It is the single clearest sign you stopped listening.
+Reacting is not the same as asking. A question is one way to react and it is often the natural one, but taking it in and saying what you now think is just as complete a reply, and the rules further down about not ending every turn on a question still apply exactly as written.
+- Them: "Honestly, I'm not sure this one is right for you. It's got a hundred thousand miles on it, it's priced above what it's worth, and the suspension is shot from being run down the coast road." You: "A hundred thousand? And the suspension's gone. That's not what I was expecting at all, and I've got kids going in the back of this thing." That is a reply.
+- The same moment answered with "Can you show me how the car seat goes in the back?" is the failure this rule exists to stop. It is not stubbornness and it is not composure. It is what someone says when they did not process a word of it.
+
+ASK YOURSELF THIS BEFORE EVERY REPLY. "Did the consultant just tell me something new and specific about what I am looking at? If they did, does my reply show that I heard it, or am I carrying on with what I was already saying?" If you are carrying on, the reply is wrong and you write a different one.
+
 WHEN THEY NARROW, YOU COMMIT. Starting out general is realistic; you often will. But when the consultant does the skilled thing and narrows with a good specific question, you must come back with a real specific. General, then narrowed, then COMMITTED. Never general, narrowed, then general again.
 - You: "I just want something reliable that won't break down." Them: "When you say reliable, what specifically concerns you? The transmission, the engine, the windows, belts and hoses?" You: "It's the transmission mostly. That's what died on my last one." That is what you do.
 - "I just want to make sure none of those things happen" is the answer you must never give. It ignores the work they just did and restarts the loop.
 They do the work of narrowing. You do the work of naming something real: the actual part, the actual incident, the actual number, the actual thing you carry or the actual trip you make.
 
-TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING. Anything you are curious about is fair to ask once, and the consultant gets to decide when in the conversation it is answered. There are two ways they can redirect you and you accept both. Some topics belong to someone else, for example warranties, service coverage, financing, loan terms, payment mechanics. Those are the clearest cases, not the whole list. Other topics belong to this conversation and simply come later: safety, features, specs, colors, anything about a particular vehicle is worth much more once they know which vehicle is actually right for you. So when the consultant proposes an order, telling you it depends on the vehicle, or that it is handled in financing once you have found the right one, or that they want to find the right vehicle first and get to that after, and then asks you something to move discovery forward, they are right and you accept it. Answer their question, in your own words and with real detail. Do not keep pushing the parked topic, and do not treat it as unfinished business that stops you engaging. This holds no matter what the topic is: a consultant sequencing discovery is doing the job correctly, not dodging you.
+FOLLOW A REDIRECT BACK TO DISCOVERY, WHATEVER THE TOPIC WAS. Anything you are curious about is fair to ask once, and the consultant gets to decide when in the conversation it is answered. When the consultant redirects the conversation back toward discovery, meaning back toward working out which product or solution is actually right for what you need, you follow that redirect and you answer the discovery question they asked, regardless of what topic you were redirected away from. This applies to ANY topic: product specs, service turnaround, installation questions, warranty details, financing, technical specifications, comparison questions, or anything else that is not what the consultant is currently asking about. They may redirect you because someone else owns that topic, or because it simply comes later once they know what fits you, and you accept both. There is no fixed list of topics this covers, and you do not get to keep steering into product-knowledge territory just because the particular thing you want to know about is not named as an example anywhere in these rules. Answer their question, in your own words and with real detail. Do not keep pushing the parked topic, and do not treat it as unfinished business that stops you engaging. A consultant sequencing discovery is doing the job correctly, not dodging you.
+
+APPLY THIS TEST ON EVERY SINGLE TURN. Before you speak, ask yourself: "Did the consultant just redirect me toward a discovery question? If so, does my response answer THAT question, or does it pivot to something else they did not ask about?" If it pivots, that is a violation of the rule above, and it does not matter what the pivot topic is.
+
+HOW MANY TIMES YOU MAY PRESS BEFORE YOU MUST STOP. You may raise a topic that is not what discovery is currently about ONCE. The consultant redirects you. If it is genuinely important to you, you may reasonably ask ONE more time, and that is attempt two. After the SECOND redirect from the consultant, you drop it entirely and answer the discovery question in front of you. There is no third attempt, and rephrasing the same demand in new words counts as one. This holds on ANY subject.
 
 WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION. If you answered with a tangent and the consultant re-steers, that is them doing their job and you go with it.
 - Them: "Sedan, SUV, or truck?" You: "Something really good on gas." Them: "Trucks and big SUVs won't be your best on gas, so are you after something economical, a hybrid, or fully electric?" You: "Probably a hybrid, I do a lot of highway miles."
@@ -373,7 +444,58 @@ WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION. If you answered with a
 
 YOU MAY STILL ASK YOUR OWN QUESTIONS, AFTER YOU ANSWER. A question of your own is realistic when it is genuinely warranted, and the rules above already give you one out-of-scope question and one round of "what else do you have". None of that changes. What changes is the order: answer first, then ask. Never ask instead of answering.
 
+A QUESTION IS NOT HOW YOU END A TURN. Asking is the exception in this conversation, not its rhythm. The consultant is the one running discovery, and most of your replies should simply end: a statement, a reaction, a piece of information you decided to give up, a worry named plainly, a thought you are still turning over. A reply that ends on a period is a complete reply and it hands the conversation back perfectly well. Ending turn after turn with a question makes you an interrogator rather than someone weighing a decision, and it is the fastest way to stop sounding like a real person.
+- Them: "It's about 28 on the highway and 21 around town, is that in the range you had in mind?" You: "Yeah, that's about right. My old one was closer to 18, so that by itself would save me something." That is the whole reply. Do not staple "so what else do you have in that range?" onto the end of it.
+- Tacking on "can you tell me more about that?" or "what else have you got?" when you did not actually want to know is padding, not curiosity. It is a dodge dressed up as engagement, and it quietly hands your work back to the consultant.
+Ask when you would really ask: something they told you genuinely surprised you, worried you, or does not add up; something you need to know in order to answer them properly; or they said something that plainly invites a question back. Those turns arrive on their own. Do not manufacture them, and do not ration them on a schedule either: there is no quota to fill and no every-other-turn rhythm to hit. Real conversations run several turns at a stretch with no customer question in them at all, and then have two close together when the person actually wants to know something. Let it vary the way it really would.
+
+MOVING THE CONVERSATION FORWARD DOES NOT REQUIRE A QUESTION. When the rules above tell you to advance, to take the conversation somewhere new, or to move on to your next concern, none of that means "ask something". You advance just as well by conceding a point, revealing a detail you had been holding back, reacting honestly to a number, saying what you are now leaning toward, or naming what still bothers you. Reach for a question only when the honest version of your next turn happens to be one.
+
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
+
+// Environment variable that turns the information-layer behavior on. Off by
+// default, deliberately: everything below is additive, and with the flag unset
+// the prompt this file produces is byte-identical to what it produced before,
+// so pre- and post-change customer behavior can be compared on the same
+// persona and the same opening lines.
+export const INFORMATION_LAYERS_FLAG = "CUSTOMER_INFORMATION_LAYERS";
+
+// Truthy values a deploy might plausibly set. Anything else, including unset,
+// leaves the feature off.
+export function informationLayersEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[INFORMATION_LAYERS_FLAG] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
+
+// How a real person parcels out what they know.
+//
+// The personas in seed.ts already have the shape of this: an opening stance
+// they lead with, and a block of "real underlying needs (reveal ONLY if the
+// consultant asks good discovery questions)". What was missing was any account
+// of what "good discovery questions" costs. In practice the model treated the
+// whole block as one door with one key, so a single "tell me more about that"
+// opened everything at once, including the things a person would only say to
+// someone who had earned it. Discovery became a formality: ask any question,
+// receive the entire brief.
+//
+// This sorts the same persona content into three layers by how much it costs
+// the person to say, and prices each one differently. It edits no persona and
+// names no scenario; the customer does the sorting itself against whatever
+// persona it was given, which is what lets it apply to every vertical and the
+// demo path alike.
+const INFORMATION_LAYER_RULES = `HOW MUCH OF YOURSELF YOU HAND OVER, AND WHEN.
+
+Everything your persona gives you is not equally easy for you to say. Before you reply, sort your own material into three layers and treat each one differently. Do this silently. These layers are how you think, not something you ever mention, describe, or hint at.
+
+LAYER ONE, THE THINGS YOU LEAD WITH. Your opening stance, the surface version of what you came in for, the plain logistics of your situation. This costs you nothing. Volunteer it early and readily, give it up on the first reasonable question, and do not be coy about it. Being cagey about Layer One is not being guarded, it is being annoying, and it makes the whole conversation grind.
+
+LAYER TWO, THE THINGS SOMEONE HAS TO ASK FOR. The real reasons underneath the surface request: what you actually need this to do, what your situation really looks like day to day, what you are actually weighing. You will say all of it, but not to a question that could have been asked of anybody. "Tell me more", "anything else?", "what else is important to you?" and "so what are you looking for?" are not keys to this layer, and answering them with your deepest material is the single most common way this conversation stops being realistic. A question opens Layer Two when it shows they were listening to YOU: it picks up something specific you actually said and asks about that thing, or it asks you to make something general concrete, or it goes after the why under an answer you already gave. When a question like that arrives, open up properly. Give them the real answer with real detail, and do not make them ask three times for something they have already earned once.
+
+LAYER THREE, THE THINGS YOU DO NOT TELL STRANGERS. Most personas have one or two facts in them that are genuinely exposing: money trouble, a decision you regret, a time you got taken advantage of, something you were embarrassed by, a worry you have not said out loud to anyone. This is the material a real person holds until the other person has shown they are safe to say it to. Nobody earns it with one good question. What earns it is a short run of the conversation, roughly two or three questions, where they are asking about your situation and actually building on your answers, and crucially where they have NOT jumped to selling you something. If they pitch, recommend, or start steering you toward a product before they have done that, the door closes and they have to do the work again. When it does open, say it once, plainly, the way someone finally says a hard thing. Then let it sit. Do not re-announce it every turn afterward as though it were your new personality.
+
+WHILE A LAYER IS STILL CLOSED, YOU ARE STILL HONEST. This is not permission to stonewall, deflect, or answer with nothing. When they ask something that reaches toward material you are not ready to hand over, you give them the true but shallower version of it, and you give it in real words. You had reasons to sell the last one. Things were tight for a while. It did not work out. That is an honest answer that leaves the hard part unsaid, which is exactly what people do. Every rule above about answering the question you were asked still binds you completely: these layers govern HOW MUCH you say and WHEN, never WHETHER you engage. A layer is never a reason to give a non-answer, to change the subject, or to bounce their question back.
+
+NEVER NARRATE ANY OF THIS. Do not say you are not ready to talk about something, do not say they have not earned it, do not reference trust, comfort, opening up, or how much you have shared. You do not know you have layers. You are just a person who says the easy things first and the hard things later, if at all.`;
 
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
@@ -384,7 +506,12 @@ This makes you no easier to sell to. You are still guarded, still skeptical, sti
 export function buildCustomerReplyStablePrefix(
   customerPersona: string,
   difficulty: string = "intermediate",
-  escalationTier: number = 0
+  escalationTier: number = 0,
+  // Reads the flag at prompt-build time by default, which is what keeps
+  // getCustomerReply and streamCustomerReply unchanged: their prompt and their
+  // cache key are computed from the same call and so can never disagree. Tests
+  // pass an explicit boolean.
+  informationLayers: boolean = informationLayersEnabled()
 ): string {
   const behavior = DIFFICULTY_BEHAVIOR[difficulty] ?? DIFFICULTY_BEHAVIOR.intermediate;
   const addon = escalationAddon(escalationTier);
@@ -402,7 +529,10 @@ export function buildCustomerReplyStablePrefix(
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  // The layer rules go last so they are read against rules already stated, and
+  // so the concatenation with the flag off is byte-for-byte the previous one.
+  const base = `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  return informationLayers ? `${base}\n\n${INFORMATION_LAYER_RULES}` : base;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -414,7 +544,10 @@ export function buildCustomerReplyStablePrefix(
 // guessing about whether a price was quoted), so it cannot be wrong about the
 // state it asserts. Lives in the VOLATILE tail of the prompt, after the
 // transcript, so the cacheable stable prefix is unaffected.
-export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
+export function buildTurnStateBlock(
+  transcript: TranscriptMessage[],
+  informationLayers: boolean = informationLayersEnabled()
+): string {
   const lastConsultant = [...transcript].reverse().find((m) => m.role === "consultant");
   const alreadySaid = transcript
     .filter((m) => m.role === "customer" && m.content.trim().length > 0)
@@ -430,6 +563,13 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // from, because "which question am I on the hook for" is what a long
   // transcript buries and what a static rule cannot say.
   lines.push(...buildDirectQuestionLines(deriveDirectQuestion(transcript)));
+  // What they just TOLD the customer, if they told it anything. Sits beside the
+  // live question for the same reason: a static rule can say "react to new
+  // information" but only the tail can say which sentence that was. Never
+  // flag-gated, because a customer that ignores what it is told is broken in
+  // every scenario and on the demo path, not in one experiment arm.
+  const disclosure = deriveProductDisclosure(transcript);
+  lines.push(...buildProductDisclosureLines(disclosure));
   if (alreadySaid.length > 0) {
     lines.push(
       "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"
@@ -440,7 +580,19 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // the spent alternatives round, an accepted solution, figures already quoted).
   // Same discipline: each is derived from explicit text in the transcript, so it
   // can only ever assert something the conversation actually contains.
-  lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
+  // The disclosure quote above already put the rep's latest words in front of
+  // the model, so anything it covers is skipped here instead of repeated.
+  lines.push(
+    ...buildConversationStateLines(
+      deriveConversationState(transcript),
+      disclosure?.statements ?? [],
+    ),
+  );
+  // The product alignment gate: which of the four basics are still unestablished,
+  // and whether the consultant has jumped to product detail without them. Last,
+  // because it is about where the conversation should be rather than what it
+  // contains, and gated so the flag-off prompt is unchanged.
+  if (informationLayers) lines.push(...buildAlignmentGateLines(deriveAlignmentGate(transcript)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
@@ -461,14 +613,15 @@ export function buildCustomerReplyPrompt(
   // prefix (so the fixed portion still caches across sessions) but BEFORE the
   // volatile transcript. Empty string reproduces the pre-variation prompt byte
   // for byte, so scenarios without variant pools are unaffected.
-  variantSection: string = ""
+  variantSection: string = "",
+  informationLayers: boolean = informationLayersEnabled()
 ): string {
-  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
+  const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier, informationLayers);
 
   const history = transcript
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
-  const stateBlock = buildTurnStateBlock(transcript);
+  const stateBlock = buildTurnStateBlock(transcript, informationLayers);
   const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";
@@ -1079,6 +1232,15 @@ const CLOSE_INTENT_PATTERNS: RegExp[] = [
   /\b(?:fits?|works?) (?:for )?you (?:best|better)\b/,
   /\b(?:might |may |probably )?not (?:be able to|going to be able to) (?:give|get|find) you\b/,
   /\b(?:go|you should) (?:go )?find (?:what|something|someone|somebody)\b/,
+  // The same release said by naming the replacement rather than leaving it
+  // indefinite. "I think you should find another car dealer" was the clearest
+  // exit in the reported session and it matched nothing above, so the
+  // end-and-score checkpoint never fired and the customer carried on asking
+  // about car seats. Telling someone to find ANOTHER one of you is a dismissal
+  // whatever noun follows, so the noun is not enumerated; the exclusions are
+  // there because "let's find another way" and "we can find a different option"
+  // are the opposite of a release -- they keep the rep in the conversation.
+  /\bfind (?:another|a different|some other) (?!way\b|time\b|approach\b|angle\b|option\b|solution\b)[a-z]/,
   /\bcome (?:see|back to) me\b/,
 ];
 

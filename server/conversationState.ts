@@ -170,6 +170,45 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
 }
 
+// Real rep turns arrive from voice transcription with no terminal punctuation
+// whatsoever, so splitSentences hands back a whole several-hundred-word
+// monologue as a single "sentence". Quoting that back in full buries the figure
+// the customer is supposed to react to under the rep's throat-clearing,
+// profanity and self-contradiction, and it pins the same wall of text into the
+// prompt once for every mechanism that noticed it. So quote a window around the
+// part that actually matched instead of the whole run-on. Text that is already
+// short is returned untouched, which is every properly punctuated sentence, so
+// typed transcripts are quoted exactly as they were before.
+const EXCERPT_WINDOW_WORDS = 18;
+
+function excerptAround(text: string, anchors: RegExp[]): string {
+  const words = text.split(/\s+/);
+  if (words.length <= EXCERPT_WINDOW_WORDS * 2 + 1) return text;
+
+  // Anchors are tried in priority order rather than by position, so the window
+  // centres on the most concrete thing in the text: a figure if there is one,
+  // and only then a looser claim. That also makes two callers with different
+  // anchor lists agree on identical text whenever the higher-priority anchor
+  // matches, which is what lets the state block recognise and drop a quote it
+  // has already made. With no match at all the head of the text is as good a
+  // guess as any, and still better than the entire monologue.
+  let at = -1;
+  for (const pattern of anchors) {
+    const match = pattern.exec(text);
+    if (match) {
+      at = match.index;
+      break;
+    }
+  }
+  const before = at === -1 ? "" : text.slice(0, at).trim();
+  const anchorWord = before.length === 0 ? 0 : before.split(/\s+/).length;
+
+  const start = Math.max(0, anchorWord - EXCERPT_WINDOW_WORDS);
+  const end = Math.min(words.length, anchorWord + EXCERPT_WINDOW_WORDS + 1);
+  const body = words.slice(start, end).join(" ");
+  return `${start > 0 ? "... " : ""}${body}${end < words.length ? " ..." : ""}`;
+}
+
 function mentionsTopic(text: string, topic: DeflectableTopic): boolean {
   return matchesAny(text, TOPIC_PATTERNS[topic]);
 }
@@ -792,10 +831,17 @@ export function hasCustomerAcceptedProposal(transcript: TranscriptMessage[]): bo
   return deriveAcceptedSolutionLine(transcript) !== null;
 }
 
+// Excerpted rather than quoted whole: this list grows by one entry per rep turn
+// that mentions a figure, so on a voice transcript it was reaching five full
+// turns of raw speech in a single prompt. The figure is the part the customer
+// must not ask for again; the paragraph around it was never the point.
+// Deduplicated because a rep who repeats the same number across turns otherwise
+// contributes the same line to the block more than once.
 function deriveQuotedFacts(transcript: TranscriptMessage[]): string[] {
   return transcript
     .filter((m) => m.role === "consultant" && QUOTED_FACT_PATTERN.test(m.content))
-    .map((m) => m.content.trim());
+    .map((m) => excerptAround(m.content.trim(), [QUOTED_FACT_PATTERN]))
+    .filter((fact, i, all) => all.indexOf(fact) === i);
 }
 
 // ---------------------------------------------------------------------------
@@ -963,7 +1009,7 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   const quoted = question.asks.map((a) => `"${a}"`).join(" ");
 
   lines.push(
-    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, and you may add a thought or a question of your own AFTER you have answered, but never instead of answering.`,
+    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them. Answering is usually the whole turn, and a reply that stops once the answer is given is a complete reply. You may add a thought of your own AFTER you have answered, or a question of your own if you genuinely have one, but never instead of answering and never as a reflex to hand the turn back.`,
   );
 
   if (question.narrowing) {
@@ -990,6 +1036,116 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Rule N: the consultant TELLING rather than asking.
+//
+// Every rule above is about what the customer does with a QUESTION. Nothing
+// covered what it does with a volunteered fact, so a rep who said the vehicle
+// had 100,000 miles, was priced above its worth and had a wrecked suspension
+// got a reply asking how a car seat installs in the back. The information did
+// not register at all.
+//
+// Detection is by SENTENCE SHAPE, never by subject. There is deliberately no
+// vocabulary of fact kinds here: no mileage, no condition, no cost, no defect
+// words. A sentence counts as the rep telling the customer something when it
+// predicates a property of the thing under discussion, or asserts that the
+// thing does not line up with what the customer said they needed, or carries a
+// concrete figure. Those are grammatical frames, and they hold whether the
+// product is a truck, a house, a policy, or a service contract. Enumerating
+// subjects is exactly what made the redirect rule fail on every subject nobody
+// had enumerated, and repeating that here would reproduce the bug one report
+// later.
+// ---------------------------------------------------------------------------
+
+// A property predicated of the item: determiner, one or two words of noun
+// phrase, then a state verb. Requiring at least one word between the determiner
+// and the verb is what keeps bare conversational fillers out, since "this is a
+// good time to buy" and "that's a fair question" have nothing in that slot.
+const ATTRIBUTE_CLAIM =
+  /\b(?:the|this|that|these|those|its|his|her|their|our)\s+(?:[a-z][a-z'-]*\s+){1,2}(?:is|are|was|were|isn'?t|aren'?t|has|have|had|hasn'?t|haven'?t|comes?|came|needs?|needed|runs?|ran|gets?|got|sits?|starts?|goes?|went|does|doesn'?t)\b/i;
+
+// The rep saying the thing does not line up with what the customer told them.
+// Also pure shape: a negation or a comparison against what the customer said,
+// with no claim about which attribute is at fault.
+const MISMATCH_CLAIM: RegExp[] = [
+  /\b(?:i'?m|i am) not sure (?:this|that|it|these|those)\b/i,
+  /\b(?:isn'?t|aren'?t|is not|are not|not really|not quite)\b[^.!?]{0,40}\b(?:right|the right|a good fit|going to work|what you|for you|for your)\b/i,
+  /\b(?:won'?t|wouldn'?t|will not|can'?t|cannot)\b[^.!?]{0,40}\b(?:work|fit|handle|hold|take|cover|last|get you|be enough|be able)\b/i,
+  /\b(?:doesn'?t|does not|don'?t|do not)\b[^.!?]{0,40}\b(?:fit|work|have|come with|match|line up|include|support|cover)\b/i,
+  /\b(?:more|less|higher|lower|older|smaller|bigger) than (?:you|what you)\b/i,
+  /\bnot going to\b/i,
+];
+
+// Ordering and hand-off sentences belong to Rules 2 and S. Excluding them here
+// is what stops this rule telling the customer to chew over a topic the other
+// two just told it to drop.
+function isRedirectSentence(sentence: string): boolean {
+  return (
+    matchesAny(sentence, REDIRECT_MARKERS) ||
+    matchesAny(sentence, SEQUENCING_MARKERS) ||
+    matchesAny(sentence, RELEVANCE_CONDITIONING_MARKERS)
+  );
+}
+
+function isAskSentence(sentence: string): boolean {
+  return sentence.endsWith("?") || matchesAny(sentence, IMPERATIVE_ASK_MARKERS);
+}
+
+export interface ProductDisclosureState {
+  // The rep's telling sentences this turn. Verbatim, except that a run-on with
+  // no punctuation in it is trimmed to a window around the claim (see
+  // excerptAround) rather than quoted at full length.
+  statements: string[];
+  // True when at least one of them carries a figure. Only used to make the
+  // prompt line concrete; a disclosure counts either way.
+  hasFigures: boolean;
+}
+
+// What the consultant just volunteered about the thing under discussion, or null
+// when their last message only asked, only redirected, or has not happened yet.
+// Turn-scoped like Rule G: once the customer has spoken, the disclosure has had
+// its moment and stops being pinned.
+export function deriveProductDisclosure(
+  transcript: TranscriptMessage[],
+): ProductDisclosureState | null {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+  const last = spoken.at(-1);
+  if (!last || last.role !== "consultant") return null;
+
+  const statements = splitSentences(last.content.trim()).filter(
+    (s) => !isAskSentence(s) && !isRedirectSentence(s) && s.split(/\s+/).length >= 4,
+  );
+  if (statements.length === 0) return null;
+
+  const figures = statements.filter(
+    (s) => QUOTED_FACT_PATTERN.test(s) || parseMoneyAmounts(s).length > 0,
+  );
+  const tells =
+    figures.length > 0 ||
+    statements.some((s) => ATTRIBUTE_CLAIM.test(s) || matchesAny(s, MISMATCH_CLAIM));
+  if (!tells) return null;
+
+  return {
+    statements: statements.map((s) =>
+      excerptAround(s, [QUOTED_FACT_PATTERN, ATTRIBUTE_CLAIM, ...MISMATCH_CLAIM]),
+    ),
+    hasFigures: figures.length > 0,
+  };
+}
+
+// Renders the disclosure as prompt lines. Empty array when the rep told the
+// customer nothing this turn, so a pure discovery question produces exactly the
+// prompt it produced before this rule existed.
+export function buildProductDisclosureLines(
+  disclosure: ProductDisclosureState | null,
+): string[] {
+  if (!disclosure) return [];
+  const quoted = disclosure.statements.map((s) => `"${s}"`).join(" ");
+  return [
+    `- THE CONSULTANT JUST TOLD YOU SOMETHING ABOUT WHAT YOU ARE CONSIDERING, they did not only ask you something: ${quoted} That is new information and it has to land somewhere in your reply. Show that you heard it before you go anywhere else: name the part of it that struck you, say what you now think, or ask what it means for you. If it is bad news, be concerned, be put off, weigh whether this is still the one, or say why you want it anyway despite that specific thing. If it is good news, let it count for something. You do not have to ask a question to react, and a reaction that ends on a statement is a complete reply. What you must not do is continue whatever you were saying before as though this sentence was never spoken.`,
+  ];
+}
+
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
   return {
     deflectedTopics: deriveDeflectedTopics(transcript),
@@ -1007,7 +1163,16 @@ export function deriveConversationState(transcript: TranscriptMessage[]): Conver
 // block. Returns an empty array when nothing was detected, so a conversation with
 // none of these situations produces byte-identical prompts to the pre-change
 // behavior.
-export function buildConversationStateLines(state: ConversationState): string[] {
+// `alreadyQuoted` is text some earlier line in the same state block has already
+// put in front of the model, and is dropped from the figures list rather than
+// repeated. The rep's latest message routinely arrives here three times over --
+// as the most recent message, as the disclosure the customer has to react to,
+// and as a figure it must not ask for again -- and three copies of the same
+// paragraph dilute every other instruction in the block.
+export function buildConversationStateLines(
+  state: ConversationState,
+  alreadyQuoted: string[] = [],
+): string[] {
   const lines: string[] = [];
 
   for (const t of state.deflectedTopics) {
@@ -1062,11 +1227,208 @@ export function buildConversationStateLines(state: ConversationState): string[] 
     );
   }
 
-  if (state.quotedFacts.length > 0) {
+  const freshFacts = state.quotedFacts.filter((fact) => !alreadyQuoted.includes(fact));
+  if (freshFacts.length > 0) {
     lines.push(
       "- Concrete numbers and answers the consultant has ALREADY given you. You know these. Never ask for any of them again as though you had not heard them; react to them instead:"
     );
-    for (const fact of state.quotedFacts) lines.push(`  - "${fact}"`);
+    for (const fact of freshFacts) lines.push(`  - "${fact}"`);
+  }
+
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Product alignment gate (opt-in, flag-gated at the call site in llm.ts).
+//
+// A real buyer cannot be led into the weeds of trim levels and tow ratings
+// before anyone has asked what they need the thing FOR. The simulated customer
+// could, because nothing stopped it, and a rep who opened on specs got a
+// cooperative spec conversation and a passing-looking discovery that never
+// discovered anything.
+//
+// This tracks the four things that have to be on the table before feature talk
+// is a reasonable place for the conversation to be. It is deliberately four
+// booleans and nothing more: no score, no ordering, no state machine. Each is
+// derived from an explicit lexical marker in the transcript in the same
+// conservative spirit as everything above, so a missed signal just leaves the
+// customer behaving as it did before the flag existed.
+//
+// Kept out of ConversationState on purpose. The gate is a separate derivation
+// with a separate renderer, so with the flag off not one byte of the prompt
+// changes and pre/post behavior can be compared honestly.
+// ---------------------------------------------------------------------------
+
+// The rep asking what the thing is actually for. Matched against the rep's ask
+// sentences only, so "a family sedan is a great use case" in a statement never
+// counts as having asked anything.
+const USE_CASE_ASK_MARKERS: RegExp[] = [
+  /\bwhat (?:are|will) you (?:be )?(?:using|doing with)\b/i,
+  /\b(?:use|using) (?:it|this|them|that) (?:for|to)\b/i,
+  /\bwhat (?:do|will|would) you need it to do\b/i,
+  /\bwhat brings you (?:in|here|by)\b/i,
+  /\bwhat (?:are|were) you looking (?:for|to do)\b/i,
+  /\bday[- ]to[- ]day\b/i,
+  /\btypical (?:day|week|drive|trip|use|usage|workload)\b/i,
+  /\bhow (?:do|would|will) you (?:plan to )?(?:use|be using)\b/i,
+  /\bwhat'?s (?:it|this) (?:going to be )?for\b/i,
+  /\bprimar(?:y|ily)\b[^?.!]{0,30}\b(?:use|using|for|need)\b/i,
+  /\bwhat kind of (?:driving|work|use|usage|trips|miles|space|projects|jobs)\b/i,
+  /\bmost of (?:your|the) (?:driving|use|time|miles)\b/i,
+];
+
+// The rep asking who else is in the picture: riding along, living there, using
+// it, or otherwise part of the decision.
+const WHO_ELSE_ASK_MARKERS: RegExp[] = [
+  /\bwho else\b/i,
+  /\banyone else\b/i,
+  /\bwho(?:'s| is| will| would| are)\b[^?.!]{0,40}\b(?:using|riding|driving|living|working|travel|with you|in (?:the|it))\b/i,
+  /\b(?:just|only) (?:you|yourself)\b/i,
+  /\bhow many (?:people|of you|passengers|kids|children|employees|users|seats|bedrooms)\b/i,
+  /\bwho (?:else )?is involved\b/i,
+  /\b(?:kids|children|passengers|family|spouse|wife|husband|partner|team|crew|roommates?)\b/i,
+];
+
+// The rep asking why: what is driving this, what changed, what matters most.
+const MOTIVATION_ASK_MARKERS: RegExp[] = [
+  /\bwhat'?s (?:driving|prompting|behind|changed|different)\b/i,
+  /\bwhy (?:now|are you|is (?:it|this)|the (?:change|switch)|change|switch|looking|replace)\b/i,
+  /\bwhat (?:made|makes|has|prompted|brought) you\b/i,
+  /\bwhat are you (?:hoping|trying|looking) (?:to|for)\b/i,
+  /\bwhat (?:would|does) (?:success|the right one|a good outcome|ideal)\b/i,
+  /\b(?:most important|matters most|top priority|biggest priority)\b/i,
+  /\bwhat'?s (?:most )?important to you\b/i,
+];
+
+// A CUSTOMER turn naming something that bothers them: a worry, a frustration,
+// or a past experience that went badly. This one reads the customer's side,
+// because the gate is about what has been established, not about who asked.
+const CONCERN_MARKERS: RegExp[] = [
+  /\bworri(?:ed|es|some)\b/i,
+  /\bconcern(?:ed|s)?\b/i,
+  /\bfrustrat/i,
+  /\bnervous\b/i,
+  /\banxious\b/i,
+  /\bafraid\b/i,
+  /\bscared\b/i,
+  /\bwary\b/i,
+  /\bskeptical\b/i,
+  /\bproblem(?:s)?\b/i,
+  /\bissues?\b/i,
+  /\bhate(?:d)?\b/i,
+  /\bnever again\b/i,
+  /\bburned\b/i,
+  /\bbad experience\b/i,
+  /\blast (?:time|one|place|guy)\b/i,
+  /\bprevious (?:one|car|house|vendor|provider)\b/i,
+  /\bbroke down\b/i,
+  /\bkept (?:breaking|failing|going)\b/i,
+  /\bfell apart\b/i,
+  /\bstuck with\b/i,
+  /\bheadache\b/i,
+  /\b(?:tired|sick) of\b/i,
+  /\bdisappoint/i,
+  /\bwent wrong\b/i,
+  /\bregret/i,
+  /\bdon'?t want (?:to )?(?:end up|go through|deal|another|any)\b/i,
+];
+
+// The rep pulling the conversation into product internals: trims, packages,
+// configurations, capacities, spec sheets. Generic by SHAPE rather than by an
+// enumerated topic list, because enumerating topics is exactly what made the
+// redirect rule fail on subjects nobody had thought to name.
+const PRODUCT_SPEC_MARKERS: RegExp[] = [
+  /\btrims?\b/i,
+  /\bpackages?\b/i,
+  /\bconfigurations?\b/i,
+  /\bspecs?\b|\bspecifications?\b/i,
+  /\b(?:towing|payload|load|storage|seating|cargo|hauling) capacity\b/i,
+  /\bhorsepower\b|\btorque\b|\bdrivetrain\b|\bengine (?:size|option|choice)\b/i,
+  /\bdimensions\b/i,
+  /\bsquare (?:feet|footage)\b/i,
+  /\bwhich (?:model|trim|version|package|tier|plan|configuration|engine|edition)\b/i,
+  /\bwhat (?:model|trim|version|package|tier|plan|edition)\b/i,
+  /\bfeature (?:set|list)\b/i,
+  /\bprocessor\b|\bmegapixels?\b|\bgigabytes?\b|\bstorage (?:size|tier)\b/i,
+  /\btop trim\b|\bbase model\b|\bfully loaded\b/i,
+];
+
+export interface AlignmentGateState {
+  // The consultant asked what this is for, and the customer gave a real answer.
+  useCase: boolean;
+  // The consultant asked who else is in the picture, and the customer answered.
+  whoElse: boolean;
+  // The consultant asked why, and the customer answered.
+  motivation: boolean;
+  // The customer has named at least one worry or past frustration.
+  concern: boolean;
+  // All four. Feature talk is a reasonable place to be from here on.
+  satisfied: boolean;
+  // The consultant's spec question this turn, quoted, when they have dived into
+  // product internals while the gate is still open. Null otherwise.
+  featureDive: string | null;
+}
+
+// A customer reply substantial enough to count as having actually answered.
+// "Yeah" and "sure" do not establish anything.
+function isSubstantiveAnswer(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length >= 15 && trimmed.split(/\s+/).length >= 4;
+}
+
+// True when the rep asked something matching `markers` and the customer then
+// said something real. Both halves are required: an unanswered question has not
+// established anything either.
+function askedAndAnswered(transcript: TranscriptMessage[], markers: RegExp[]): boolean {
+  for (let i = 0; i < transcript.length; i++) {
+    const m = transcript[i];
+    if (m.role !== "consultant") continue;
+    if (!extractAsks(m.content).some((ask) => matchesAny(ask, markers))) continue;
+    for (let j = i + 1; j < transcript.length; j++) {
+      if (transcript[j].role === "customer" && isSubstantiveAnswer(transcript[j].content)) return true;
+    }
+  }
+  return false;
+}
+
+export function deriveAlignmentGate(transcript: TranscriptMessage[]): AlignmentGateState {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+
+  const useCase = askedAndAnswered(spoken, USE_CASE_ASK_MARKERS);
+  const whoElse = askedAndAnswered(spoken, WHO_ELSE_ASK_MARKERS);
+  const motivation = askedAndAnswered(spoken, MOTIVATION_ASK_MARKERS);
+  const concern = spoken.some((m) => m.role === "customer" && matchesAny(m.content, CONCERN_MARKERS));
+  const satisfied = useCase && whoElse && motivation && concern;
+
+  const last = spoken.at(-1);
+  const specAsk =
+    !satisfied && last && last.role === "consultant"
+      ? extractAsks(last.content).find((ask) => matchesAny(ask, PRODUCT_SPEC_MARKERS))
+      : undefined;
+
+  return { useCase, whoElse, motivation, concern, satisfied, featureDive: specAsk ?? null };
+}
+
+// Renders the gate as prompt lines. Empty array once the gate is satisfied and
+// the rep is not in the weeds, so a well-run conversation reads exactly as it
+// did before this existed.
+export function buildAlignmentGateLines(state: AlignmentGateState): string[] {
+  if (state.satisfied) return [];
+
+  const missing: string[] = [];
+  if (!state.useCase) missing.push("what you actually need it for");
+  if (!state.whoElse) missing.push("who else this has to work for besides you");
+  if (!state.motivation) missing.push("why you are doing this at all right now");
+  if (!state.concern) missing.push("what you are worried about or what went wrong last time");
+
+  const lines: string[] = [
+    `- Nobody has established any of this yet: ${missing.join("; ")}. You are aware of that the way a real buyer is: not as a rule you are following, but as the reason detailed product talk feels premature to you right now. Never say out loud that something has to happen first, never announce an order to this conversation, and never hint that you are withholding anything. Just be a person who has not been asked yet.`,
+  ];
+
+  if (state.featureDive) {
+    lines.push(
+      `- The consultant has gone straight to product detail with "${state.featureDive}" before any of that is on the table. You are the buyer, not the person who memorized the catalogue, so the honest answer is usually that you do not know and have not thought about it in those terms. Say that plainly, in your own words, and then say what you DO know: the situation you are in, the thing you need this to handle, the part of it that actually matters to you. That is a real answer to their question, not a dodge, and it puts the conversation back on ground you can speak to. Do not pretend to a preference you do not have, and do not lecture them about asking the wrong question.`,
+    );
   }
 
   return lines;
