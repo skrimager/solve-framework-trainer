@@ -990,6 +990,151 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Rule H: which PHASE of the conversation this is, and whether the customer has
+// already asked to be shown options.
+//
+// The live failure: the customer answered every discovery question (which Rule G
+// fixed) and then appended the same demand to every single answer, turn after
+// turn: "...what do you have in your inventory you can show me that has those
+// features?" A rep gathering requirements got that tacked onto every reply.
+//
+// Nothing asked for that either. Rule G says to answer and allows a question of
+// the customer's own AFTER answering, and the realism rules say every turn must
+// go somewhere new, with nothing anywhere saying that wanting to be shown is a
+// thing you say ONCE, or that requirements are gathered BEFORE options are
+// presented. So this derives the two facts a static rule cannot know: whether
+// the customer has already made that request, and whether the rep has moved from
+// asking questions to actually presenting.
+//
+// Same conservatism as everything above. A missed signal leaves the customer
+// exactly as it was, and every pattern needs an explicit lexical marker, so the
+// state block can never claim a request the transcript does not contain.
+// ---------------------------------------------------------------------------
+
+// The customer asking to be shown what is available. Distinct from
+// ALTERNATIVES_REQUEST_PATTERNS above, which is the "what ELSE do you have"
+// round that only makes sense after something has already been shown.
+const SHOW_REQUEST_PATTERNS: RegExp[] = [
+  /\bwhat (?:do|have) you (?:have|got)\b/i,
+  /\bwhat(?:'s| is) (?:in |on )?your (?:inventory|lot|stock|selection)\b/i,
+  /\b(?:can|could|will|would) you show me\b/i,
+  /\byou (?:can|could) show me\b/i,
+  /\bshow me (?:what|some|a few|the|your|any)\b/i,
+  /\b(?:can|could) i (?:see|take a look)\b/i,
+  /\bi(?:'d| would) (?:like|love) to (?:see|look at)\b/i,
+  /\bi want to see\b/i,
+  /\blet(?:'s| us) (?:see|look at) (?:them|those|it|some|what|a few)\b/i,
+  /\bdo you have (?:anything|something|any)\b/i,
+  /\bwhen (?:can|do) i (?:see|look at)\b/i,
+  /\bare you going to show me\b/i,
+];
+
+// The rep framing discovery: questions come first, options come after. Also the
+// guard that keeps "I've got a few questions" from reading as "I've got a few
+// options", which is why the bare questions phrasing belongs in this list.
+const DISCOVERY_FRAMING_PATTERNS: RegExp[] = [
+  /\b(?:a few|a couple of|a couple|some|two|three)\s+(?:more\s+|quick\s+)?questions?\b/i,
+  /\bbefore (?:i|we) (?:show|pull|bring|get into|dig into|look at)\b/i,
+  /\blet me ask (?:you )?(?:a|some|what)\b/i,
+  /\bask (?:you )?(?:a few|a couple|some) /i,
+  /\bnarrow (?:it|this|that|things|them) down\b/i,
+  /\bshow you the right (?:one|ones|option|options|fit)\b/i,
+  /\bwaste your time\b/i,
+  /\bfirst,? (?:let'?s|let me|i'?d like|i want)\b/i,
+  /\blet'?s (?:first|start with|start by|figure out|find the right)\b/i,
+  /\bfind the right (?:one|fit|vehicle|car|home|place|option)\b/i,
+];
+
+// The rep moving from gathering requirements to putting options in front of the
+// customer. This is what re-opens full engagement.
+const PRESENTATION_PATTERNS: RegExp[] = [
+  /\blet me (?:pull|grab|bring)\b/i,
+  // Needs an object, so "let me show you how our process works" mid-discovery is
+  // not read as the walk-around starting.
+  /\blet me show you (?:a few|a couple|some|what|these|those|this|the|one|two|three)\b/i,
+  /\bpull (?:them|those|these|it|a few|some|a couple)\b.{0,20}\bup\b/i,
+  /\blet(?:'s| us) (?:go )?take a look\b/i,
+  /\blet(?:'s| us) look at (?:a few|some|these|those|them|this|the)\b/i,
+  /\bi(?:'ve| have) got (?:a few|a couple|two|three|one|some|something)\b/i,
+  /\bwe (?:have|'ve got|got) (?:a few|a couple|two|three)\b/i,
+  /\bcome (?:take a look|with me|see)\b/i,
+  /\bfollow me\b/i,
+  /\bright (?:this way|over here)\b/i,
+  /\bready to (?:show|walk) you\b/i,
+  /\bhere(?:'s| is) what i(?:'ve| have) got\b/i,
+];
+
+export interface DiscoveryPhaseState {
+  // Every customer line that asked to be shown options, in order.
+  showRequests: string[];
+  // The rep's line saying they want to ask questions before showing anything.
+  discoveryFraming: string | null;
+  // The rep's line moving the conversation into presenting options. Null while
+  // the conversation is still in discovery.
+  presentationLine: string | null;
+}
+
+export function deriveDiscoveryPhase(transcript: TranscriptMessage[]): DiscoveryPhaseState {
+  const showRequests: string[] = [];
+  let discoveryFraming: string | null = null;
+  let presentationLine: string | null = null;
+
+  for (const m of transcript) {
+    const text = m.content.trim();
+    if (!text) continue;
+
+    if (m.role === "customer") {
+      if (matchesAny(text, SHOW_REQUEST_PATTERNS)) showRequests.push(text);
+      continue;
+    }
+
+    const framing = matchesAny(text, DISCOVERY_FRAMING_PATTERNS);
+    if (framing && !discoveryFraming) discoveryFraming = text;
+    // Framing wins over presenting on the same line: "before I show you a bunch
+    // of cars, let me ask a few quick questions" is the start of discovery, not
+    // the start of the walk-around.
+    if (framing || presentationLine) continue;
+    if (matchesAny(text, PRESENTATION_PATTERNS) || matchesAny(text, PROPOSAL_MARKERS)) presentationLine = text;
+  }
+
+  return { showRequests, discoveryFraming, presentationLine };
+}
+
+// Renders the phase as prompt lines. Empty array while nothing has been
+// detected, so a conversation the patterns do not recognize produces a
+// byte-identical prompt to the pre-change behavior and the customer behaves
+// exactly as it did before.
+export function buildDiscoveryPhaseLines(state: DiscoveryPhaseState): string[] {
+  const lines: string[] = [];
+
+  if (state.presentationLine) {
+    lines.push(
+      `- The consultant has moved past gathering requirements and is now putting options in front of you ("${state.presentationLine}"). You are out of discovery. Engage fully with what they show you: react to it honestly, say what you think of it, and ask the real questions you have about the specific thing in front of you.`,
+    );
+    return lines;
+  }
+
+  if (state.discoveryFraming) {
+    lines.push(
+      `- The consultant has told you they want to understand what you need BEFORE they show you anything ("${state.discoveryFraming}"). That is how this works, and you accept it. Answer their questions and let them lead. Do not push to be shown options yet; they will bring them out when they have what they need.`,
+    );
+  }
+
+  if (state.showRequests.length > 0) {
+    lines.push(
+      `- You have ALREADY told them you want to see what they have ("${state.showRequests[0]}"). They heard you. Asking again this turn is the one thing you must not do: no "what do you have that you can show me", no "what can you show me with those features", and no version of that request tacked onto the end of your answer. Just answer what they asked and wait for them to present.`,
+    );
+    if (state.showRequests.length > 1) {
+      lines.push(
+        `  - You have now made that request ${state.showRequests.length} times in this conversation. A real person does not repeat it on every turn. Say nothing further about being shown options until the consultant brings them out on their own.`,
+      );
+    }
+  }
+
+  return lines;
+}
+
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
   return {
     deflectedTopics: deriveDeflectedTopics(transcript),

@@ -8,8 +8,10 @@ import {
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildDiscoveryPhaseLines,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveDiscoveryPhase,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
 } from "./conversationState";
@@ -803,5 +805,134 @@ describe("Rule G: derivation is pure and additive", () => {
       ),
       [],
     );
+  });
+});
+
+// ===========================================================================
+// Rule H (PR: the show-me loop). The customer answered every question and then
+// appended the same "what do you have you can show me?" demand to every answer.
+// These cover the two facts the prompt cannot know on its own: whether that
+// request has already been made, and whether the rep is still in discovery.
+// ===========================================================================
+
+function phaseLines(...lines: string[]): string {
+  return buildDiscoveryPhaseLines(deriveDiscoveryPhase(t(...lines))).join("\n");
+}
+
+describe("Rule H: the request to be shown options is counted, not guessed", () => {
+  test("a first request is recorded and discovery is still in force", () => {
+    const state = deriveDiscoveryPhase(
+      t("r: What brings you in today?", "c: I need something safe. What do you have that you can show me?"),
+    );
+    assert.equal(state.showRequests.length, 1);
+    assert.equal(state.presentationLine, null);
+  });
+
+  test("every re-demand is counted", () => {
+    const state = deriveDiscoveryPhase(
+      t(
+        "r: What safety features matter to you?",
+        "c: A backup camera and blind spot. What do you have in your inventory you can show me that has those features?",
+        "r: Most of our cars have those. Are you thinking sedan, SUV, or compact?",
+        "c: A sedan or maybe a compact SUV. What do you have you can show me with those features?",
+      ),
+    );
+    assert.equal(state.showRequests.length, 2);
+  });
+
+  test("a plain answer with no request is not counted as one", () => {
+    const state = deriveDiscoveryPhase(
+      t("r: Sedan, SUV, or compact?", "c: Probably a sedan, maybe a compact SUV."),
+    );
+    assert.deepEqual(state.showRequests, []);
+    assert.equal(phaseLines("r: Sedan, SUV, or compact?", "c: Probably a sedan, maybe a compact SUV."), "");
+  });
+
+  test("the rep's own questions are never read as the customer asking to be shown", () => {
+    const state = deriveDiscoveryPhase(t("r: What do you have for a trade-in right now?"));
+    assert.deepEqual(state.showRequests, []);
+  });
+});
+
+describe("Rule H: discovery framing versus presentation", () => {
+  test("asking questions before showing is framing, not presenting", () => {
+    const state = deriveDiscoveryPhase(
+      t("r: Before I show you a bunch of cars, let me ask a few quick questions so I show you the right ones."),
+    );
+    assert.ok(state.discoveryFraming);
+    assert.equal(state.presentationLine, null);
+  });
+
+  test("'I've got a few questions' is not mistaken for 'I've got a few options'", () => {
+    const state = deriveDiscoveryPhase(t("r: I've got a couple more questions before we go any further."));
+    assert.equal(state.presentationLine, null);
+  });
+
+  test("pulling options up is presenting", () => {
+    const state = deriveDiscoveryPhase(
+      t("r: That gives me exactly what I need. I've got a few that fit all of that, let me pull them up for you."),
+    );
+    assert.ok(state.presentationLine);
+  });
+
+  test("a recommendation counts as presenting too", () => {
+    const state = deriveDiscoveryPhase(t("r: Based on what you've told me, I'd recommend the hybrid sedan."));
+    assert.ok(state.presentationLine);
+  });
+});
+
+describe("Rule H: the rendered lines", () => {
+  test("a repeated request is named and forbidden for this turn", () => {
+    const rendered = phaseLines(
+      "r: What safety features matter to you?",
+      "c: A backup camera and blind spot. What do you have in your inventory you can show me that has those features?",
+      "r: Are you thinking sedan, SUV, or compact?",
+    );
+    assert.match(rendered, /You have ALREADY told them you want to see what they have/);
+    assert.match(rendered, /no version of that request tacked onto the end of your answer/);
+  });
+
+  test("the framing line tells the customer showing comes later", () => {
+    const rendered = phaseLines("r: Before I show you anything, let me ask a few quick questions.");
+    assert.match(rendered, /BEFORE they show you anything/);
+    assert.match(rendered, /Do not push to be shown options yet/);
+  });
+
+  test("presenting replaces suppression with full engagement", () => {
+    const rendered = phaseLines(
+      "c: What do you have that you can show me?",
+      "r: Let me ask you a couple of things first. What's the drive like?",
+      "c: About forty miles a day.",
+      "r: I've got a few that fit all of that, let me pull them up for you.",
+    );
+    assert.match(rendered, /is now putting options in front of you/);
+    assert.doesNotMatch(rendered, /You have ALREADY told them/);
+  });
+
+  test("nothing detected renders nothing at all", () => {
+    assert.deepEqual(
+      buildDiscoveryPhaseLines(deriveDiscoveryPhase(t("r: How's your day going?", "c: Can't complain."))),
+      [],
+    );
+  });
+});
+
+describe("Rule H: derivation is pure and additive", () => {
+  test("the same transcript yields the same lines", () => {
+    const transcript = t("c: What do you have you can show me?", "r: What matters most to you?");
+    assert.deepEqual(
+      buildDiscoveryPhaseLines(deriveDiscoveryPhase(transcript)),
+      buildDiscoveryPhaseLines(deriveDiscoveryPhase(transcript)),
+    );
+  });
+
+  test("it leaves the PR #87 and PR #90 derivations alone", () => {
+    const transcript = t(
+      "c: A backup camera and blind spot. What do you have you can show me with those features?",
+      "r: Are you thinking sedan, SUV, or compact?",
+    );
+    // Rule G still sees the live question, and no conversation-state rule fires.
+    assert.ok(deriveDirectQuestion(transcript));
+    assert.deepEqual(buildConversationStateLines(deriveConversationState(transcript)), []);
   });
 });
