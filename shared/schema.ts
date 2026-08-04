@@ -366,7 +366,10 @@ export const contacts = pgTable("contacts", {
   // 'speaking' | 'consulting' | 'book' | 'training' | 'role_play' | 'general'.
   type: text("type").notNull().default("general"),
   // Where the contact originated: 'website' | 'book' | 'speaking' | 'referral'
-  // | 'role_play' | 'manual' (extensible). Existing/marketing rows -> 'website'.
+  // | 'role_play' | 'manual' | 'voice_demo' (extensible). Existing/marketing
+  // rows -> 'website'. 'voice_demo' = auto-created on demo email verification
+  // (POST /api/demo/verify), distinct from 'role_play' (the optional post-demo
+  // CTA form) so the two lead sources stay separately filterable.
   source: text("source").notNull().default("website"),
   priority: text("priority").notNull().default("medium"), // 'high' | 'medium' | 'low'
   owner: text("owner"), // team member handling it (nullable; one admin today, designed for many)
