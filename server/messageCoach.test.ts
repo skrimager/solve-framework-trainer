@@ -112,11 +112,10 @@ const GOOD_REPLY = {
 };
 
 // A responder for tests that are not about the rewrite verification loop
-// itself (cache behaviour, prompt construction, etc). Every call, including
-// the loop's internal re-check of the rewrite, returns a rewrite that clears
-// MESSAGE_COACH_REWRITE_FLOOR on the first check, so exactly one extra
-// verification call happens beyond the original score call and callers of
-// this helper do not need to reason about retries.
+// itself (cache behaviour, prompt construction, etc). Call 1 is the original
+// score. Calls 2 and 3 are the loop's two independent, parallel verification
+// checks of the rewrite, both always passing, so no retry is triggered and
+// callers of this helper do not need to reason about retries.
 function passingRewriteResponder(
   overrides: Partial<typeof GOOD_REPLY> = {},
 ): MessageCoachResponder & { calls: { input: string; cacheKey: string }[] } {
@@ -125,9 +124,7 @@ function passingRewriteResponder(
   const calls: { input: string; cacheKey: string }[] = [];
   const fn = (async (input: string, cacheKey: string) => {
     calls.push({ input, cacheKey });
-    // Call 1 (per scored message): the original score. Call 2: the rewrite
-    // verification check, always passing so no retry is triggered.
-    const reply = calls.length % 2 === 1 ? original : passingCheck;
+    const reply = calls.length === 1 ? original : passingCheck;
     return JSON.stringify(reply);
   }) as MessageCoachResponder & { calls: typeof calls };
   fn.calls = calls;
@@ -377,9 +374,10 @@ describe("score cache", () => {
       responder: first,
       cache,
     });
-    // One call for the original score, one to verify the rewrite clears the
-    // floor. The rewrite passes on the first check here, so no retry fires.
-    assert.equal(first.calls.length, 2);
+    // One call for the original score, two independent calls to verify the
+    // rewrite clears the floor on both checks. The rewrite passes both
+    // checks here, so no retry fires.
+    assert.equal(first.calls.length, 3);
 
     const second = passingRewriteResponder({ score: 99 });
     const repeat = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
@@ -397,8 +395,9 @@ describe("score cache", () => {
     await scoreOutreachMessage("message B", "Auto", { responder: r, cache });
     await scoreOutreachMessage("message A", "Mortgage", { responder: r, cache });
     await scoreOutreachMessage("message A", null, { responder: r, cache });
-    // 4 distinct scores, 2 model calls each (score + rewrite verification).
-    assert.equal(r.calls.length, 8);
+    // 4 distinct scores, 3 model calls each (score + 2 independent rewrite
+    // verification checks).
+    assert.equal(r.calls.length, 12);
     assert.equal(new Set(cache.rows.map((row) => row.contentHash)).size, 4);
   });
 
@@ -465,66 +464,156 @@ function scriptedResponder(
 }
 
 describe("rewrite self-verification loop", () => {
-  test("a rewrite that already clears the floor is used as is, with one verification call", async () => {
+  test("initial score, rewrite generation, and rewrite verification all use the SAME model when no rewriteResponder override is given", async () => {
+    // Locks in the fix for a real production bug: an earlier design scored
+    // the ORIGINAL message with a fast/cheap model but generated and
+    // verified the REWRITE with a stronger model. A real (non-mocked) load
+    // test proved the SAME exact text scored differently by model with
+    // ZERO variance within either model (85 vs 92, every time), so a
+    // rewrite verified by the strong model was structurally guaranteed to
+    // score lower the moment a customer's resubmission ran back through
+    // the cheap model's initial-score call. Production now points
+    // defaultResponder and rewriteResponder at the same model
+    // (MESSAGE_COACH_MODEL); this test only asserts the deps-injection seam
+    // preserves that invariant when a caller supplies just `responder`
+    // (the common test/production pattern) without a separate override.
     const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
-    const passingCheck = { ...original, score: 93 };
-    const responder = scriptedResponder([original, passingCheck]);
+    const passingCheckA = { ...original, score: 93 };
+    const passingCheckB = { ...original, score: 90 };
+    const responder = scriptedResponder([original, passingCheckA, passingCheckB]);
+    await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder,
+      cache: fakeCache(),
+    });
+    // All 3 calls (initial score + 2 verification checks) went through the
+    // single injected responder; there is no separate model in play.
+    assert.equal(responder.calls.length, 3);
+  });
+
+  test("a rewrite that clears the floor on BOTH independent checks is used as is", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const passingCheckA = { ...original, score: 93 };
+    const passingCheckB = { ...original, score: 90 };
+    const responder = scriptedResponder([original, passingCheckA, passingCheckB]);
     const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
       responder,
       cache: fakeCache(),
     });
-    assert.equal(responder.calls.length, 2, "no retry should fire once the rewrite passes");
+    assert.equal(
+      responder.calls.length,
+      3,
+      "no retry should fire once the rewrite passes both independent checks",
+    );
     assert.equal(result.rewrite, original.rewrite);
     // The score shown to the customer describes their ORIGINAL message, not
     // the internal check of the rewrite.
     assert.equal(result.score, GOOD_REPLY.score);
   });
 
-  test("a rewrite that misses the floor triggers exactly one corrective retry, and the passing version is used", async () => {
-    const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
-    const failingCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
-    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
-    const passingCheck = { ...corrected, score: 91 };
-    const responder = scriptedResponder([original, failingCheck, corrected, passingCheck]);
+  test("a rewrite that passes one check but fails the other is NOT accepted, and triggers a retry", async () => {
+    // This is exactly the real failure a customer hit: a single passing
+    // check is not enough evidence the rewrite is safe to hand out.
+    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const passingCheckA = { ...original, score: 93 };
+    const failingCheckB = { ...original, score: 72, stalledStep: "still reads as a form letter" };
+    const corrected = { ...original, rewrite: "Hey, curious if you have thought about selling. Reply STOP to opt out." };
+    const passingRetryA = { ...corrected, score: 91 };
+    const passingRetryB = { ...corrected, score: 90 };
+    const responder = scriptedResponder([
+      original,
+      passingCheckA,
+      failingCheckB,
+      corrected,
+      passingRetryA,
+      passingRetryB,
+    ]);
     const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
       responder,
       cache: fakeCache(),
     });
-    assert.equal(responder.calls.length, 4);
-    assert.equal(result.rewrite, corrected.rewrite, "the corrected, passing rewrite must be the one returned");
+    assert.equal(responder.calls.length, 6, "one check failing must trigger a retry, not be waved through");
+    assert.equal(result.rewrite, corrected.rewrite);
+  });
 
-    // The retry call must tell the model exactly what the previous rewrite
-    // scored and why, not just ask again from scratch.
-    const retryInput = responder.calls[2].input;
+  test("a rewrite that misses the floor on both checks triggers exactly one corrective retry, and the version passing BOTH checks is used", async () => {
+    const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
+    const failingCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const failingCheckB = { ...original, score: 61, stalledStep: "still demands a yes or no" };
+    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
+    const passingCheckA = { ...corrected, score: 91 };
+    const passingCheckB = { ...corrected, score: 90 };
+    const responder = scriptedResponder([
+      original,
+      failingCheckA,
+      failingCheckB,
+      corrected,
+      passingCheckA,
+      passingCheckB,
+    ]);
+    const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder,
+      cache: fakeCache(),
+    });
+    assert.equal(responder.calls.length, 6);
+    assert.equal(result.rewrite, corrected.rewrite, "the corrected version passing BOTH checks must be the one returned");
+
+    // The retry call must tell the model exactly what the WORSE of the two
+    // checks scored and why, not just ask again from scratch.
+    const retryInput = responder.calls[3].input;
     assert.match(retryInput, /only scored 58/);
     assert.match(retryInput, /still demands a yes or no/);
     assert.match(retryInput, /Selling soon\? Let me know\./);
   });
 
-  test("if even the retry misses the floor, the best-scoring version seen is kept rather than looping forever", async () => {
+  test("if every attempt misses the floor on one check, the version with the best MINIMUM of its two checks is kept rather than looping forever", async () => {
     const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
-    const firstCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
-    const corrected = { ...original, rewrite: "Any thoughts on selling this year? Reply STOP to opt out." };
-    const secondCheck = { ...corrected, score: 74, stalledStep: "reply threshold still asks for a plan, not a word" };
-    const responder = scriptedResponder([original, firstCheck, corrected, secondCheck]);
+    const firstCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const firstCheckB = { ...original, score: 55, stalledStep: "still demands a yes or no" };
+    const secondAttempt = { ...original, rewrite: "Any thoughts on selling this year? Reply STOP to opt out." };
+    const secondCheckA = { ...secondAttempt, score: 74, stalledStep: "reply threshold still asks for a plan, not a word" };
+    const secondCheckB = { ...secondAttempt, score: 91, stalledStep: "reply threshold still asks for a plan, not a word" };
+    const thirdAttempt = { ...original, rewrite: "Wondering what your place might be worth these days? Reply STOP to opt out." };
+    const thirdCheckA = { ...thirdAttempt, score: 60, stalledStep: "outcome framing still centers the sender, not the reader" };
+    const thirdCheckB = { ...thirdAttempt, score: 65, stalledStep: "outcome framing still centers the sender, not the reader" };
+    const responder = scriptedResponder([
+      original,
+      firstCheckA,
+      firstCheckB,
+      secondAttempt,
+      secondCheckA,
+      secondCheckB,
+      thirdAttempt,
+      thirdCheckA,
+      thirdCheckB,
+    ]);
     const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
       responder,
       cache: fakeCache(),
     });
-    // Exactly 2 rewrite attempts checked (original + 1 retry), no further
-    // retries even though neither cleared the floor.
-    assert.equal(responder.calls.length, 4);
-    // 74 beats 58, so the corrected version, not the original, is kept even
-    // though it did not clear MESSAGE_COACH_REWRITE_FLOOR.
-    assert.equal(result.rewrite, corrected.rewrite);
+    // All 3 rewrite attempts checked (original + 2 retries, MAX_REWRITE_ATTEMPTS),
+    // no further retries even though none cleared the floor on BOTH checks.
+    assert.equal(responder.calls.length, 9);
+    // min(74, 91) = 74 beats min(58, 55) = 55 and min(60, 65) = 60, so the
+    // second attempt, not the first or third, is kept even though it never
+    // cleared the floor on both checks.
+    assert.equal(result.rewrite, secondAttempt.rewrite);
   });
 
   test("caches only the final, verified rewrite, not the first draft", async () => {
     const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
-    const failingCheck = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const failingCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
+    const failingCheckB = { ...original, score: 61, stalledStep: "still demands a yes or no" };
     const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
-    const passingCheck = { ...corrected, score: 91 };
-    const responder = scriptedResponder([original, failingCheck, corrected, passingCheck]);
+    const passingCheckA = { ...corrected, score: 91 };
+    const passingCheckB = { ...corrected, score: 90 };
+    const responder = scriptedResponder([
+      original,
+      failingCheckA,
+      failingCheckB,
+      corrected,
+      passingCheckA,
+      passingCheckB,
+    ]);
     const cache = fakeCache();
     await scoreOutreachMessage("Are you ready to sell?", "Real Estate", { responder, cache });
     const stored = JSON.parse(cache.rows[0].rubric) as { rewrite: string };
