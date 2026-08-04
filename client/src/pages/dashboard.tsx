@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ResponsiveContainer,
   LineChart,
@@ -19,6 +19,8 @@ import {
   PieChart,
   Pie,
   Cell,
+  AreaChart,
+  Area,
 } from "recharts";
 import {
   LayoutDashboard,
@@ -30,10 +32,24 @@ import {
   ArrowLeft,
   ClipboardCheck,
   Mail,
+  Settings,
+  Bell,
+  Radio,
+  Medal,
+  Award,
+  Star,
+  Crown,
+  Sparkles,
+  TrendingUp,
+  TrendingDown,
+  GraduationCap,
+  MessageSquareText,
+  FileBarChart,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
@@ -42,28 +58,38 @@ import { verticalLabel } from "@/lib/verticals";
 import { planForSeatCount } from "@shared/pricing";
 import type { Office, Scenario } from "@shared/schema";
 
-// Manager command-center palette (matches manager-login.tsx and the manager
-// dashboard chrome). Lime green is reserved exclusively for the admin vault and
-// is intentionally never used here.
-const NAVY_DEEP = "#05162D";
-const NAVY = "#0A1A30";
-const PANEL = "#0E2340";
-const ORANGE = "#E06D00";
-const ORANGE_LIGHT = "#F1830D";
-const GRID = "rgba(255,255,255,0.08)";
-const AXIS = "rgba(255,255,255,0.55)";
+// ---------------------------------------------------------------------------
+// Command Center palette. This is a manager-only, premium paid surface, so
+// (unlike the rest of the app) the usual navy/orange-only rule is explicitly
+// relaxed here: the reference "mission control" design uses a full colorful
+// accent set (green/blue/orange/purple/gold) against a near-black base so the
+// dashboard reads as valuable, exciting, data-rich real estate. Lime green is
+// still reserved exclusively for the admin vault and is never used here.
+// ---------------------------------------------------------------------------
+const INK = "#050B18"; // page background, near-black
+const NAVY_DEEP = "#0A1428"; // sidebar / header base
+const NAVY = "#0F1D38"; // panel background
+const PANEL = "#152847"; // nested row / chip background
+const BORDER = "rgba(255,255,255,0.09)";
+const GRID = "rgba(255,255,255,0.07)";
+const AXIS = "rgba(255,255,255,0.5)";
 
-// Orange-family palette for the vertical donut. Deliberately no lime.
-const DONUT_COLORS = [
-  "#E06D00",
-  "#F1830D",
-  "#F5A93F",
-  "#B85600",
-  "#FFC680",
-  "#8A4100",
-  "#FFB25E",
-  "#6B3200",
-];
+const BLUE = "#3B82F6";
+const BLUE_LIGHT = "#60A5FA";
+const GREEN = "#22C55E";
+const GREEN_LIGHT = "#4ADE80";
+const ORANGE = "#F97316";
+const ORANGE_LIGHT = "#FB923C";
+const PURPLE = "#A855F7";
+const PURPLE_LIGHT = "#C084FC";
+const GOLD = "#EAB308";
+const GOLD_LIGHT = "#FDE047";
+const RED = "#EF4444";
+const RED_LIGHT = "#F87171";
+
+// Multi-color family for donuts / distributions so charts feel vivid rather
+// than monochrome, matching the reference's colorful outcome donut and bars.
+const VIVID_COLORS = [BLUE, GREEN, ORANGE, PURPLE, GOLD, RED, BLUE_LIGHT, GREEN_LIGHT];
 
 const ACTIVE_STATUSES = ["active", "trialing"];
 function officeActive(office?: Office): boolean {
@@ -101,13 +127,99 @@ type DashboardStats = {
   academyCredits: { totalCents: number; availableCents: number; display: string };
 };
 
-type Section = "dashboard" | "team" | "scenarios" | "leaderboard";
+// Additive Command Center widget data — see server buildCommandCenterExtras.
+// Deliberately a separate query/type from DashboardStats so the original
+// dashboard-stats response and its consumers are untouched.
+type CommandCenterExtras = {
+  teamHealth: { score: number | null; deltaPercent: number | null };
+  conversations: { count: number; deltaPercent: number | null; sparkline: number[] };
+  completionRate: { percent: number | null; deltaPercent: number | null };
+  certifications: { count: number; deltaPercent: number | null };
+  alerts: { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[];
+  liveFeed: {
+    id: string;
+    type: "certification" | "high_score" | "session_completed";
+    userId: number;
+    displayName: string;
+    detail: string;
+    occurredAt: string;
+  }[];
+  performanceOverTime: { date: string; teamScore: number | null; top20: number | null }[];
+  scoreDistribution: { band: string; count: number; percent: number }[];
+  conversationOutcomes: { outcome: string; count: number }[];
+  popularScenarios: {
+    scenarioId: number;
+    title: string;
+    vertical: string;
+    averageScore: number | null;
+    sessionCount: number;
+  }[];
+  achievements: {
+    id: string;
+    userId: number;
+    displayName: string;
+    badge: "gold_achiever" | "silver_achiever" | "top_performer" | "role_play_master" | "streak_master";
+    label: string;
+    earnedAt: string | null;
+  }[];
+  summaryStrip: {
+    teamMembersActive: number;
+    totalSessions: number;
+    avgScore: number | null;
+    goalProgress: number | null;
+    certificationsTotal: number;
+    hoursTrainedThisPeriod: number;
+  };
+  widgetConfig: Record<string, boolean>;
+};
+
+// Mirrors server DASHBOARD_WIDGET_KEYS exactly (single source of truth lives
+// server-side; kept in sync here for the settings UI labels/order/icons).
+const DASHBOARD_WIDGET_KEYS = [
+  "teamHealth",
+  "conversations",
+  "completionRate",
+  "certifications",
+  "alerts",
+  "liveFeed",
+  "performanceOverTime",
+  "skillRadar",
+  "topPerformers",
+  "conversationOutcomes",
+  "scoreDistribution",
+  "achievements",
+  "popularScenarios",
+  "ctaPanel",
+  "summaryStrip",
+] as const;
+type DashboardWidgetKey = (typeof DASHBOARD_WIDGET_KEYS)[number];
+
+const WIDGET_LABELS: Record<DashboardWidgetKey, { label: string; caption: string }> = {
+  teamHealth: { label: "Team Health Score", caption: "Composite score ring with week-over-week trend" },
+  conversations: { label: "Conversations", caption: "Completed conversations this period, with sparkline" },
+  completionRate: { label: "Completion Rate", caption: "Share of started sessions that finish" },
+  certifications: { label: "Certifications Earned", caption: "New certifications this period" },
+  alerts: { label: "Alerts", caption: "Consultants who need attention (inactive or scoring low)" },
+  liveFeed: { label: "Live Feed", caption: "Recent certifications, high scores, and completed sessions" },
+  performanceOverTime: { label: "Team Performance Over Time", caption: "Team average vs. your office's top 20%" },
+  skillRadar: { label: "Skill Performance Summary", caption: "Radar of the five SOLVE discovery dimensions" },
+  topPerformers: { label: "Top Performers", caption: "Ranked leaderboard by average score" },
+  conversationOutcomes: { label: "Conversation Outcomes", caption: "Successful / converted / in progress / no outcome" },
+  scoreDistribution: { label: "Score Distribution", caption: "Session counts across score bands" },
+  achievements: { label: "Recent Achievements", caption: "Badges earned from real certifications, streaks, and scores" },
+  popularScenarios: { label: "Popular Scenarios This Week", caption: "Most-practiced scenarios with average score" },
+  ctaPanel: { label: "Elevate Your Team CTA", caption: "Shortcut panel to Training Center and team reports" },
+  summaryStrip: { label: "Summary Strip", caption: "Bottom-of-page team totals" },
+};
+
+type Section = "dashboard" | "team" | "scenarios" | "leaderboard" | "settings";
 
 const NAV: { key: Section; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "team", label: "Team", icon: Users },
   { key: "scenarios", label: "Scenarios", icon: ListChecks },
   { key: "leaderboard", label: "Leaderboard", icon: Trophy },
+  { key: "settings", label: "Dashboard Settings", icon: Settings },
 ];
 
 // Shared by 'manager' and 'qa' roles (both review across consultants).
@@ -129,27 +241,35 @@ export default function Dashboard() {
     enabled: !!user,
   });
 
+  // Additive Command Center widgets. Kept as its own query (rather than
+  // merged into dashboard-stats) so the original endpoint/response shape is
+  // never touched. Same 403-on-no-add-on behavior as dashboard-stats.
+  const { data: extras, isLoading: extrasLoading, isError: extrasError } = useQuery<CommandCenterExtras>({
+    queryKey: [`/api/manager/dashboard-command-center?requesterId=${user?.id}`],
+    enabled: !!user,
+  });
+
   return (
-    <div className="min-h-dvh flex flex-col lg:flex-row" style={{ backgroundColor: NAVY_DEEP }}>
+    <div className="min-h-dvh flex flex-col lg:flex-row" style={{ backgroundColor: INK }}>
       {/* Sidebar / top nav */}
       <aside
         className="lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r"
-        style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.08)" }}
+        style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER }}
       >
         <div className="flex items-center gap-3 px-4 py-4">
-          <div
-            className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
-            style={{ backgroundColor: PANEL, boxShadow: "0 6px 20px rgba(224,109,0,0.3)" }}
-            aria-hidden="true"
-          >
-            <span className="text-lg font-bold" style={{ color: ORANGE_LIGHT }}>S</span>
-          </div>
+          <img
+            src="/solve-logo-square.png"
+            alt="SOLVE Framework"
+            className="w-9 h-9 rounded-lg shrink-0 object-contain"
+            style={{ boxShadow: `0 6px 20px rgba(59,130,246,0.35)` }}
+            data-testid="img-sidebar-logo"
+          />
           <div className="min-w-0">
             <p className="text-sm font-semibold text-white leading-tight truncate">Command Center</p>
             <div className="flex items-center gap-1.5">
               <span
                 className="w-1.5 h-1.5 rounded-full animate-pulse"
-                style={{ backgroundColor: ORANGE_LIGHT, boxShadow: `0 0 6px ${ORANGE_LIGHT}` }}
+                style={{ backgroundColor: GREEN_LIGHT, boxShadow: `0 0 6px ${GREEN_LIGHT}` }}
                 aria-hidden="true"
               />
               <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">Live</span>
@@ -169,7 +289,7 @@ export default function Dashboard() {
                 className="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors"
                 style={
                   active
-                    ? { backgroundColor: ORANGE, color: "white" }
+                    ? { backgroundColor: BLUE, color: "white" }
                     : { color: "rgba(255,255,255,0.7)" }
                 }
               >
@@ -185,7 +305,7 @@ export default function Dashboard() {
       <div className="flex-1 min-w-0 flex flex-col">
         <header
           className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3 border-b"
-          style={{ borderColor: "rgba(255,255,255,0.08)" }}
+          style={{ borderColor: BORDER }}
         >
           <div className="min-w-0">
             <h1 className="text-base font-semibold text-white truncate" data-testid="text-page-title">
@@ -199,7 +319,7 @@ export default function Dashboard() {
               size="sm"
               onClick={() => navigate("/real-conversations")}
               className="gap-1.5 bg-transparent text-white hover:text-white"
-              style={{ borderColor: ORANGE }}
+              style={{ borderColor: BLUE }}
               data-testid="link-nav-real-conversations"
             >
               <ClipboardCheck className="w-3.5 h-3.5" />
@@ -208,7 +328,7 @@ export default function Dashboard() {
             <a
               href="https://solveframework.com"
               className="text-xs font-medium hidden sm:inline-flex items-center gap-1 hover:underline"
-              style={{ color: ORANGE_LIGHT }}
+              style={{ color: BLUE_LIGHT }}
               data-testid="link-back-to-solveframework"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
@@ -243,12 +363,15 @@ export default function Dashboard() {
           )}
 
           {section === "dashboard" && (
-            <DashboardSection
+            <CommandCenterSection
               stats={stats}
-              loading={statsLoading}
-              locked={statsError}
+              statsLoading={statsLoading}
+              locked={statsError || extrasError}
+              extras={extras}
+              extrasLoading={extrasLoading}
               office={office}
               isManager={user?.role === "manager"}
+              navigate={navigate}
             />
           )}
           {section === "team" && (
@@ -259,6 +382,9 @@ export default function Dashboard() {
           )}
           {section === "leaderboard" && (
             <LeaderboardSection stats={stats} loading={statsLoading} locked={statsError} office={office} isManager={user?.role === "manager"} full />
+          )}
+          {section === "settings" && (
+            <SettingsSection userId={user?.id} locked={statsError || extrasError} office={office} isManager={user?.role === "manager"} />
           )}
         </main>
       </div>
@@ -276,23 +402,38 @@ function Panel({
   children,
   className,
   testId,
+  accent,
 }: {
   title?: string;
   caption?: string;
   children: React.ReactNode;
   className?: string;
   testId?: string;
+  accent?: string;
 }) {
   return (
     <section
       className={`rounded-xl border p-4 sm:p-5 ${className ?? ""}`}
-      style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}
+      style={{
+        backgroundColor: NAVY,
+        borderColor: accent ? `${accent}40` : BORDER,
+        boxShadow: accent ? `0 0 0 1px ${accent}14` : undefined,
+      }}
       data-testid={testId}
     >
       {title && (
-        <div className="mb-4">
-          <h2 className="text-sm font-semibold text-white">{title}</h2>
-          {caption && <p className="text-xs text-white/45 mt-0.5">{caption}</p>}
+        <div className="mb-4 flex items-center gap-2">
+          {accent && (
+            <span
+              className="w-1.5 h-5 rounded-full shrink-0"
+              style={{ backgroundColor: accent }}
+              aria-hidden="true"
+            />
+          )}
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-white">{title}</h2>
+            {caption && <p className="text-xs text-white/45 mt-0.5">{caption}</p>}
+          </div>
         </div>
       )}
       {children}
@@ -355,7 +496,7 @@ function AddOnLocked({ office, isManager }: { office?: Office; isManager?: boole
             type="button"
             onClick={addDashboard}
             disabled={busy}
-            style={{ backgroundColor: ORANGE, color: "white" }}
+            style={{ backgroundColor: BLUE, color: "white" }}
             data-testid="button-add-dashboard"
           >
             {busy ? "Adding…" : "Add Dashboard"}
@@ -366,20 +507,21 @@ function AddOnLocked({ office, isManager }: { office?: Office; isManager?: boole
   );
 }
 
-function InitialsAvatar({ name, highlight }: { name: string; highlight?: boolean }) {
+function InitialsAvatar({ name, highlight, color }: { name: string; highlight?: boolean; color?: string }) {
   const initials = name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((w) => w.charAt(0).toUpperCase())
     .join("");
+  const accent = color ?? BLUE;
   return (
     <div
       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold"
       style={{
-        backgroundColor: highlight ? ORANGE : PANEL,
+        backgroundColor: highlight ? accent : PANEL,
         color: "white",
-        border: `1px solid ${highlight ? ORANGE_LIGHT : "rgba(255,255,255,0.15)"}`,
+        border: `1px solid ${highlight ? accent : "rgba(255,255,255,0.15)"}`,
       }}
       aria-hidden="true"
     >
@@ -402,33 +544,129 @@ function chartTooltipStyle() {
   };
 }
 
+// Small colored delta chip, e.g. "▲ 14%" in green or "▼ 6%" in red. Used
+// across the KPI cards to match the reference's trend badges.
+function DeltaBadge({ value, testId }: { value: number | null; testId?: string }) {
+  if (value === null) {
+    return (
+      <span className="text-[11px] font-medium text-white/35" data-testid={testId}>
+        No prior data
+      </span>
+    );
+  }
+  const up = value >= 0;
+  const color = up ? GREEN_LIGHT : RED_LIGHT;
+  const Icon = up ? TrendingUp : TrendingDown;
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] font-semibold" style={{ color }} data-testid={testId}>
+      <Icon className="w-3 h-3" />
+      {up ? "+" : ""}
+      {value}%
+    </span>
+  );
+}
+
+function Sparkline({ data, color }: { data: number[]; color: string }) {
+  if (data.length === 0) return null;
+  const points = data.map((v, i) => ({ i, v }));
+  return (
+    <div className="h-8 w-full min-w-0">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={points} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id={`spark-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.5} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <Area
+            type="monotone"
+            dataKey="v"
+            stroke={color}
+            strokeWidth={2}
+            fill={`url(#spark-${color.replace("#", "")})`}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Ring gauge for Team Health Score: a 0-100 composite drawn with plain SVG
+// (no extra chart library needed) so it exactly matches the reference's
+// circular score dial.
+function RingGauge({ value, size = 76, color = GREEN_LIGHT }: { value: number | null; size?: number; color?: string }) {
+  const radius = (size - 10) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const pct = value === null ? 0 : Math.max(0, Math.min(100, value));
+  const offset = circumference * (1 - pct / 100);
+  const center = size / 2;
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }} data-testid="ring-team-health">
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+        <circle cx={center} cy={center} r={radius} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth={7} />
+        {value !== null && (
+          <circle
+            cx={center}
+            cy={center}
+            r={radius}
+            fill="none"
+            stroke={color}
+            strokeWidth={7}
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+            style={{ filter: `drop-shadow(0 0 6px ${color}80)` }}
+          />
+        )}
+      </svg>
+      <div className="absolute inset-0 flex items-center justify-center">
+        <span className="text-xl font-bold text-white">{value ?? "—"}</span>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Dashboard section: the full analytics view.
+// Command Center dashboard section: the full 15-widget mission-control view.
+// Respects the office's saved widgetConfig (missing keys default visible).
 // ---------------------------------------------------------------------------
 
-function DashboardSection({
+function CommandCenterSection({
   stats,
-  loading,
+  statsLoading,
   locked,
+  extras,
+  extrasLoading,
   office,
   isManager,
+  navigate,
 }: {
   stats?: DashboardStats;
-  loading: boolean;
+  statsLoading: boolean;
   locked?: boolean;
+  extras?: CommandCenterExtras;
+  extrasLoading: boolean;
   office?: Office;
   isManager: boolean;
+  navigate: (path: string) => void;
 }) {
   if (locked) return <AddOnLocked office={office} isManager={isManager} />;
-  if (loading || !stats) {
+
+  const loading = statsLoading || extrasLoading || !stats || !extras;
+  if (loading) {
     return (
       <div className="space-y-6">
         <div className="grid gap-3 grid-cols-2 lg:grid-cols-5">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
+            <Skeleton key={i} className="h-28 rounded-xl" />
           ))}
         </div>
-        <Skeleton className="h-72 rounded-xl" />
+        <div className="grid gap-6 lg:grid-cols-3">
+          <Skeleton className="h-72 rounded-xl lg:col-span-2" />
+          <Skeleton className="h-72 rounded-xl" />
+        </div>
         <div className="grid gap-6 lg:grid-cols-2">
           <Skeleton className="h-72 rounded-xl" />
           <Skeleton className="h-72 rounded-xl" />
@@ -437,130 +675,478 @@ function DashboardSection({
     );
   }
 
-  const { kpis } = stats;
-  const kpiCards = [
-    { label: "Team average score", value: kpis.teamAverageScore ?? "—", testId: "kpi-team-average" },
-    { label: `Practice sessions (${stats.period.label.toLowerCase()})`, value: kpis.practiceSessionsThisPeriod, testId: "kpi-practice-sessions" },
-    { label: "Certifications earned", value: kpis.certificationsEarned, testId: "kpi-certifications" },
-    { label: "Active consultants", value: kpis.activeConsultants, testId: "kpi-active-consultants" },
-    { label: "Conversations completed", value: stats.totals.completed, testId: "kpi-conversations-completed" },
-    { label: "Academy Credits available", value: stats.academyCredits.display, testId: "kpi-academy-credits" },
-  ];
+  const cfg = extras.widgetConfig ?? {};
+  const show = (key: DashboardWidgetKey) => cfg[key] !== false;
 
   return (
     <div className="space-y-6">
       {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
 
-      {/* 1. KPI strip */}
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6" data-testid="kpi-strip">
-        {kpiCards.map((c) => (
-          <div
-            key={c.label}
-            className="rounded-xl border p-4"
-            style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}
-            data-testid={c.testId}
+      {/* Row 1: KPI cards (Team Health, Conversations, Completion Rate, Certifications, Alerts) */}
+      {(show("teamHealth") || show("conversations") || show("completionRate") || show("certifications") || show("alerts") || show("liveFeed")) && (
+        <div className="grid gap-4 lg:grid-cols-6" data-testid="row-kpi-cards">
+          <div className="grid gap-4 grid-cols-2 sm:grid-cols-4 lg:col-span-5 lg:grid-cols-4">
+            {show("teamHealth") && (
+              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${GREEN}30` }} data-testid="kpi-team-health">
+                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Team Health Score</p>
+                <div className="mt-2 flex items-center gap-3">
+                  <RingGauge value={extras.teamHealth.score} color={GREEN_LIGHT} />
+                  <DeltaBadge value={extras.teamHealth.deltaPercent} testId="delta-team-health" />
+                </div>
+              </div>
+            )}
+            {show("conversations") && (
+              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${BLUE}30` }} data-testid="kpi-conversations">
+                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Conversations</p>
+                <p className="mt-2 text-2xl font-bold text-white">{extras.conversations.count}</p>
+                <DeltaBadge value={extras.conversations.deltaPercent} testId="delta-conversations" />
+                <div className="mt-2">
+                  <Sparkline data={extras.conversations.sparkline} color={BLUE_LIGHT} />
+                </div>
+              </div>
+            )}
+            {show("completionRate") && (
+              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${PURPLE}30` }} data-testid="kpi-completion-rate">
+                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Completion Rate</p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {extras.completionRate.percent !== null ? `${extras.completionRate.percent}%` : "—"}
+                </p>
+                <DeltaBadge value={extras.completionRate.deltaPercent} testId="delta-completion-rate" />
+              </div>
+            )}
+            {show("certifications") && (
+              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${GOLD}30` }} data-testid="kpi-certifications-earned">
+                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Certifications Earned</p>
+                <p className="mt-2 text-2xl font-bold text-white">{extras.certifications.count}</p>
+                <DeltaBadge value={extras.certifications.deltaPercent} testId="delta-certifications" />
+              </div>
+            )}
+          </div>
+          {show("alerts") && (
+            <div
+              className="rounded-xl border p-4 flex flex-col justify-between lg:col-span-1"
+              style={{ backgroundColor: NAVY, borderColor: `${RED}45` }}
+              data-testid="kpi-alerts"
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Alerts</p>
+                <Bell className="w-3.5 h-3.5" style={{ color: RED_LIGHT }} />
+              </div>
+              <p className="text-2xl font-bold" style={{ color: RED_LIGHT }}>
+                {extras.alerts.length}
+              </p>
+              <p className="text-[11px] font-medium text-white/50">Needs your attention</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Row 2: Team performance over time + Live Feed */}
+      {(show("performanceOverTime") || show("liveFeed")) && (
+        <div className="grid gap-6 lg:grid-cols-3">
+          {show("performanceOverTime") && (
+            <Panel
+              title="Team performance over time"
+              caption="Team average vs. your office's top 20% (last 7 days)"
+              testId="panel-performance-over-time"
+              accent={BLUE}
+              className="lg:col-span-2"
+            >
+              {extras.performanceOverTime.every((d) => d.teamScore === null && d.top20 === null) ? (
+                <EmptyState message="No completed sessions yet" testId="empty-performance-over-time" />
+              ) : (
+                <div className="h-72 min-w-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={extras.performanceOverTime} margin={{ top: 8, right: 12, bottom: 4, left: -16 }}>
+                      <CartesianGrid stroke={GRID} vertical={false} />
+                      <XAxis dataKey="date" tickFormatter={fmtShortDate} stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
+                      <YAxis domain={[0, 100]} stroke={AXIS} tick={{ fontSize: 11 }} />
+                      <Tooltip {...chartTooltipStyle()} labelFormatter={fmtShortDate} />
+                      <Line
+                        type="monotone"
+                        dataKey="teamScore"
+                        name="Team Score"
+                        stroke={BLUE_LIGHT}
+                        strokeWidth={2.5}
+                        dot={{ r: 3, fill: BLUE }}
+                        activeDot={{ r: 5 }}
+                        connectNulls
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="top20"
+                        name="Top 20%"
+                        stroke={GREEN_LIGHT}
+                        strokeWidth={2}
+                        strokeDasharray="4 3"
+                        dot={{ r: 2.5, fill: GREEN }}
+                        connectNulls
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Panel>
+          )}
+          {show("liveFeed") && (
+            <Panel title="Live Feed" caption="Recent activity across your office" testId="panel-live-feed" accent={GREEN}>
+              <LiveFeedList events={extras.liveFeed} />
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {/* Row 3: Skill radar + Top performers */}
+      {(show("skillRadar") || show("topPerformers")) && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          {show("skillRadar") && (
+            <Panel
+              title="Skill Performance Summary"
+              caption="Office average across the five SOLVE discovery dimensions"
+              testId="panel-discovery-radar"
+              accent={BLUE}
+            >
+              {!stats?.discoveryDimensions ? (
+                <EmptyState message="No scored discovery sessions yet" testId="empty-discovery-radar" />
+              ) : (
+                <div className="h-72 min-w-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <RadarChart data={stats.discoveryDimensions} outerRadius="72%">
+                      <PolarGrid stroke={GRID} />
+                      <PolarAngleAxis dataKey="label" tick={{ fill: AXIS, fontSize: 10 }} />
+                      <PolarRadiusAxis domain={[0, 100]} tick={{ fill: "rgba(255,255,255,0.35)", fontSize: 9 }} axisLine={false} />
+                      <Radar dataKey="average" name="Avg" stroke={BLUE_LIGHT} fill={BLUE} fillOpacity={0.45} />
+                      <Tooltip {...chartTooltipStyle()} />
+                    </RadarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Panel>
+          )}
+          {show("topPerformers") && (
+            <Panel title="Top Performers" caption="Ranked by average discovery score" testId="panel-top-performers" accent={GREEN}>
+              <Leaderboard leaderboard={stats?.leaderboard ?? []} limit={5} />
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {/* Row 4: Conversation outcomes, Score distribution, Recent achievements */}
+      {(show("conversationOutcomes") || show("scoreDistribution") || show("achievements")) && (
+        <div className="grid gap-6 lg:grid-cols-3">
+          {show("conversationOutcomes") && (
+            <Panel title="Conversation Outcomes" caption="This period's completed conversations" testId="panel-conversation-outcomes" accent={PURPLE}>
+              <ConversationOutcomesDonut data={extras.conversationOutcomes} />
+            </Panel>
+          )}
+          {show("scoreDistribution") && (
+            <Panel title="Score Distribution" caption="Sessions by score band, this period" testId="panel-score-distribution" accent={ORANGE}>
+              <ScoreDistributionChart data={extras.scoreDistribution} />
+            </Panel>
+          )}
+          {show("achievements") && (
+            <Panel title="Recent Achievements" caption="Earned from real certifications, streaks, and scores" testId="panel-achievements" accent={GOLD}>
+              <AchievementsGrid achievements={extras.achievements} />
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {/* Row 5: Popular scenarios + CTA panel */}
+      {(show("popularScenarios") || show("ctaPanel")) && (
+        <div className="grid gap-6 lg:grid-cols-3">
+          {show("popularScenarios") && (
+            <Panel
+              title="Popular Scenarios This Week"
+              caption="Most-practiced scenarios and their average score"
+              testId="panel-popular-scenarios"
+              accent={BLUE}
+              className="lg:col-span-2"
+            >
+              <PopularScenariosGrid scenarios={extras.popularScenarios} />
+            </Panel>
+          )}
+          {show("ctaPanel") && <ElevateTeamCta navigate={navigate} />}
+        </div>
+      )}
+
+      {/* Row 6: Bottom summary strip */}
+      {show("summaryStrip") && <SummaryStrip data={extras.summaryStrip} />}
+    </div>
+  );
+}
+
+function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
+  if (events.length === 0) {
+    return <EmptyState message="No recent activity yet" testId="empty-live-feed" />;
+  }
+  const iconFor = (type: CommandCenterExtras["liveFeed"][number]["type"]) => {
+    if (type === "certification") return { Icon: Award, color: GOLD_LIGHT };
+    if (type === "high_score") return { Icon: Star, color: PURPLE_LIGHT };
+    return { Icon: MessageSquareText, color: BLUE_LIGHT };
+  };
+  return (
+    <ul className="space-y-2 max-h-[22rem] overflow-y-auto pr-1" data-testid="list-live-feed">
+      {events.map((e) => {
+        const { Icon, color } = iconFor(e.type);
+        return (
+          <li
+            key={e.id}
+            className="flex items-start gap-2.5 rounded-lg px-3 py-2"
+            style={{ backgroundColor: PANEL }}
+            data-testid={`live-feed-row-${e.id}`}
           >
-            <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">{c.label}</p>
-            <p className="mt-2 text-2xl font-bold text-white">{c.value}</p>
-          </div>
+            <span
+              className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
+              style={{ backgroundColor: `${color}22`, color }}
+              aria-hidden="true"
+            >
+              <Icon className="h-3.5 w-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium text-white truncate">{e.displayName}</p>
+              <p className="text-xs text-white/55 truncate">{e.detail}</p>
+            </div>
+            <span className="shrink-0 text-[10px] text-white/35 whitespace-nowrap">{fmtRelativeTime(e.occurredAt)}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ConversationOutcomesDonut({ data }: { data: CommandCenterExtras["conversationOutcomes"] }) {
+  const total = data.reduce((sum, d) => sum + d.count, 0);
+  if (total === 0) {
+    return <EmptyState message="No completed conversations yet" testId="empty-conversation-outcomes" />;
+  }
+  const OUTCOME_COLORS: Record<string, string> = {
+    Successful: GREEN_LIGHT,
+    Converted: BLUE_LIGHT,
+    "In Progress": ORANGE_LIGHT,
+    "No Outcome": PURPLE_LIGHT,
+  };
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <div className="relative h-48 w-48">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="count"
+              nameKey="outcome"
+              innerRadius="62%"
+              outerRadius="92%"
+              paddingAngle={3}
+              stroke="none"
+            >
+              {data.map((d) => (
+                <Cell key={d.outcome} fill={OUTCOME_COLORS[d.outcome] ?? BLUE} />
+              ))}
+            </Pie>
+            <Tooltip {...chartTooltipStyle()} />
+          </PieChart>
+        </ResponsiveContainer>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-2xl font-bold text-white" data-testid="text-outcomes-total">
+            {total}
+          </span>
+          <span className="text-[10px] uppercase tracking-wide text-white/45">Total</span>
+        </div>
+      </div>
+      <ul className="w-full space-y-1.5" data-testid="list-outcomes-legend">
+        {data.map((d) => (
+          <li key={d.outcome} className="flex items-center justify-between gap-2 text-xs">
+            <span className="flex items-center gap-2 min-w-0">
+              <span
+                className="w-2.5 h-2.5 rounded-sm shrink-0"
+                style={{ backgroundColor: OUTCOME_COLORS[d.outcome] ?? BLUE }}
+                aria-hidden="true"
+              />
+              <span className="text-white/75">{d.outcome}</span>
+            </span>
+            <span className="text-white/50 shrink-0">
+              {d.count} ({total > 0 ? Math.round((d.count / total) * 100) : 0}%)
+            </span>
+          </li>
         ))}
-      </div>
+      </ul>
+    </div>
+  );
+}
 
-      {/* 2. Team performance over time */}
-      <Panel
-        title="Team performance over time"
-        caption="Average score of completed discovery sessions, by day"
-        testId="panel-score-over-time"
-      >
-        {stats.scoreOverTime.length === 0 ? (
-          <EmptyState message="No completed sessions yet" testId="empty-score-over-time" />
-        ) : (
-          <div className="h-72 min-w-0">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={stats.scoreOverTime} margin={{ top: 8, right: 12, bottom: 4, left: -16 }}>
-                <CartesianGrid stroke={GRID} vertical={false} />
-                <XAxis dataKey="date" tickFormatter={fmtShortDate} stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
-                <YAxis domain={[0, 100]} stroke={AXIS} tick={{ fontSize: 11 }} />
-                <Tooltip {...chartTooltipStyle()} labelFormatter={fmtShortDate} />
-                <Line
-                  type="monotone"
-                  dataKey="averageScore"
-                  name="Avg score"
-                  stroke={ORANGE_LIGHT}
-                  strokeWidth={2.5}
-                  dot={{ r: 3, fill: ORANGE }}
-                  activeDot={{ r: 5 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+function ScoreDistributionChart({ data }: { data: CommandCenterExtras["scoreDistribution"] }) {
+  const total = data.reduce((sum, d) => sum + d.count, 0);
+  if (total === 0) {
+    return <EmptyState message="No scored sessions yet" testId="empty-score-distribution" />;
+  }
+  const BAND_COLORS = [RED_LIGHT, ORANGE_LIGHT, GOLD_LIGHT, BLUE_LIGHT, GREEN_LIGHT];
+  return (
+    <div className="h-72 min-w-0">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 16, right: 12, bottom: 4, left: -16 }}>
+          <CartesianGrid stroke={GRID} vertical={false} />
+          <XAxis dataKey="band" stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
+          <YAxis allowDecimals={false} stroke={AXIS} tick={{ fontSize: 11 }} />
+          <Tooltip {...chartTooltipStyle()} cursor={{ fill: "rgba(255,255,255,0.05)" }} formatter={(value: any, name: any, item: any) => [`${value} (${item.payload.percent}%)`, "Sessions"]} />
+          <Bar dataKey="count" name="Sessions" radius={[4, 4, 0, 0]}>
+            {data.map((_, i) => (
+              <Cell key={i} fill={BAND_COLORS[i % BAND_COLORS.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+const BADGE_ICON: Record<
+  CommandCenterExtras["achievements"][number]["badge"],
+  { Icon: typeof Award; color: string }
+> = {
+  gold_achiever: { Icon: Award, color: GOLD_LIGHT },
+  silver_achiever: { Icon: Medal, color: "#CBD5E1" },
+  top_performer: { Icon: Crown, color: ORANGE_LIGHT },
+  role_play_master: { Icon: Sparkles, color: PURPLE_LIGHT },
+  streak_master: { Icon: Flame, color: RED_LIGHT },
+};
+
+function AchievementsGrid({ achievements }: { achievements: CommandCenterExtras["achievements"] }) {
+  if (achievements.length === 0) {
+    return <EmptyState message="No achievements earned yet" testId="empty-achievements" />;
+  }
+  return (
+    <div className="grid grid-cols-4 gap-3" data-testid="grid-achievements">
+      {achievements.slice(0, 8).map((a) => {
+        const { Icon, color } = BADGE_ICON[a.badge];
+        return (
+          <div key={a.id} className="flex flex-col items-center gap-1.5 text-center" data-testid={`achievement-${a.id}`}>
+            <span
+              className="flex h-11 w-11 items-center justify-center rounded-full"
+              style={{ backgroundColor: `${color}1F`, border: `1.5px solid ${color}66` }}
+              aria-hidden="true"
+            >
+              <Icon className="h-5 w-5" style={{ color }} />
+            </span>
+            <p className="text-[10px] leading-tight text-white/70 truncate w-full" title={a.displayName}>
+              {a.displayName.split(" ")[0]}
+            </p>
+            <p className="text-[9px] leading-tight text-white/40 truncate w-full" title={a.label}>
+              {a.label}
+            </p>
           </div>
-        )}
-      </Panel>
+        );
+      })}
+    </div>
+  );
+}
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* 3. Discovery skill radar (real persisted rubric dimensions) */}
-        <Panel
-          title="Discovery skill mastery"
-          caption="Office average across the AI coach's five discovery dimensions"
-          testId="panel-discovery-radar"
+function PopularScenariosGrid({ scenarios }: { scenarios: CommandCenterExtras["popularScenarios"] }) {
+  if (scenarios.length === 0) {
+    return <EmptyState message="No practice sessions this period yet" testId="empty-popular-scenarios" />;
+  }
+  const ACCENTS = [PURPLE, BLUE, GREEN, ORANGE, GOLD];
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" data-testid="grid-popular-scenarios">
+      {scenarios.map((s, i) => (
+        <div
+          key={s.scenarioId}
+          className="rounded-lg border p-3 flex flex-col gap-2"
+          style={{ backgroundColor: PANEL, borderColor: `${ACCENTS[i % ACCENTS.length]}40` }}
+          data-testid={`scenario-card-${s.scenarioId}`}
         >
-          {!stats.discoveryDimensions ? (
-            <EmptyState message="No scored discovery sessions yet" testId="empty-discovery-radar" />
-          ) : (
-            <div className="h-72 min-w-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <RadarChart data={stats.discoveryDimensions} outerRadius="72%">
-                  <PolarGrid stroke={GRID} />
-                  <PolarAngleAxis dataKey="label" tick={{ fill: AXIS, fontSize: 10 }} />
-                  <PolarRadiusAxis domain={[0, 100]} tick={{ fill: "rgba(255,255,255,0.35)", fontSize: 9 }} axisLine={false} />
-                  <Radar dataKey="average" name="Avg" stroke={ORANGE} fill={ORANGE} fillOpacity={0.45} />
-                  <Tooltip {...chartTooltipStyle()} />
-                </RadarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </Panel>
+          <span
+            className="inline-flex w-fit rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
+            style={{ backgroundColor: `${ACCENTS[i % ACCENTS.length]}25`, color: ACCENTS[i % ACCENTS.length] }}
+          >
+            {verticalLabel(s.vertical)}
+          </span>
+          <p className="text-xs font-medium text-white leading-snug line-clamp-2" title={s.title}>
+            {s.title}
+          </p>
+          <div className="mt-auto flex items-center justify-between text-[11px]">
+            <span className="font-semibold text-white">{s.averageScore ?? "—"} avg</span>
+            <span className="text-white/45">
+              {s.sessionCount} {s.sessionCount === 1 ? "session" : "sessions"}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-        {/* 5. Certification tier distribution */}
-        <Panel title="Consultants by tier" caption="Beginner, Intermediate, Advanced, Certified" testId="panel-level-distribution">
-          {stats.kpis.consultantCount === 0 ? (
-            <EmptyState message="No consultants have joined yet" testId="empty-level-distribution" />
-          ) : (
-            <div className="h-72 min-w-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.levelDistribution} margin={{ top: 8, right: 12, bottom: 4, left: -16 }}>
-                  <CartesianGrid stroke={GRID} vertical={false} />
-                  <XAxis dataKey="tier" stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
-                  <YAxis allowDecimals={false} stroke={AXIS} tick={{ fontSize: 11 }} />
-                  <Tooltip {...chartTooltipStyle()} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
-                  <Bar dataKey="count" name="Consultants" fill={ORANGE} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </Panel>
+function ElevateTeamCta({ navigate }: { navigate: (path: string) => void }) {
+  return (
+    <div
+      className="rounded-xl border p-5 flex flex-col justify-between gap-4 relative overflow-hidden"
+      style={{
+        background: `radial-gradient(120% 140% at 100% 0%, ${BLUE}33 0%, ${NAVY} 60%)`,
+        borderColor: `${BLUE}45`,
+      }}
+      data-testid="panel-cta-elevate-team"
+    >
+      <div
+        className="pointer-events-none absolute -right-6 -bottom-6 h-32 w-32 rounded-full"
+        style={{ background: `radial-gradient(circle, ${BLUE_LIGHT}55, transparent 70%)`, filter: "blur(2px)" }}
+        aria-hidden="true"
+      />
+      <div className="relative">
+        <h3 className="text-sm font-bold uppercase tracking-wide text-white">Ready to elevate your team?</h3>
+        <p className="mt-1.5 text-xs text-white/60">
+          Assign training, track progress, and unlock your team's full potential.
+        </p>
       </div>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* 4. Top performers */}
-        <Panel title="Top performers" caption="Ranked by average discovery score" testId="panel-top-performers">
-          <Leaderboard leaderboard={stats.leaderboard} limit={5} />
-        </Panel>
-
-        {/* 6. Conversations by vertical */}
-        <Panel title="Conversations by vertical" caption="Completed discovery sessions across verticals" testId="panel-vertical-breakdown">
-          <VerticalBreakdown data={stats.verticalBreakdown} />
-        </Panel>
+      <div className="relative flex flex-col gap-2">
+        <Button
+          type="button"
+          onClick={() => navigate("/command-center")}
+          className="gap-1.5 justify-start"
+          style={{ backgroundColor: BLUE, color: "white" }}
+          data-testid="button-go-training-center"
+        >
+          <GraduationCap className="h-4 w-4" />
+          Go to Training Center
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="gap-1.5 justify-start bg-transparent text-white hover:text-white"
+          style={{ borderColor: "rgba(255,255,255,0.25)" }}
+          data-testid="button-generate-team-report"
+        >
+          <FileBarChart className="h-4 w-4" />
+          Generate Team Report
+        </Button>
       </div>
+    </div>
+  );
+}
 
-      {/* 7. Streaks & rankings */}
-      <Panel
-        title="Streaks & rankings"
-        caption="Each consultant's current practice streak and office rank"
-        testId="panel-streaks-rankings"
-      >
-        <StreaksAndRankings rows={stats.streaksAndRankings} />
-      </Panel>
+function SummaryStrip({ data }: { data: CommandCenterExtras["summaryStrip"] }) {
+  const items: { label: string; value: string; sub?: string; color: string }[] = [
+    { label: "Team Members", value: String(data.teamMembersActive), sub: "Active users", color: BLUE_LIGHT },
+    { label: "Total Sessions", value: String(data.totalSessions), sub: "All time", color: GREEN_LIGHT },
+    { label: "Avg Score", value: data.avgScore !== null ? String(data.avgScore) : "—", sub: "This period", color: ORANGE_LIGHT },
+    { label: "Goal Progress", value: data.goalProgress !== null ? `${data.goalProgress}%` : "—", sub: "Team health", color: PURPLE_LIGHT },
+    { label: "Certifications", value: String(data.certificationsTotal), sub: "Total earned", color: GOLD_LIGHT },
+    { label: "Hours Trained", value: String(data.hoursTrainedThisPeriod), sub: "This period", color: RED_LIGHT },
+  ];
+  return (
+    <div
+      className="rounded-xl border grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 divide-x divide-y sm:divide-y-0"
+      style={{ backgroundColor: NAVY, borderColor: BORDER }}
+      data-testid="panel-summary-strip"
+    >
+      {items.map((it) => (
+        <div key={it.label} className="p-4 text-center" style={{ borderColor: BORDER }}>
+          <p className="text-lg font-bold" style={{ color: it.color }}>
+            {it.value}
+          </p>
+          <p className="text-[10px] uppercase tracking-wide text-white/45 mt-0.5">{it.label}</p>
+          {it.sub && <p className="text-[10px] text-white/30">{it.sub}</p>}
+        </div>
+      ))}
     </div>
   );
 }
@@ -580,11 +1166,11 @@ function StreaksAndRankings({ rows }: { rows: DashboardStats["streaksAndRankings
         >
           <span
             className="w-10 shrink-0 text-center text-sm font-bold"
-            style={{ color: r.rank === 1 ? ORANGE_LIGHT : "rgba(255,255,255,0.5)" }}
+            style={{ color: r.rank === 1 ? GOLD_LIGHT : "rgba(255,255,255,0.5)" }}
           >
             {r.rank != null ? `#${r.rank}` : "-"}
           </span>
-          <InitialsAvatar name={r.displayName} highlight={r.rank === 1} />
+          <InitialsAvatar name={r.displayName} highlight={r.rank === 1} color={GOLD} />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium text-white">{r.displayName}</p>
             <p className="text-xs text-white/45">Rank {r.rank != null ? `${r.rank} of ${r.outOf}` : "unranked"}</p>
@@ -615,7 +1201,7 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
           <PieChart>
             <Pie data={pie} dataKey="value" nameKey="name" innerRadius="55%" outerRadius="85%" paddingAngle={2} stroke="none">
               {pie.map((_, i) => (
-                <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
+                <Cell key={i} fill={VIVID_COLORS[i % VIVID_COLORS.length]} />
               ))}
             </Pie>
             <Tooltip {...chartTooltipStyle()} />
@@ -628,7 +1214,7 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
             <span className="flex items-center gap-2 min-w-0">
               <span
                 className="w-2.5 h-2.5 rounded-sm shrink-0"
-                style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }}
+                style={{ backgroundColor: VIVID_COLORS[i % VIVID_COLORS.length] }}
                 aria-hidden="true"
               />
               <span className="text-white/75 line-clamp-2" title={p.name}>
@@ -657,28 +1243,32 @@ function Leaderboard({
   if (ranked.length === 0) {
     return <EmptyState message="No scored sessions yet" testId="empty-leaderboard" />;
   }
+  const maxScore = Math.max(...rows.map((r) => r.averageScore ?? 0), 1);
+  const RANK_COLORS = [GOLD_LIGHT, "#CBD5E1", "#D97757", GREEN_LIGHT, BLUE_LIGHT];
   return (
-    <ol className="space-y-2" data-testid="list-leaderboard">
+    <ol className="space-y-2.5" data-testid="list-leaderboard">
       {rows.map((c, i) => (
-        <li
-          key={c.id}
-          className="flex items-center gap-3 rounded-lg px-3 py-2"
-          style={{ backgroundColor: PANEL }}
-          data-testid={`leaderboard-row-${c.id}`}
-        >
-          <span className="w-5 text-center text-sm font-bold" style={{ color: i === 0 ? ORANGE_LIGHT : "rgba(255,255,255,0.5)" }}>
+        <li key={c.id} className="flex items-center gap-3" data-testid={`leaderboard-row-${c.id}`}>
+          <span className="w-5 text-center text-sm font-bold" style={{ color: RANK_COLORS[i] ?? "rgba(255,255,255,0.5)" }}>
             {i + 1}
           </span>
-          <InitialsAvatar name={c.displayName} highlight={i === 0} />
+          <InitialsAvatar name={c.displayName} highlight={i === 0} color={GOLD} />
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-white truncate">{c.displayName}</p>
-            <p className="text-xs text-white/45">
-              {c.tier} · {c.sessionsCompleted} {c.sessionsCompleted === 1 ? "conversation" : "conversations"}
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-medium text-white truncate">{c.displayName}</p>
+              <span className="text-sm font-bold text-white shrink-0">{c.averageScore ?? "—"}</span>
+            </div>
+            <div className="mt-1 h-1.5 w-full rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.08)" }}>
+              <div
+                className="h-1.5 rounded-full"
+                style={{
+                  width: `${Math.max(4, ((c.averageScore ?? 0) / maxScore) * 100)}%`,
+                  backgroundColor: GREEN_LIGHT,
+                  boxShadow: `0 0 6px ${GREEN_LIGHT}80`,
+                }}
+              />
+            </div>
           </div>
-          <span className="text-lg font-bold text-white shrink-0">
-            {c.averageScore ?? "No sessions yet"}
-          </span>
         </li>
       ))}
     </ol>
@@ -707,7 +1297,7 @@ function TeamSection({
         <EmailInviteCard userId={userId} officeName={office.name} />
       )}
       {userId != null && officeId != null && (
-        <div className="rounded-xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
+        <div className="rounded-xl border overflow-hidden" style={{ borderColor: BORDER }}>
           <div className="[&_*]:!text-inherit">
             <ConsultantRoster officeId={officeId} requesterId={userId} />
           </div>
@@ -749,41 +1339,47 @@ function ScenariosSection({ stats, loading, locked, office, isManager }: { stats
     .sort((a, b) => b.completed - a.completed || b.catalog - a.catalog);
 
   return (
-    <Panel
-      title="Scenario coverage"
-      caption="Available practice scenarios and completed conversations, by vertical"
-      testId="panel-scenarios"
-    >
-      {rows.length === 0 ? (
-        <EmptyState message="No scenarios available yet" testId="empty-scenarios" />
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm" data-testid="table-scenarios">
-            <thead>
-              <tr className="text-left text-white/45 border-b" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
-                <th className="py-2 pr-4 font-medium">Vertical</th>
-                <th className="py-2 pr-4 font-medium text-right">Scenarios available</th>
-                <th className="py-2 font-medium text-right">Conversations completed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.vertical} className="border-b last:border-0" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
-                  <td className="py-2 pr-4 text-white/85">{verticalLabel(r.vertical)}</td>
-                  <td className="py-2 pr-4 text-right text-white/60">{r.catalog}</td>
-                  <td className="py-2 text-right text-white/85 font-medium">{r.completed}</td>
+    <div className="space-y-6">
+      <Panel
+        title="Scenario coverage"
+        caption="Available practice scenarios and completed conversations, by vertical"
+        testId="panel-scenarios"
+        accent={BLUE}
+      >
+        {rows.length === 0 ? (
+          <EmptyState message="No scenarios available yet" testId="empty-scenarios" />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="table-scenarios">
+              <thead>
+                <tr className="text-left text-white/45 border-b" style={{ borderColor: BORDER }}>
+                  <th className="py-2 pr-4 font-medium">Vertical</th>
+                  <th className="py-2 pr-4 font-medium text-right">Scenarios available</th>
+                  <th className="py-2 font-medium text-right">Conversations completed</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Panel>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.vertical} className="border-b last:border-0" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                    <td className="py-2 pr-4 text-white/85">{verticalLabel(r.vertical)}</td>
+                    <td className="py-2 pr-4 text-right text-white/60">{r.catalog}</td>
+                    <td className="py-2 text-right text-white/85 font-medium">{r.completed}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+      <Panel title="Conversations by vertical" caption="Completed discovery sessions across verticals" testId="panel-vertical-breakdown" accent={PURPLE}>
+        <VerticalBreakdown data={stats.verticalBreakdown} />
+      </Panel>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Leaderboard section: full ranked list.
+// Leaderboard section: full ranked list + streaks.
 // ---------------------------------------------------------------------------
 
 function LeaderboardSection({ stats, loading, locked, office, isManager }: { stats?: DashboardStats; loading: boolean; locked?: boolean; full?: boolean; office?: Office; isManager?: boolean }) {
@@ -792,9 +1388,104 @@ function LeaderboardSection({ stats, loading, locked, office, isManager }: { sta
     return <Skeleton className="h-72 rounded-xl" />;
   }
   return (
-    <Panel title="Leaderboard" caption="Every consultant, ranked by average discovery score" testId="panel-leaderboard-full">
-      <Leaderboard leaderboard={stats.leaderboard} />
-    </Panel>
+    <div className="space-y-6">
+      <Panel title="Leaderboard" caption="Every consultant, ranked by average discovery score" testId="panel-leaderboard-full" accent={GOLD}>
+        <Leaderboard leaderboard={stats.leaderboard} />
+      </Panel>
+      <Panel
+        title="Streaks & rankings"
+        caption="Each consultant's current practice streak and office rank"
+        testId="panel-streaks-rankings"
+        accent={ORANGE}
+      >
+        <StreaksAndRankings rows={stats.streaksAndRankings} />
+      </Panel>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard Settings section: per-office widget on/off toggles, persisted via
+// GET/PUT /api/manager/dashboard-widget-config. Basic (not drag/drop)
+// customization, per this pass's scope.
+// ---------------------------------------------------------------------------
+
+function SettingsSection({
+  userId,
+  locked,
+  office,
+  isManager,
+}: {
+  userId?: number;
+  locked?: boolean;
+  office?: Office;
+  isManager?: boolean;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const { data, isLoading } = useQuery<{ widgetConfig: Record<string, boolean> }>({
+    queryKey: [`/api/manager/dashboard-widget-config?requesterId=${userId}`],
+    enabled: !!userId,
+  });
+
+  const updateWidget = useMutation({
+    mutationFn: async (patch: Record<string, boolean>) => {
+      const res = await apiRequest("PUT", "/api/manager/dashboard-widget-config", {
+        requesterId: userId,
+        widgetConfig: patch,
+      });
+      return res.json() as Promise<{ widgetConfig: Record<string, boolean> }>;
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData([`/api/manager/dashboard-widget-config?requesterId=${userId}`], result);
+      queryClient.invalidateQueries({ queryKey: [`/api/manager/dashboard-command-center?requesterId=${userId}`] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Couldn't save that change", description: humanError(err), variant: "destructive" });
+    },
+  });
+
+  if (locked) return <AddOnLocked office={office} isManager={isManager} />;
+  if (isLoading || !data) {
+    return <Skeleton className="h-96 rounded-xl" />;
+  }
+
+  const cfg = data.widgetConfig;
+
+  return (
+    <div className="space-y-6">
+      <Panel
+        title="Dashboard Settings"
+        caption="Choose which Command Center widgets your office sees. Changes save immediately and apply to your Dashboard tab."
+        testId="panel-dashboard-settings"
+        accent={BLUE}
+      >
+        <ul className="divide-y" style={{ borderColor: BORDER }} data-testid="list-widget-toggles">
+          {DASHBOARD_WIDGET_KEYS.map((key) => {
+            const visible = cfg[key] !== false;
+            return (
+              <li key={key} className="flex items-center justify-between gap-4 py-3.5" data-testid={`widget-toggle-row-${key}`}>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-white">{WIDGET_LABELS[key].label}</p>
+                  <p className="text-xs text-white/45 mt-0.5">{WIDGET_LABELS[key].caption}</p>
+                </div>
+                <Switch
+                  checked={visible}
+                  onCheckedChange={(checked) => updateWidget.mutate({ [key]: checked })}
+                  disabled={!isManager}
+                  data-testid={`switch-widget-${key}`}
+                  aria-label={`Toggle ${WIDGET_LABELS[key].label}`}
+                />
+              </li>
+            );
+          })}
+        </ul>
+        {!isManager && (
+          <p className="mt-4 text-xs text-white/40">Only a manager can change these settings for the office.</p>
+        )}
+      </Panel>
+    </div>
   );
 }
 
@@ -806,7 +1497,7 @@ function InviteCodeCard({ office }: { office: Office }) {
   return (
     <div
       className="rounded-xl border-2 flex flex-wrap items-center justify-between gap-3 px-5 py-4"
-      style={{ borderColor: ORANGE, backgroundColor: NAVY }}
+      style={{ borderColor: BLUE, backgroundColor: NAVY }}
     >
       <div>
         <p className="text-xs uppercase tracking-wide text-white/45">Your office invite code</p>
@@ -889,7 +1580,7 @@ function EmailInviteCard({ userId, officeName }: { userId: number; officeName: s
             onClick={() => enroll.mutate(emails)}
             disabled={emails.length === 0 || enroll.isPending}
             className="gap-1.5 shrink-0"
-            style={{ backgroundColor: ORANGE, color: "white" }}
+            style={{ backgroundColor: BLUE, color: "white" }}
             data-testid="button-send-invites"
           >
             <Mail className="h-4 w-4" />
@@ -905,7 +1596,7 @@ function PendingBanner() {
   return (
     <div
       className="rounded-xl border-2 px-5 py-4 space-y-2"
-      style={{ borderColor: ORANGE, backgroundColor: NAVY }}
+      style={{ borderColor: BLUE, backgroundColor: NAVY }}
       data-testid="banner-office-pending"
     >
       <h2 className="text-lg font-semibold text-white">Finish setting up your office</h2>
@@ -937,7 +1628,7 @@ function BillingCard({ office }: { office: Office }) {
   const isPastDue = ["past_due", "unpaid"].includes(office.subscriptionStatus);
 
   return (
-    <div className="rounded-xl border-2 px-5 py-4 space-y-3" style={{ borderColor: ORANGE, backgroundColor: NAVY }}>
+    <div className="rounded-xl border-2 px-5 py-4 space-y-3" style={{ borderColor: BLUE, backgroundColor: NAVY }}>
       <h2 className="text-lg font-semibold text-white">
         {isPastDue ? "Payment needed to restore access" : "Activate your subscription"}
       </h2>
@@ -949,7 +1640,7 @@ function BillingCard({ office }: { office: Office }) {
       <Button
         onClick={() => redirectTo(isPastDue && office.stripeCustomerId ? "portal" : "checkout")}
         disabled={busy !== null}
-        style={{ backgroundColor: ORANGE, color: "white" }}
+        style={{ backgroundColor: BLUE, color: "white" }}
         data-testid="button-activate-subscription"
       >
         {busy ? "Opening…" : isPastDue ? "Manage billing" : "Set up billing"}
@@ -965,6 +1656,21 @@ function fmtShortDate(iso: string): string {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const m = months[Number(parts[1]) - 1] ?? parts[1];
   return `${m} ${Number(parts[2])}`;
+}
+
+// Renders an ISO timestamp as a short relative label ("2m ago", "3h ago", "5d
+// ago") for the Live Feed, matching the reference design's timestamp style.
+function fmtRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const diffMs = Date.now() - then;
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function humanError(err: any): string {
