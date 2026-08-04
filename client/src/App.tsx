@@ -8,6 +8,9 @@ import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import Login from "@/pages/login";
 import ManagerLogin from "@/pages/manager-login";
+import ManagerForgotPassword from "@/pages/manager-forgot-password";
+import ManagerResetPassword from "@/pages/manager-reset-password";
+import ManagerForgotUsername from "@/pages/manager-forgot-username";
 import Register from "@/pages/register";
 import Signup from "@/pages/signup";
 import Scenarios from "@/pages/scenarios";
@@ -54,6 +57,13 @@ function AppRouter() {
           when signed in. Rendered by a different component from the consultant
           login so browser password managers treat the two as separate contexts. */}
       <Route path="/command-center" component={CommandCenter} />
+      {/* Manager self-service account recovery: request pages nested under
+          /command-center/..., plus the top-level /reset-password landing page
+          that the emailed link points at (see notifications.ts). Public, no
+          auth — a locked-out manager has no session to gate behind. */}
+      <Route path="/command-center/forgot-password" component={ManagerForgotPassword} />
+      <Route path="/command-center/forgot-username" component={ManagerForgotUsername} />
+      <Route path="/reset-password" component={ManagerResetPassword} />
       <Route path="/register" component={Register} />
       {/* Self-serve manager signup: email capture, verify, office setup, then
           Stripe checkout. Payment is the sole activation trigger. Public, no auth. */}

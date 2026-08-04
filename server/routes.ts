@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike } from "./llm";
+import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -55,7 +56,7 @@ import {
   realConversationCapBlockedMessage,
   REAL_CONVERSATION_MONTHLY_CAP,
 } from "./realConversationCap";
-import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail, sendManagerPasswordResetEmail, sendManagerUsernameReminderEmail } from "./notifications";
 import {
   canResendSignupCode,
   validateOfficeSetupInput,
@@ -109,6 +110,7 @@ import {
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
+  enrollDemoVoiceContact,
   type ContactArchiveView,
   type ContactFilters,
 } from "./contacts";
@@ -142,7 +144,7 @@ import {
   blockedMessage,
   type PracticeCapStatus,
 } from "./fairUse";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -1072,6 +1074,13 @@ export async function registerRoutes(
       const { content, withAudio, stream } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);
 
+      // A session already ended by the second vulgar/belligerent strike is
+      // terminal (see server/vulgarBait.ts): reject/no-op instead of letting a
+      // stray retry re-open or re-score it.
+      if (session.status === VULGAR_ENDED_STATUS) {
+        return res.status(409).json({ message: "session_ended", sessionEnded: true });
+      }
+
       const consultantMsg = transcriptMessageSchema.parse({
         role: "consultant",
         content,
@@ -1087,6 +1096,42 @@ export async function registerRoutes(
       const closeCheckpoint = detectCloseIntent(content);
 
       const msgId = randomUUID();
+
+      // Vulgar/belligerent bait is checked up front, here, in addition to inside
+      // getCustomerReply/streamCustomerReply themselves. Those functions are what
+      // actually decide the scripted reply text (single source of truth, see
+      // checkVulgarBaitStrike in server/llm.ts -- this call below does not
+      // duplicate that decision, it reads the exact same derivation) but the
+      // /message response itself also needs to tell the frontend sessionEnded
+      // synchronously, and for the streaming branch that answer would otherwise
+      // not be knowable until the separate /turn-stream request finishes. Doing
+      // the check here lets a strike short-circuit straight to a normal JSON
+      // reply -- bypassing the SSE placeholder/streaming path entirely for that
+      // turn -- so voice mode gets the same synchronous signal text mode does,
+      // and a baiting message never burns an LLM call either way.
+      const strike = checkVulgarBaitStrike(transcript);
+      if (strike) {
+        const customerMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: strike.text,
+          audioStatus: "none",
+          msgId,
+          timestamp: new Date().toISOString(),
+        });
+        transcript.push(customerMsg);
+
+        const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+        if (strike.sessionEnded) {
+          // Terminal: end the session, do not score it. No
+          // score/rubricScores/feedback are written -- this was never a real
+          // practice attempt to grade.
+          sessionPatch.status = VULGAR_ENDED_STATUS;
+          sessionPatch.completedAt = new Date().toISOString();
+        }
+        const updated = await storage.updateSession(session.id, sessionPatch);
+        res.json({ ...updated, closeCheckpoint, sessionEnded: strike.sessionEnded });
+        return;
+      }
 
       // Streaming voice path: do NOT block on the full reply here. Append the
       // consultant turn plus an empty customer placeholder, persist, and hand the
@@ -1121,11 +1166,11 @@ export async function registerRoutes(
       const escalationTier = await computeSessionEscalationTier(session, scenario);
 
       const variantSection = sessionVariantSection(scenario, session);
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
+      const customerReply = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
 
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",
-        content: customerReplyText,
+        content: customerReply.text,
         audioStatus: withAudio ? "pending" : "none",
         // Point at the streaming endpoint up front. The client plays it as soon
         // as the reply arrives (playback starts on the first chunk); the same
@@ -1136,12 +1181,21 @@ export async function registerRoutes(
       });
       transcript.push(customerMsg);
 
+      // customerReply.sessionEnded can only be true here if checkVulgarBaitStrike
+      // above somehow missed it and getCustomerReply's own internal check caught
+      // it instead (defense in depth, not the expected path since both read the
+      // same transcript) -- handle it the same way regardless of which check
+      // actually fired.
+      const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+      if (customerReply.sessionEnded) {
+        sessionPatch.status = VULGAR_ENDED_STATUS;
+        sessionPatch.completedAt = new Date().toISOString();
+      }
+
       // Respond immediately with the text reply. Audio is synthesized lazily and
       // streamed when the client requests the audio-stream URL above.
-      const updated = await storage.updateSession(session.id, {
-        transcript: JSON.stringify(transcript),
-      });
-      res.json({ ...updated, closeCheckpoint });
+      const updated = await storage.updateSession(session.id, sessionPatch);
+      res.json({ ...updated, closeCheckpoint, sessionEnded: customerReply.sessionEnded });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
@@ -1333,7 +1387,8 @@ export async function registerRoutes(
       scenario,
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
-      persist: (content, status) => updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status),
+      persist: (content, status, sessionEnded) =>
+        updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status, sessionEnded),
     });
   });
 
@@ -1532,6 +1587,8 @@ export async function registerRoutes(
   registerRealConversationRoutes(app);
 
   registerManagerRosterRoutes(app);
+
+  registerManagerAuthRecoveryRoutes(app);
 
   registerManagerDashboardRoutes(app);
 
@@ -2049,6 +2106,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // throws, so it can never block or fail the verify response.
     if (!signup.verified) {
       void enrollDemoDrip({ storage, send: sendInboundEmail }, { id: signup.id, email });
+      // Also auto-create a Contact so this lead shows up in the admin Contacts
+      // tab for manual follow-up. Same fire-and-forget/best-effort posture as
+      // enrollDemoDrip above: never awaited, never throws, so it can never
+      // block or change this endpoint's response either way.
+      void enrollDemoVoiceContact({ storage }, { email });
     }
 
     if (isSessionLimitReached(signup.sessionsUsed, email)) {
@@ -3509,6 +3571,137 @@ function groupBy<T, K>(items: T[], keyOf: (item: T) => K): Map<K, T[]> {
     map.set(key, list);
   }
   return map;
+}
+
+// --- Manager/office account self-service recovery ---------------------------
+// Command Center (manager login) previously had NO forgot-password or
+// forgot-username path at all: a locked-out manager had no way back in short of
+// a manual database fix. All three endpoints below share one hard rule: the
+// HTTP response is IDENTICAL whether or not a matching account/email was
+// found, so no response (status, body, or timing-observable branch) can be used
+// to enumerate real accounts. Reuses the existing Resend transport in
+// notifications.ts — no new email provider or credentials.
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Generous but bounded: a locked-out manager may legitimately retry a few
+// times (typo'd email, slow inbox) without opening the door to enumeration
+// probing. Mirrors the shape of the existing demo/leads limiters above.
+const forgotPasswordLimiter = new RateLimiter(10, 60 * 1000);
+const forgotUsernameLimiter = new RateLimiter(10, 60 * 1000);
+const resetPasswordLimiter = new RateLimiter(20, 60 * 1000);
+
+const GENERIC_FORGOT_PASSWORD_MESSAGE =
+  "If an account exists for that email, we've sent a password reset link.";
+const GENERIC_FORGOT_USERNAME_MESSAGE =
+  "If an account exists for that email, we've sent the username(s) on file.";
+
+export function registerManagerAuthRecoveryRoutes(app: Express): void {
+  // --- Forgot password: request a reset link -------------------------------
+  app.post("/api/manager/forgot-password", async (req, res) => {
+    if (!forgotPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      // Reset only the first match. Multiple accounts sharing one inbox is an
+      // edge case (see schema.ts comment on users.email); resetting every
+      // account silently on one request would be surprising, and forgot-
+      // username already offers a way to discover the others.
+      const account = matches[0];
+      if (account) {
+        const token = randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+        await storage.updateUser(account.id, {
+          passwordResetToken: token,
+          passwordResetExpiresAt: expiresAt,
+        });
+        // Best-effort: a Resend outage must never leak account existence via a
+        // different response, so success/failure of the send is only logged.
+        sendManagerPasswordResetEmail(email, token).catch((err) => {
+          console.warn("[manager-auth] Failed to send password reset email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-password lookup failed:", err);
+      // Still fall through to the generic response — never surface a 500 that
+      // could hint at whether the lookup itself found something.
+    }
+
+    res.json({ message: GENERIC_FORGOT_PASSWORD_MESSAGE });
+  });
+
+  // --- Reset password: redeem a token ---------------------------------------
+  app.post("/api/manager/reset-password", async (req, res) => {
+    if (!resetPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({
+      token: z.string().trim().min(1),
+      newPassword: z.string().min(8, "Password must be at least 8 characters"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { token, newPassword } = parsed.data;
+
+    const account = await storage.getUserByPasswordResetToken(token);
+    if (!account || !account.passwordResetToken || !account.passwordResetExpiresAt) {
+      return res.status(400).json({ message: "This reset link is invalid. Please request a new one." });
+    }
+    const expiresAt = Date.parse(account.passwordResetExpiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      // Clear the stale token so it can never be redeemed later, even if the
+      // expiry check above is somehow bypassed by a future code change.
+      await storage.updateUser(account.id, { passwordResetToken: null, passwordResetExpiresAt: null });
+      return res.status(400).json({ message: "This reset link has expired. Please request a new one." });
+    }
+
+    // Same credential storage /api/login already compares against (plaintext
+    // in this table today — see the login handler above). Reset must not
+    // invent a different hashing scheme than the one login actually checks.
+    await storage.updateUser(account.id, {
+      password: newPassword,
+      passwordResetToken: null,
+      passwordResetExpiresAt: null,
+    });
+
+    res.json({ message: "Your password has been reset. You can now sign in." });
+  });
+
+  // --- Forgot username: email the username(s) on file -----------------------
+  app.post("/api/manager/forgot-username", async (req, res) => {
+    if (!forgotUsernameLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      if (matches.length > 0) {
+        const usernames = matches.map((u) => u.username);
+        sendManagerUsernameReminderEmail(email, usernames).catch((err) => {
+          console.warn("[manager-auth] Failed to send username reminder email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-username lookup failed:", err);
+    }
+
+    res.json({ message: GENERIC_FORGOT_USERNAME_MESSAGE });
+  });
 }
 
 // Authorize a manager-roster request: the requester must exist, be a manager or
@@ -5077,11 +5270,20 @@ async function computeSessionEscalationTier(session: Session, scenario: Scenario
 // Fills in a previously-created placeholder customer message with its final text
 // and audio status once the streamed reply has finished. Keeps replay working:
 // the persisted content is what /audio-stream re-synthesizes for later playback.
-async function updateSessionMsgContentAndStatus(
+//
+// `sessionEnded` is true only when the streamed reply was the second vulgar/
+// belligerent strike (see checkVulgarBaitStrike in server/llm.ts, threaded
+// through server/turnStream.ts's persist callback). When true this also ends
+// the session as a terminal state -- status + completedAt -- exactly like the
+// non-streaming /message branch does; the voice/streaming path must not be a
+// way to bypass that behavior just because the strike was detected mid-stream
+// instead of before the SSE hand-off.
+export async function updateSessionMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getSession(sessionId);
   if (!latest) return;
@@ -5089,16 +5291,22 @@ async function updateSessionMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateSession(sessionId, patch);
 }
 
 // The demo's counterpart to updateSessionMsgContentAndStatus, writing to
-// demo_sessions instead of sessions.
-async function updateDemoMsgContentAndStatus(
+// demo_sessions instead of sessions. Same sessionEnded handling as above.
+export async function updateDemoMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getDemoSession(sessionId);
   if (!latest) return;
@@ -5106,7 +5314,12 @@ async function updateDemoMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateDemoSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateDemoSession(sessionId, patch);
 }
 
 interface RunTurnStreamOptions {
@@ -5115,7 +5328,7 @@ interface RunTurnStreamOptions {
   scenario: Scenario;
   voice: string;
   instructions?: string;
-  persist: (content: string, status: MsgAudioStatus) => Promise<void>;
+  persist: (content: string, status: MsgAudioStatus, sessionEnded: boolean) => Promise<void>;
 }
 
 // One streamed customer turn for a real trainee session. Derives the inputs that

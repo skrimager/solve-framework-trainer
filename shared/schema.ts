@@ -52,6 +52,20 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
+  // Owner/contact email for manager (and, incidentally, office) accounts. Nullable:
+  // most existing accounts were provisioned before self-service recovery existed and
+  // have no email on file, in which case forgot-password/forgot-username simply find
+  // no match (still returns the generic anti-enumeration response). Not unique because
+  // multiple manager/qa accounts in the same office may legitimately share one inbox.
+  email: text("email"),
+  // Self-service password recovery (manager/office accounts only today, but lives on
+  // the shared users table alongside consultant/qa rows since they all authenticate
+  // through the same POST /api/login). A single-use, random, expiring token — see
+  // POST /api/manager/forgot-password and POST /api/manager/reset-password in routes.ts.
+  // Null when no reset is in flight. Cleared immediately on successful redemption so a
+  // token can never be replayed.
+  passwordResetToken: text("password_reset_token").unique(),
+  passwordResetExpiresAt: text("password_reset_expires_at"), // ISO timestamp; token invalid at/after this
   currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances after 5 sessions that EACH individually score >= 85 at the current level (not an average; see REQUIRED_QUALIFYING_SESSIONS/ADVANCE_THRESHOLD in server/llm.ts)
   leadershipLevel: text("leadership_level").notNull().default("beginner"), // Leadership/Conflict-Management track level, tracked independently from currentLevel so a user can be Advanced in one track and Beginner in the other
   // A paid, occupied consultant seat. Set true only after the office's Stripe seat
@@ -82,6 +96,9 @@ export const insertUserSchema = createInsertSchema(users).pick({
   password: true,
   role: true,
   displayName: true,
+  email: true,
+  passwordResetToken: true,
+  passwordResetExpiresAt: true,
   currentLevel: true,
   leadershipLevel: true,
   seatActive: true,
@@ -141,7 +158,7 @@ export const sessions = pgTable("sessions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   // The per-session persona variant chosen when this session started (JSON:
   // {personality, motivation, objections[]}). Stored resolved so every turn of
   // this session reconstructs the exact same customer, while a different session
@@ -375,7 +392,10 @@ export const contacts = pgTable("contacts", {
   // 'speaking' | 'consulting' | 'book' | 'training' | 'role_play' | 'general'.
   type: text("type").notNull().default("general"),
   // Where the contact originated: 'website' | 'book' | 'speaking' | 'referral'
-  // | 'role_play' | 'manual' (extensible). Existing/marketing rows -> 'website'.
+  // | 'role_play' | 'manual' | 'voice_demo' (extensible). Existing/marketing
+  // rows -> 'website'. 'voice_demo' = auto-created on demo email verification
+  // (POST /api/demo/verify), distinct from 'role_play' (the optional post-demo
+  // CTA form) so the two lead sources stay separately filterable.
   source: text("source").notNull().default("website"),
   priority: text("priority").notNull().default("medium"), // 'high' | 'medium' | 'low'
   owner: text("owner"), // team member handling it (nullable; one admin today, designed for many)
@@ -474,7 +494,7 @@ export const demoSessions = pgTable("demo_sessions", {
   signupId: integer("signup_id").notNull().references(() => demoSignups.id),
   email: text("email").notNull(), // denormalized for simple admin listing/filtering
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   transcript: text("transcript").notNull().default("[]"), // same JSON shape as sessions.transcript
   score: integer("score"),
   rubricScores: text("rubric_scores"),
