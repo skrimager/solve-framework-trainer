@@ -85,6 +85,14 @@ export interface IStorage {
   // user did not exist.
   deleteUser(id: number): Promise<boolean>;
   getUserByUsername(username: string): Promise<User | undefined>;
+  // Case-insensitive, normalized (trimmed+lowercased at the call site) lookup of
+  // every account with a given email on file. Plural because manager/qa accounts
+  // in the same office may share one inbox; forgot-username emails all of them.
+  getUsersByEmail(email: string): Promise<User[]>;
+  // Looks up the single account currently holding a given (unexpired or expired —
+  // expiry is checked by the caller so it can distinguish "expired" from "unknown"
+  // for a clearer user-facing message) password reset token.
+  getUserByPasswordResetToken(token: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: number, patch: Partial<InsertUser>): Promise<User | undefined>;
   listUsers(): Promise<User[]>;
@@ -413,6 +421,15 @@ export class DatabaseStorage implements IStorage {
 
   async getUserByUsername(username: string): Promise<User | undefined> {
     const rows = await db.select().from(users).where(eq(users.username, username));
+    return rows[0];
+  }
+
+  async getUsersByEmail(email: string): Promise<User[]> {
+    return db.select().from(users).where(eq(users.email, email));
+  }
+
+  async getUserByPasswordResetToken(token: string): Promise<User | undefined> {
+    const rows = await db.select().from(users).where(eq(users.passwordResetToken, token));
     return rows[0];
   }
 

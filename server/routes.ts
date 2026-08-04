@@ -55,7 +55,7 @@ import {
   realConversationCapBlockedMessage,
   REAL_CONVERSATION_MONTHLY_CAP,
 } from "./realConversationCap";
-import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail, sendManagerPasswordResetEmail, sendManagerUsernameReminderEmail } from "./notifications";
 import {
   canResendSignupCode,
   validateOfficeSetupInput,
@@ -142,7 +142,7 @@ import {
   blockedMessage,
   type PracticeCapStatus,
 } from "./fairUse";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -1532,6 +1532,8 @@ export async function registerRoutes(
   registerRealConversationRoutes(app);
 
   registerManagerRosterRoutes(app);
+
+  registerManagerAuthRecoveryRoutes(app);
 
   registerManagerDashboardRoutes(app);
 
@@ -3509,6 +3511,137 @@ function groupBy<T, K>(items: T[], keyOf: (item: T) => K): Map<K, T[]> {
     map.set(key, list);
   }
   return map;
+}
+
+// --- Manager/office account self-service recovery ---------------------------
+// Command Center (manager login) previously had NO forgot-password or
+// forgot-username path at all: a locked-out manager had no way back in short of
+// a manual database fix. All three endpoints below share one hard rule: the
+// HTTP response is IDENTICAL whether or not a matching account/email was
+// found, so no response (status, body, or timing-observable branch) can be used
+// to enumerate real accounts. Reuses the existing Resend transport in
+// notifications.ts — no new email provider or credentials.
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Generous but bounded: a locked-out manager may legitimately retry a few
+// times (typo'd email, slow inbox) without opening the door to enumeration
+// probing. Mirrors the shape of the existing demo/leads limiters above.
+const forgotPasswordLimiter = new RateLimiter(10, 60 * 1000);
+const forgotUsernameLimiter = new RateLimiter(10, 60 * 1000);
+const resetPasswordLimiter = new RateLimiter(20, 60 * 1000);
+
+const GENERIC_FORGOT_PASSWORD_MESSAGE =
+  "If an account exists for that email, we've sent a password reset link.";
+const GENERIC_FORGOT_USERNAME_MESSAGE =
+  "If an account exists for that email, we've sent the username(s) on file.";
+
+export function registerManagerAuthRecoveryRoutes(app: Express): void {
+  // --- Forgot password: request a reset link -------------------------------
+  app.post("/api/manager/forgot-password", async (req, res) => {
+    if (!forgotPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      // Reset only the first match. Multiple accounts sharing one inbox is an
+      // edge case (see schema.ts comment on users.email); resetting every
+      // account silently on one request would be surprising, and forgot-
+      // username already offers a way to discover the others.
+      const account = matches[0];
+      if (account) {
+        const token = randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+        await storage.updateUser(account.id, {
+          passwordResetToken: token,
+          passwordResetExpiresAt: expiresAt,
+        });
+        // Best-effort: a Resend outage must never leak account existence via a
+        // different response, so success/failure of the send is only logged.
+        sendManagerPasswordResetEmail(email, token).catch((err) => {
+          console.warn("[manager-auth] Failed to send password reset email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-password lookup failed:", err);
+      // Still fall through to the generic response — never surface a 500 that
+      // could hint at whether the lookup itself found something.
+    }
+
+    res.json({ message: GENERIC_FORGOT_PASSWORD_MESSAGE });
+  });
+
+  // --- Reset password: redeem a token ---------------------------------------
+  app.post("/api/manager/reset-password", async (req, res) => {
+    if (!resetPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({
+      token: z.string().trim().min(1),
+      newPassword: z.string().min(8, "Password must be at least 8 characters"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { token, newPassword } = parsed.data;
+
+    const account = await storage.getUserByPasswordResetToken(token);
+    if (!account || !account.passwordResetToken || !account.passwordResetExpiresAt) {
+      return res.status(400).json({ message: "This reset link is invalid. Please request a new one." });
+    }
+    const expiresAt = Date.parse(account.passwordResetExpiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      // Clear the stale token so it can never be redeemed later, even if the
+      // expiry check above is somehow bypassed by a future code change.
+      await storage.updateUser(account.id, { passwordResetToken: null, passwordResetExpiresAt: null });
+      return res.status(400).json({ message: "This reset link has expired. Please request a new one." });
+    }
+
+    // Same credential storage /api/login already compares against (plaintext
+    // in this table today — see the login handler above). Reset must not
+    // invent a different hashing scheme than the one login actually checks.
+    await storage.updateUser(account.id, {
+      password: newPassword,
+      passwordResetToken: null,
+      passwordResetExpiresAt: null,
+    });
+
+    res.json({ message: "Your password has been reset. You can now sign in." });
+  });
+
+  // --- Forgot username: email the username(s) on file -----------------------
+  app.post("/api/manager/forgot-username", async (req, res) => {
+    if (!forgotUsernameLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      if (matches.length > 0) {
+        const usernames = matches.map((u) => u.username);
+        sendManagerUsernameReminderEmail(email, usernames).catch((err) => {
+          console.warn("[manager-auth] Failed to send username reminder email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-username lookup failed:", err);
+    }
+
+    res.json({ message: GENERIC_FORGOT_USERNAME_MESSAGE });
+  });
 }
 
 // Authorize a manager-roster request: the requester must exist, be a manager or

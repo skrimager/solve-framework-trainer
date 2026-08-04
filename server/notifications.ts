@@ -517,3 +517,88 @@ export async function addMessageCoachLeadToAudience(
     return false;
   }
 }
+
+// --- Manager/office account self-service recovery emails --------------------
+// Command Center (manager login) previously had no forgot-password or
+// forgot-username path at all. Both emails below go out through the SAME
+// Resend transport as every other transactional email in this file — no new
+// provider, no new API key — via the personal "from hello@" mailbox, matching
+// the tone of the paid-welcome email rather than the system notifications@
+// sender, since these are addressed directly to the account holder.
+
+// Building the reset-link URL is intentionally a plain function (not inlined at
+// the call site) so a test can assert on its shape without hitting the network.
+export function buildPasswordResetUrl(token: string): string {
+  return `${APP_URL}/#/reset-password?token=${encodeURIComponent(token)}`;
+}
+
+export function buildManagerPasswordResetEmail(token: string): { subject: string; html: string; text: string } {
+  const resetUrl = buildPasswordResetUrl(token);
+  const subject = "Reset your SOLVE Framework Command Center password";
+  const ctaMarker = "__CTA_BUTTON__";
+  const lines = [
+    "We received a request to reset the password for your Command Center account.",
+    "",
+    "Click the button below to choose a new password. This link expires in 1 hour and can only be used once.",
+    "",
+    ctaMarker,
+    "",
+    "If you didn't request this, you can safely ignore this email — your password will not change.",
+  ];
+  const text = lines
+    .map((line) => (line === ctaMarker ? `Reset your password: ${resetUrl}` : line))
+    .join("\n");
+  const htmlBody = lines
+    .map((line) => {
+      if (line === "") return "<br>";
+      if (line === ctaMarker) return renderEmailButton("Reset your password", resetUrl);
+      return `<p style="margin:0 0 8px;">${escapeHtml(line)}</p>`;
+    })
+    .join("");
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111;">${htmlBody}</div>`;
+  return { subject, html, text };
+}
+
+// Best-effort: returns whether the send succeeded so the route can log it, but
+// the HTTP response to the caller must stay generic either way (never reveal
+// whether the email/account existed).
+export async function sendManagerPasswordResetEmail(to: string, token: string): Promise<boolean> {
+  const { subject, html, text } = buildManagerPasswordResetEmail(token);
+  return sendInboundEmail(to, subject, html, text);
+}
+
+export function buildManagerUsernameReminderEmail(usernames: string[]): { subject: string; html: string; text: string } {
+  const subject = "Your SOLVE Framework Command Center username(s)";
+  const commandCenterUrl = `${APP_URL}/#/command-center`;
+  const list = usernames.length === 1
+    ? `Your username is: ${usernames[0]}`
+    : `Your usernames are:\n${usernames.map((u) => `- ${u}`).join("\n")}`;
+  const ctaMarker = "__CTA_BUTTON__";
+  const lines = [
+    "We received a request for the username(s) on file for this email address.",
+    "",
+    list,
+    "",
+    ctaMarker,
+    "",
+    "If you didn't request this, you can safely ignore this email.",
+  ];
+  const text = lines
+    .map((line) => (line === ctaMarker ? `Sign in: ${commandCenterUrl}` : line))
+    .join("\n");
+  const htmlBody = lines
+    .map((line) => {
+      if (line === "") return "<br>";
+      if (line === ctaMarker) return renderEmailButton("Go to Command Center", commandCenterUrl);
+      const escaped = escapeHtml(line).replace(/\n/g, "<br>");
+      return `<p style="margin:0 0 8px;">${escaped}</p>`;
+    })
+    .join("");
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111;">${htmlBody}</div>`;
+  return { subject, html, text };
+}
+
+export async function sendManagerUsernameReminderEmail(to: string, usernames: string[]): Promise<boolean> {
+  const { subject, html, text } = buildManagerUsernameReminderEmail(usernames);
+  return sendInboundEmail(to, subject, html, text);
+}
