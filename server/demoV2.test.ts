@@ -11,6 +11,7 @@ import { storage } from "./storage";
 import { registerPublicAndAdminRoutes, isDemoOnlyScenario, realTrainingScenarios } from "./routes";
 import { __setFetchForTests } from "./notifications";
 import { normalizeEmail, signDemoToken, MAX_DEMO_SESSIONS } from "./demo";
+import { VULGAR_STRIKE_ONE_REPLY, VULGAR_STRIKE_TWO_REPLY, VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
   DEMO_V2_INDUSTRIES,
   DEMO_V2_SLUGS,
@@ -564,7 +565,18 @@ describe("demo v2 endpoints", () => {
     assert.equal(signups[0].sessionsUsed, 1);
   });
 
-  test("the completeness gate returns 409 on a conversation with no recommendation", async () => {
+  // Change 2: the old blocking gate (409 + "score it anyway") is gone. This
+  // suite has no live OpenAI key (see beforeEach's lack of any responder
+  // mock, matching the rest of this describe block's convention), so a route
+  // call that reaches scoreTranscript legitimately 500s here -- the point of
+  // this test is what it does NOT do: it must never again answer 409 with
+  // `{incomplete: true}` no matter how bare the transcript is. The actual
+  // "it scores a successful 200 with the hint applied" guarantee is proven
+  // directly against the real scoreTranscript with an injected responder in
+  // the "Change 2: no-recommendation hint" describe block below, the same
+  // pattern this file already uses for every other scoring-content
+  // assertion (see "demo v2 scoring parity").
+  test("a conversation with no recommendation is never gated with a 409 (the gate is gone)", async () => {
     const signup = verifiedSignup("gate@example.com");
     const token = signDemoToken("gate@example.com");
     sessions.push({
@@ -573,20 +585,56 @@ describe("demo v2 endpoints", () => {
       email: signup.email,
       scenarioId: 91,
       status: "in_progress",
-      // No consultant turn at all, so hasProposedRecommendation short-circuits to
-      // false with no API call.
-      transcript: JSON.stringify([{ role: "customer", content: "What's your best price?", timestamp: "2026-07-01T00:00:00.000Z" }]),
+      // The exact shape of the live incident: hostile/dismissive consultant
+      // input, no recommendation ever proposed.
+      transcript: JSON.stringify([
+        { role: "customer", content: "What's your best price?", timestamp: "2026-07-01T00:00:00.000Z" },
+        { role: "consultant", content: "fuck off", timestamp: "2026-07-01T00:00:01.000Z" },
+        { role: "customer", content: VULGAR_STRIKE_ONE_REPLY, timestamp: "2026-07-01T00:00:02.000Z" },
+        { role: "consultant", content: "sorry not worth my time", timestamp: "2026-07-01T00:00:03.000Z" },
+      ]),
       sessionNumber: 1,
       flow: "v2",
     } as unknown as DemoSession);
 
     const res = await post("/api/demo/session/1/complete", { token });
-    assert.equal(res.status, 409);
+    assert.notEqual(res.status, 409, "the completeness gate must be gone -- no recommendation must never 409");
     const body = await res.json();
-    assert.equal(body.incomplete, true);
-    // Nothing was scored or persisted.
-    assert.equal(sessions[0].status, "in_progress");
-    assert.equal(sessions[0].score, undefined);
+    assert.notEqual(body.incomplete, true, "the old incomplete flag must never be set again");
+    // This suite has no OpenAI mock (see the comment above), so the route
+    // legitimately 500s once it reaches the real scoreTranscript call -- the
+    // point under test is that it got there at all instead of stopping at a
+    // 409 gate. A genuine 200+score result for a no-recommendation transcript
+    // is proven directly against scoreTranscript in "Change 2: no-recommendation
+    // hint" below.
+    assert.equal(res.status, 500);
+  });
+
+  // `force` used to be required to bypass the 409; it is still accepted on the
+  // request body for backward compatibility with any in-flight client, but is
+  // now a no-op since there is no gate left to force past. With or without it,
+  // the route must reach the same (non-409) code path.
+  test("the now-unused force flag does not change the result", async () => {
+    const signup = verifiedSignup("force@example.com");
+    const token = signDemoToken("force@example.com");
+    sessions.push({
+      id: 1,
+      signupId: signup.id,
+      email: signup.email,
+      scenarioId: 91,
+      status: "in_progress",
+      transcript: JSON.stringify([{ role: "customer", content: "What's your best price?", timestamp: "2026-07-01T00:00:00.000Z" }]),
+      sessionNumber: 1,
+      flow: "v2",
+    } as unknown as DemoSession);
+
+    const withForce = await post("/api/demo/session/1/complete", { token, force: true });
+
+    sessions[0].status = "in_progress";
+    const withoutForce = await post("/api/demo/session/1/complete", { token });
+
+    assert.equal(withForce.status, withoutForce.status, "force must not change which code path is reached");
+    assert.notEqual(withForce.status, 409);
   });
 
   test("a session belonging to another signup is not readable", async () => {
@@ -755,7 +803,7 @@ describe("demo v2 streamed replies", () => {
         const onSentence = args[5] as (s: string, i: number) => void;
         onSentence("Nothing too fast.", 0);
         onSentence("It's for my kid.", 1);
-        return "Nothing too fast. It's for my kid.";
+        return { text: "Nothing too fast. It's for my kid.", sessionEnded: false };
       },
       synthesize: async () => Buffer.from("audio"),
     });
@@ -815,7 +863,7 @@ describe("demo v2 streamed replies", () => {
     assert.deepEqual(events, [
       { event: "sentence", data: { index: 0, text: "Nothing too fast.", audioUrl: `/api/audio/${streamMsgId}-0.mp3` } },
       { event: "sentence", data: { index: 1, text: "It's for my kid.", audioUrl: `/api/audio/${streamMsgId}-1.mp3` } },
-      { event: "done", data: { msgId: streamMsgId, text: "Nothing too fast. It's for my kid." } },
+      { event: "done", data: { msgId: streamMsgId, text: "Nothing too fast. It's for my kid.", sessionEnded: false } },
     ]);
   });
 
@@ -834,7 +882,7 @@ describe("demo v2 streamed replies", () => {
         const onSentence = args[5] as (s: string, i: number) => void;
         onSentence("Nothing too fast.", 0);
         onSentence("It's for my kid.", 1);
-        return "Nothing too fast. It's for my kid.";
+        return { text: "Nothing too fast. It's for my kid.", sessionEnded: false };
       },
       synthesize: async (text: string) => {
         if (text === "It's for my kid.") throw new Error("tts down");
@@ -894,7 +942,7 @@ describe("demo v2 streamed replies", () => {
       streamReply: async (...args: any[]) => {
         seenDifficulty = args[2];
         (args[5] as (s: string, i: number) => void)("Fine.", 0);
-        return "Fine.";
+        return { text: "Fine.", sessionEnded: false };
       },
       synthesize: async () => Buffer.from("audio"),
     });
@@ -902,6 +950,83 @@ describe("demo v2 streamed replies", () => {
     await fetch(`${baseUrl}${replyStreamUrl}`).then((r) => r.text());
     assert.equal(seenDifficulty, "beginner");
     assert.equal(seenDifficulty, DEMO_V2_DIFFICULTY);
+  });
+
+  // ---------------------------------------------------------------------
+  // Vulgar-bait strikes on the VOICE path (withAudio+stream requested).
+  // ---------------------------------------------------------------------
+  // The strike short-circuit in demoV2Routes.ts runs before the
+  // stream/useAudio branch, so a strike is always returned synchronously in
+  // the initial /message JSON response -- it never gets a replyStreamUrl,
+  // even when the caller asked for voice. These pin that behavior at the
+  // HTTP level (turnStream.test.ts covers the lower-level
+  // streamCustomerReply/runReplyStream voice-synthesis path directly).
+
+  test("a first strike on a voice-requesting turn ends up synchronous, not streamed, and does not end the session", async () => {
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "fuck off, just give me a number",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.sessionEnded, false);
+    assert.equal(body.replyStreamUrl, undefined);
+    assert.equal(body.streamMsgId, undefined);
+    const last = transcriptOf(1).at(-1)!;
+    assert.equal(last.role, "customer");
+    assert.equal(last.content, VULGAR_STRIKE_ONE_REPLY);
+  });
+
+  test("a second strike on a voice-requesting turn ends the session synchronously, still not streamed", async () => {
+    await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "fuck off, just give me a number",
+      withAudio: true,
+      stream: true,
+    });
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "piss off, eat shit",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.sessionEnded, true);
+    assert.equal(body.replyStreamUrl, undefined);
+    // publicDemoSession() does not expose completedAt, so check the underlying
+    // stored row (the mocked storage.updateDemoSession target) directly for it.
+    assert.equal(body.session.status, VULGAR_ENDED_STATUS);
+    assert.equal(sessions[0].status, VULGAR_ENDED_STATUS);
+    assert.ok(sessions[0].completedAt);
+    const last = transcriptOf(1).at(-1)!;
+    assert.equal(last.content, VULGAR_STRIKE_TWO_REPLY);
+  });
+
+  test("a session already ended by a strike rejects a further voice turn with session_ended, not a new stream", async () => {
+    await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "fuck off, just give me a number",
+      withAudio: true,
+      stream: true,
+    });
+    await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "piss off, eat shit",
+      withAudio: true,
+      stream: true,
+    });
+    const res = await post("/api/demo/session/1/message", {
+      token: signDemoToken(STREAM_EMAIL),
+      content: "one more try",
+      withAudio: true,
+      stream: true,
+    });
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.sessionEnded, true);
   });
 });
 
@@ -1070,6 +1195,105 @@ describe("demo v2 scoring parity with a real beginner session", () => {
     const expectation = closeExpectationForTransactionType(reRow.transactionType);
     const score = computeConsultingOverall(excellent, "client_agreed", "beginner", expectation);
     assert.ok(score >= ADVANCE_THRESHOLD, `expected >= ${ADVANCE_THRESHOLD}, got ${score}`);
+  });
+});
+
+// ===========================================================================
+// Change 2: the demo always scores now, with a no-recommendation hint
+// ===========================================================================
+// server/demoV2Routes.ts's /complete route no longer blocks (409) a demo
+// conversation that never reached a recommendation; it always scores, passing
+// { noRecommendationHint: !proposed } as scoreTranscript's 5th arg. These pin
+// scoreTranscript's own handling of that hint directly (same injected-responder
+// pattern as "demo v2 scoring parity" above), since the route itself cannot be
+// exercised end-to-end without a live OpenAI key (see the HTTP-level
+// non-409 test in "demo v2 endpoints").
+describe("scoreTranscript - Change 2: no-recommendation hint", () => {
+  // The live incident, reconstructed: hostile/dismissive input, no
+  // recommendation ever proposed.
+  const NO_REC_TRANSCRIPT = [
+    turn("customer", "What's your best price?"),
+    turn("consultant", "fuck off, just give me a number"),
+    turn("customer", "Haha, that's funny. I get it, checking my temperature!..."),
+    turn("consultant", "sorry, not worth my time"),
+  ];
+
+  test("a conversation with the hint still scores successfully (this is the whole point of Change 2)", async () => {
+    const result = await scoreTranscript(NO_REC_TRANSCRIPT, "beginner", "consulting", null, {
+      responder: responderReturning(SHALLOW_SUBSCORES),
+      cache: makeInMemoryCache(),
+      noRecommendationHint: true,
+    });
+    assert.equal(typeof result.overall, "number");
+    assert.ok(!Number.isNaN(result.overall));
+  });
+
+  test("the hint is threaded into the prompt sent to the model", async () => {
+    let seenInput = "";
+    const responder: ScoreResponder = async (input) => {
+      seenInput = input;
+      return JSON.stringify(SHALLOW_SUBSCORES);
+    };
+    await scoreTranscript(NO_REC_TRANSCRIPT, "beginner", "consulting", null, {
+      responder,
+      cache: makeInMemoryCache(),
+      noRecommendationHint: true,
+    });
+    assert.match(seenInput, /ever proposed a recommendation/);
+  });
+
+  test("without the hint, the same transcript's prompt has no no-recommendation note", async () => {
+    let seenInput = "";
+    const responder: ScoreResponder = async (input) => {
+      seenInput = input;
+      return JSON.stringify(SHALLOW_SUBSCORES);
+    };
+    await scoreTranscript(NO_REC_TRANSCRIPT, "beginner", "consulting", null, {
+      responder,
+      cache: makeInMemoryCache(),
+    });
+    assert.doesNotMatch(seenInput, /ever proposed a recommendation/);
+  });
+
+  test("a hinted and an unhinted score for the identical transcript never collide in the cache", async () => {
+    let calls = 0;
+    const responder: ScoreResponder = async () => {
+      calls += 1;
+      return JSON.stringify(SHALLOW_SUBSCORES);
+    };
+    const cache = makeInMemoryCache();
+    await scoreTranscript(NO_REC_TRANSCRIPT, "beginner", "consulting", null, { responder, cache });
+    await scoreTranscript(NO_REC_TRANSCRIPT, "beginner", "consulting", null, {
+      responder,
+      cache,
+      noRecommendationHint: true,
+    });
+    // If the hint were not folded into the cache key, the second call would
+    // have been served from the first call's cache entry and calls would stay 1.
+    assert.equal(calls, 2, "hinted and unhinted calls must each hit the model once, not share a cache entry");
+  });
+
+  test("the real-session call site (server/routes.ts) passes no hint, so its scoring is byte-for-byte unchanged", async () => {
+    // routes.ts's real-session /complete calls scoreTranscript with its original
+    // 4 arguments (no 5th deps arg at all) -- this pins that omitting deps
+    // entirely behaves identically to passing an empty object, so that call
+    // site needed zero changes.
+    const responder = responderReturning(GENUINE_SUBSCORES);
+    const withNoDeps = await scoreTranscript(GENUINE_TRANSCRIPT, "beginner", "consulting", null, {
+      // no responder override in production, but we need determinism here --
+      // the point under test is the 5th-arg omission, so pass responder/cache
+      // the same way on both sides and vary only whether `deps` itself is passed.
+      responder,
+      cache: makeInMemoryCache(),
+    });
+    const withEmptyDeps = await scoreTranscript(
+      GENUINE_TRANSCRIPT,
+      "beginner",
+      "consulting",
+      null,
+      { responder, cache: makeInMemoryCache() },
+    );
+    assert.deepEqual(withNoDeps, withEmptyDeps);
   });
 });
 

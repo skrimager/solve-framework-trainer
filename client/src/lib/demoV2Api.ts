@@ -101,6 +101,11 @@ export const demoV2Api = {
   // In voice mode we ask the backend to stream the reply sentence by sentence
   // over SSE, exactly as the real trainee platform does, and it answers with a
   // replyStreamUrl instead of a finished reply.
+  //
+  // `sessionEnded` is true only on the second vulgar/belligerent strike (see
+  // server/vulgarBait.ts) -- the session is over, no more messages can be sent.
+  // A 409 with `sessionEnded: true` means the caller tried to send into a
+  // session that had already ended this way on an earlier turn.
   async sendMessage(token: string, id: number, content: string, withAudio: boolean) {
     const { ok, data } = await post(`/api/demo/session/${id}/message`, {
       token,
@@ -108,24 +113,21 @@ export const demoV2Api = {
       withAudio,
       stream: withAudio,
     });
-    if (!ok) throw new Error(data.message ?? "Message failed to send.");
+    if (!ok && !data.sessionEnded) throw new Error(data.message ?? "Message failed to send.");
     return {
-      session: data.session as DemoV2Session,
+      session: data.session as DemoV2Session | undefined,
       replyStreamUrl: data.replyStreamUrl as string | undefined,
+      sessionEnded: Boolean(data.sessionEnded),
     };
   },
 
-  // `force` skips the completeness gate. The UI sends it only after the visitor
-  // is told the conversation looks unfinished and chooses to score it anyway.
+  // The demo's completeness gate is gone (see server/demoV2Routes.ts): this
+  // always succeeds and always returns a score now, even for a conversation
+  // that never reached a recommendation. `force` is still accepted on the
+  // request for backward compatibility but has no effect server-side anymore.
   async complete(token: string, id: number, force = false) {
-    const { ok, status, data } = await post(`/api/demo/session/${id}/complete`, { token, force });
-    if (!ok) {
-      const err = new Error(data.message ?? "Couldn't score the conversation.") as Error & {
-        incomplete?: boolean;
-      };
-      err.incomplete = status === 409 && !!data.incomplete;
-      throw err;
-    }
+    const { ok, data } = await post(`/api/demo/session/${id}/complete`, { token, force });
+    if (!ok) throw new Error(data.message ?? "Couldn't score the conversation.");
     return data as { session: DemoV2Session; stalledStep: string | null };
   },
 

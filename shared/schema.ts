@@ -132,7 +132,7 @@ export const sessions = pgTable("sessions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   // The per-session persona variant chosen when this session started (JSON:
   // {personality, motivation, objections[]}). Stored resolved so every turn of
   // this session reconstructs the exact same customer, while a different session
@@ -465,7 +465,7 @@ export const demoSessions = pgTable("demo_sessions", {
   signupId: integer("signup_id").notNull().references(() => demoSignups.id),
   email: text("email").notNull(), // denormalized for simple admin listing/filtering
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   transcript: text("transcript").notNull().default("[]"), // same JSON shape as sessions.transcript
   score: integer("score"),
   rubricScores: text("rubric_scores"),
