@@ -43,6 +43,20 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
+  // Owner/contact email for manager (and, incidentally, office) accounts. Nullable:
+  // most existing accounts were provisioned before self-service recovery existed and
+  // have no email on file, in which case forgot-password/forgot-username simply find
+  // no match (still returns the generic anti-enumeration response). Not unique because
+  // multiple manager/qa accounts in the same office may legitimately share one inbox.
+  email: text("email"),
+  // Self-service password recovery (manager/office accounts only today, but lives on
+  // the shared users table alongside consultant/qa rows since they all authenticate
+  // through the same POST /api/login). A single-use, random, expiring token — see
+  // POST /api/manager/forgot-password and POST /api/manager/reset-password in routes.ts.
+  // Null when no reset is in flight. Cleared immediately on successful redemption so a
+  // token can never be replayed.
+  passwordResetToken: text("password_reset_token").unique(),
+  passwordResetExpiresAt: text("password_reset_expires_at"), // ISO timestamp; token invalid at/after this
   currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances after 5 sessions that EACH individually score >= 85 at the current level (not an average; see REQUIRED_QUALIFYING_SESSIONS/ADVANCE_THRESHOLD in server/llm.ts)
   leadershipLevel: text("leadership_level").notNull().default("beginner"), // Leadership/Conflict-Management track level, tracked independently from currentLevel so a user can be Advanced in one track and Beginner in the other
   // A paid, occupied consultant seat. Set true only after the office's Stripe seat
@@ -73,6 +87,9 @@ export const insertUserSchema = createInsertSchema(users).pick({
   password: true,
   role: true,
   displayName: true,
+  email: true,
+  passwordResetToken: true,
+  passwordResetExpiresAt: true,
   currentLevel: true,
   leadershipLevel: true,
   seatActive: true,

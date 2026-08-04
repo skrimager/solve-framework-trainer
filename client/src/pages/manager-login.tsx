@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { wrongCredentialTypeRedirect } from "@/lib/routes";
+import { wrongCredentialTypeRedirect, ROUTES } from "@/lib/routes";
 
 // Manager command-center login. Same backend flow as the consultant login
 // (single POST /api/login; role is backend-derived), but deliberately styled to
@@ -161,6 +161,26 @@ export default function ManagerLogin() {
               >
                 {isSubmitting ? "Authorizing..." : "Enter command center"}
               </Button>
+              <div className="flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  onClick={() => navigate(ROUTES.managerForgotPassword)}
+                  className="font-medium hover:underline"
+                  style={{ color: ORANGE }}
+                  data-testid="link-forgot-password"
+                >
+                  Forgot password?
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate(ROUTES.managerForgotUsername)}
+                  className="font-medium hover:underline"
+                  style={{ color: ORANGE }}
+                  data-testid="link-forgot-username"
+                >
+                  Forgot username?
+                </button>
+              </div>
             </form>
             {wrongType && (
               <div

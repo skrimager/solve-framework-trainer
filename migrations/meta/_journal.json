@@ -225,6 +225,13 @@
       "when": 1783106668000,
       "tag": "0031_message_coach_verification",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1783106668500,
+      "tag": "0032_manager_password_reset",
+      "breakpoints": true
     }
   ]
 }
