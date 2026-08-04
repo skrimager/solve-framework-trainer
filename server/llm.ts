@@ -11,6 +11,12 @@ import {
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
+import {
+  countPriorVulgarStrikes,
+  detectVulgarBait,
+  VULGAR_STRIKE_ONE_REPLY,
+  VULGAR_STRIKE_TWO_REPLY,
+} from "./vulgarBait";
 
 const client = new OpenAI();
 
@@ -475,14 +481,63 @@ export function buildCustomerReplyPrompt(
   return `${stablePrefix}\n\n${variantBlock}${volatile}`;
 }
 
+// Result of asking for the customer's next reply. `sessionEnded` is only ever
+// true on the second vulgar/belligerent strike (see checkVulgarBaitStrike):
+// callers must treat that as a terminal turn — persist an ended status, skip
+// scoring, and stop accepting further input — rather than continuing the
+// conversation normally.
+export interface CustomerReplyResult {
+  text: string;
+  sessionEnded: boolean;
+}
+
+// Checks whether the consultant's LAST message in the transcript (the one this
+// call is about to reply to) is vulgar/belligerent bait, and if so, what the
+// shared getCustomerReply/streamCustomerReply callers must do instead of
+// calling the model. Centralized here so both the blocking and streaming reply
+// paths — and therefore both server/routes.ts and server/demoV2Routes.ts,
+// which reach the customer only through those two functions — apply the exact
+// same scripted response and strike/end behavior with no duplicated logic.
+//
+// The strike count is derived from every CONSULTANT turn in the transcript
+// EXCEPT the last one (that message is the one we are currently reacting to,
+// and re-deriving from the transcript must count it exactly once). This keeps
+// the count stateless and consistent with hasProposedRecommendation /
+// hasCustomerAcceptedProposal, which are also re-derived from the transcript
+// every call rather than stored.
+export function checkVulgarBaitStrike(transcript: TranscriptMessage[]): CustomerReplyResult | null {
+  const lastConsultantIndex = [...transcript].map((m) => m.role).lastIndexOf("consultant");
+  if (lastConsultantIndex === -1) return null;
+  const lastConsultantMsg = transcript[lastConsultantIndex];
+  if (!detectVulgarBait(lastConsultantMsg.content)) return null;
+
+  const priorStrikes = countPriorVulgarStrikes(transcript.slice(0, lastConsultantIndex));
+  if (priorStrikes === 0) {
+    // First offense: in-character break, conversation continues.
+    return { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false };
+  }
+  // Second (or, if somehow reached again, later) offense: the session ends.
+  // Callers are responsible for persisting the terminal status and skipping
+  // scoring; this function only decides what the "customer" says and whether
+  // the turn is terminal.
+  return { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true };
+}
+
 // Generates the simulated customer's next reply in a discovery-training role-play.
+// Checks for vulgar/belligerent bait BEFORE building or sending the normal LLM
+// prompt (see checkVulgarBaitStrike), so a baiting message never burns an LLM
+// call just to throw its result away, and never reaches the persona prompt at
+// all — the persona itself is never asked to react to the vulgarity.
 export async function getCustomerReply(
   customerPersona: string,
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
   escalationTier: number = 0,
   variantSection: string = ""
-): Promise<string> {
+): Promise<CustomerReplyResult> {
+  const strike = checkVulgarBaitStrike(transcript);
+  if (strike) return strike;
+
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
 
   const response = await client.responses.create({
@@ -492,7 +547,7 @@ export async function getCustomerReply(
   });
 
   logCachedTokens("customer-reply", response.usage);
-  return (response.output_text || "").trim();
+  return { text: (response.output_text || "").trim(), sessionEnded: false };
 }
 
 // Streaming variant of getCustomerReply. Requests the model reply with
@@ -504,6 +559,14 @@ export async function getCustomerReply(
 // non-streaming path, so prompt caching behaves the same. `onSentence` is called
 // in order and is NOT awaited here; the caller owns any per-sentence work
 // (TTS) so it can overlap with continued text generation.
+//
+// Same vulgar-bait check as getCustomerReply, and for the same reason it must
+// run first here too: this is the function real trainee voice-mode turns and
+// demo voice-mode turns both stream through (see server/turnStream.ts), so
+// skipping the check here would leave voice mode unprotected even though
+// text mode was covered. On a strike, the scripted line is handed to
+// `onSentence` as a single "sentence" (so it still gets synthesized/streamed
+// exactly like a normal reply) and the model is never called.
 export async function streamCustomerReply(
   customerPersona: string,
   transcript: TranscriptMessage[],
@@ -511,7 +574,13 @@ export async function streamCustomerReply(
   escalationTier: number = 0,
   variantSection: string = "",
   onSentence: (sentence: string, index: number) => void = () => {},
-): Promise<string> {
+): Promise<CustomerReplyResult> {
+  const strike = checkVulgarBaitStrike(transcript);
+  if (strike) {
+    onSentence(strike.text, 0);
+    return strike;
+  }
+
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
   const stablePrefix = buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier);
 
@@ -538,7 +607,7 @@ export async function streamCustomerReply(
   }
   for (const sentence of streamer.flush()) onSentence(sentence, index++);
 
-  return fullText.trim();
+  return { text: fullText.trim(), sessionEnded: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,14 +1225,27 @@ export async function scoreTranscript(
   // scenario carries one, it selects the close-expectation baseline and injects
   // matching guidance into the scoring prompt. Ignored for leadership sessions.
   transactionType: string | null | undefined = null,
-  deps: { responder?: ScoreResponder; cache?: ScoreCacheStore } = {}
+  // `noRecommendationHint`: set by the demo's always-scores /complete route
+  // (see server/demoV2Routes.ts) when hasProposedRecommendation found the
+  // trainee never got to a recommendation. It no longer BLOCKS completion
+  // there (see Change 2 in vulgar_and_end_confirm_spec.md), but the model
+  // still needs to know, so the feedback it writes coaches toward what a
+  // strong recommendation would have looked like instead of silently scoring
+  // a cut-short conversation as if it had a normal ending. Left undefined by
+  // every other caller (including server/routes.ts's real-session call,
+  // which must stay byte-for-byte unchanged), so this is purely additive.
+  deps: { responder?: ScoreResponder; cache?: ScoreCacheStore; noRecommendationHint?: boolean } = {}
 ): Promise<ScoreResult> {
   const responder = deps.responder ?? defaultScoreResponder;
   const cache = deps.cache ?? storage;
 
   // Deterministic short-circuit: identical inputs return the stored result and
-  // make no API call.
-  const contentHash = computeScoreCacheHash(transcript, difficulty, track, transactionType);
+  // make no API call. computeScoreCacheHash's own signature stays untouched
+  // (every other caller relies on it), so noRecommendationHint is folded in as
+  // a hash suffix here instead — a hinted and an unhinted score for the exact
+  // same transcript must never collide on the same cache entry, since the
+  // hinted one asks the model to write different feedback.
+  const contentHash = computeScoreCacheHash(transcript, difficulty, track, transactionType) + (deps.noRecommendationHint ? ":no-rec" : "");
   const cached = await cache.getScoreCacheEntry(contentHash);
   if (cached) {
     return {
@@ -1204,12 +1286,21 @@ export async function scoreTranscript(
   // the only one that coaches topic timing, so leadership prompts are unchanged.
   const timingGrounding = isLeadership ? "" : buildTimingGroundingBlock(transcript);
 
+  // Same volatile-tail treatment as timingGrounding: only present when the
+  // caller (today, only the demo's always-scores /complete route) tells us
+  // the trainee never reached a recommendation, so it can't disturb the
+  // cacheable prefix and has no effect on every other caller.
+  const noRecommendationNote = deps.noRecommendationHint
+    ? "Note: this conversation ended before the consultant ever proposed a recommendation or solution. Score discovery/rapport quality on what's actually present, but the close/recommendation criteria should reflect that no recommendation was made — and the feedback should coach what a strong recommendation would have looked like given what was discovered, rather than treating the missing close as a random omission."
+    : "";
+
   const raw = (
     await responder(
       [
         stablePrefix,
         `${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
         timingGrounding,
+        noRecommendationNote,
       ]
         .filter((part) => part.length > 0)
         .join("\n\n"),

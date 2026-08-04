@@ -51,7 +51,9 @@ import {
   scoreTranscript,
   scenarioTrack,
   hasProposedRecommendation,
+  checkVulgarBaitStrike,
 } from "./llm";
+import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import { deriveStalledStep } from "./realConversations";
 import { personaCoreFor, sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
@@ -81,6 +83,7 @@ export type DemoV2Deps = {
     msgId: string,
     content: string,
     status: "ready" | "failed",
+    sessionEnded?: boolean,
   ) => Promise<void>;
 };
 
@@ -100,6 +103,16 @@ function publicDemoSession(s: DemoSession) {
     rubricScores: s.rubricScores,
     feedback: s.feedback,
   };
+}
+
+// Demo sessions signal an ended-by-vulgarity session the same way real
+// sessions do: `status === VULGAR_ENDED_STATUS` (see server/vulgarBait.ts).
+// publicDemoSession already forwards `status` as-is, so the frontend can read
+// this straight off the session object; kept as a tiny named helper anyway so
+// the check has one obvious spelling everywhere it's needed, matching how
+// closeCheckpoint is a named concept on the real-session side.
+function isDemoSessionEnded(s: { status: string }): boolean {
+  return s.status === VULGAR_ENDED_STATUS;
 }
 
 // Loads the six v2 scenario rows and shapes them into picker candidates, in the
@@ -326,6 +339,13 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       const scenario = await loadDemoScenario(session.scenarioId);
       if (!scenario) return res.status(404).json({ message: "Conversation not found" });
 
+      // A session already ended by the second vulgar/belligerent strike is
+      // terminal (see server/vulgarBait.ts): reject/no-op instead of letting a
+      // stray retry re-open or re-score it.
+      if (isDemoSessionEnded(session)) {
+        return res.status(409).json({ message: "session_ended", sessionEnded: true });
+      }
+
       const voiceUnlocked = isVoiceUnlockedForDemo(session.paidSessionId, signup.email);
       const { content, withAudio, stream } = req.body ?? {};
       const useAudio = Boolean(withAudio) && voiceUnlocked;
@@ -339,6 +359,36 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       );
 
       const msgId = randomUUID();
+
+      // Same up-front vulgar-bait short-circuit as the real-session message
+      // route (see server/routes.ts for the full rationale): checked here so
+      // the /message response can synchronously tell the frontend sessionEnded
+      // even for the streaming/voice branch below, and so a baiting message
+      // never burns an LLM call. getCustomerReply/streamCustomerReply still
+      // hold the single source of truth for the actual reply-selection logic
+      // (checkVulgarBaitStrike in server/llm.ts); this just reads the same
+      // derivation early enough to route around the SSE hand-off entirely.
+      const strike = checkVulgarBaitStrike(transcript);
+      if (strike) {
+        transcript.push(
+          transcriptMessageSchema.parse({
+            role: "customer",
+            content: strike.text,
+            audioStatus: "none",
+            msgId,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+        if (strike.sessionEnded) {
+          // Terminal: end the session, do not score it -- this was never a
+          // real practice attempt to grade.
+          patch.status = VULGAR_ENDED_STATUS;
+          patch.completedAt = new Date().toISOString();
+        }
+        const updated = await storage.updateDemoSession(session.id, patch);
+        return res.json({ session: publicDemoSession(updated!), sessionEnded: strike.sessionEnded });
+      }
 
       if (stream && useAudio) {
         transcript.push(
@@ -361,11 +411,11 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       }
 
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
+      const customerReply = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, 0, variantSection);
       transcript.push(
         transcriptMessageSchema.parse({
           role: "customer",
-          content: customerReplyText,
+          content: customerReply.text,
           audioStatus: useAudio ? "pending" : "none",
           audioUrl: useAudio ? `${DEMO_API_BASE}/session/${session.id}/audio-stream/${msgId}` : undefined,
           msgId,
@@ -373,8 +423,18 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
         }),
       );
 
-      const updated = await storage.updateDemoSession(session.id, { transcript: JSON.stringify(transcript) });
-      res.json({ session: publicDemoSession(updated!) });
+      // Defense-in-depth mirror of the real-session route: customerReply.sessionEnded
+      // should already have been caught by the up-front `strike` check above, but
+      // handle it here too in case getCustomerReply's own internal check is what
+      // actually fired.
+      const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+      if (customerReply.sessionEnded) {
+        patch.status = VULGAR_ENDED_STATUS;
+        patch.completedAt = new Date().toISOString();
+      }
+
+      const updated = await storage.updateDemoSession(session.id, patch);
+      res.json({ session: publicDemoSession(updated!), sessionEnded: customerReply.sessionEnded });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
@@ -432,17 +492,29 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       variantSection: sessionVariantSection(scenario, { id: session.id, personaVariant: null }),
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
-      persist: (content, status) =>
-        updateDemoMsgContentAndStatus(session.id, req.params.msgId, content, status),
+      persist: (content, status, sessionEnded) =>
+        updateDemoMsgContentAndStatus(session.id, req.params.msgId, content, status, sessionEnded),
     });
   });
 
   // End and score. The scoreTranscript call is byte-for-byte the v1/real call
-  // with the same four arguments, so the rubric, the 85 standard, the beginner
-  // leniency, and the score cache all apply unchanged. Two additions over v1,
-  // both borrowed from real sessions: the completeness gate, so a two-line
-  // conversation is not scored as a legitimate attempt, and the stalled-step
-  // diagnosis in the payload.
+  // with the same four arguments (plus, demo-only, the noRecommendationHint
+  // deps field below), so the rubric, the 85 standard, the beginner leniency,
+  // and the score cache all apply unchanged.
+  //
+  // UNLIKE the real-session /complete route in server/routes.ts, this route no
+  // longer blocks on hasProposedRecommendation. A visitor only gets one demo
+  // attempt (see the frontend's one-shot confirm dialog in demo-v2.tsx), so
+  // refusing to score an incomplete one just leaves them with nothing --
+  // exactly what happened in the real incident this change exists for (a
+  // hostile demo conversation that never reached a recommendation, correctly
+  // 409'd by the old gate, but with no visible way for the visitor to force a
+  // score). Instead, whether a recommendation was ever proposed is threaded
+  // into scoreTranscript as a hint so the coaching feedback addresses the gap
+  // directly rather than blocking completion outright. `force` is still
+  // accepted on the request body for backward compatibility with any
+  // in-flight frontend build, but is now unused -- there is no gate left to
+  // force past.
   app.post(`${DEMO_API_BASE}/session/:id/complete`, async (req, res) => {
     try {
       const signup = await requireDemoSignup(req, res);
@@ -453,16 +525,17 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       }
       const transcript = JSON.parse(session.transcript);
 
-      if (!req.body?.force) {
-        const proposed = await hasProposedRecommendation(transcript);
-        if (!proposed) {
-          return res.status(409).json({ message: "incomplete", incomplete: true });
-        }
-      }
+      const proposed = await hasProposedRecommendation(transcript);
 
       const scenario = await loadDemoScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
+      const { rubric, feedback, overall } = await scoreTranscript(
+        transcript,
+        scenario?.difficulty,
+        track,
+        scenario?.transactionType,
+        { noRecommendationHint: !proposed },
+      );
       const updated = await storage.updateDemoSession(session.id, {
         status: "completed",
         score: overall,

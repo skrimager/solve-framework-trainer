@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike } from "./llm";
+import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -1073,6 +1074,13 @@ export async function registerRoutes(
       const { content, withAudio, stream } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);
 
+      // A session already ended by the second vulgar/belligerent strike is
+      // terminal (see server/vulgarBait.ts): reject/no-op instead of letting a
+      // stray retry re-open or re-score it.
+      if (session.status === VULGAR_ENDED_STATUS) {
+        return res.status(409).json({ message: "session_ended", sessionEnded: true });
+      }
+
       const consultantMsg = transcriptMessageSchema.parse({
         role: "consultant",
         content,
@@ -1088,6 +1096,42 @@ export async function registerRoutes(
       const closeCheckpoint = detectCloseIntent(content);
 
       const msgId = randomUUID();
+
+      // Vulgar/belligerent bait is checked up front, here, in addition to inside
+      // getCustomerReply/streamCustomerReply themselves. Those functions are what
+      // actually decide the scripted reply text (single source of truth, see
+      // checkVulgarBaitStrike in server/llm.ts -- this call below does not
+      // duplicate that decision, it reads the exact same derivation) but the
+      // /message response itself also needs to tell the frontend sessionEnded
+      // synchronously, and for the streaming branch that answer would otherwise
+      // not be knowable until the separate /turn-stream request finishes. Doing
+      // the check here lets a strike short-circuit straight to a normal JSON
+      // reply -- bypassing the SSE placeholder/streaming path entirely for that
+      // turn -- so voice mode gets the same synchronous signal text mode does,
+      // and a baiting message never burns an LLM call either way.
+      const strike = checkVulgarBaitStrike(transcript);
+      if (strike) {
+        const customerMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: strike.text,
+          audioStatus: "none",
+          msgId,
+          timestamp: new Date().toISOString(),
+        });
+        transcript.push(customerMsg);
+
+        const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+        if (strike.sessionEnded) {
+          // Terminal: end the session, do not score it. No
+          // score/rubricScores/feedback are written -- this was never a real
+          // practice attempt to grade.
+          sessionPatch.status = VULGAR_ENDED_STATUS;
+          sessionPatch.completedAt = new Date().toISOString();
+        }
+        const updated = await storage.updateSession(session.id, sessionPatch);
+        res.json({ ...updated, closeCheckpoint, sessionEnded: strike.sessionEnded });
+        return;
+      }
 
       // Streaming voice path: do NOT block on the full reply here. Append the
       // consultant turn plus an empty customer placeholder, persist, and hand the
@@ -1122,11 +1166,11 @@ export async function registerRoutes(
       const escalationTier = await computeSessionEscalationTier(session, scenario);
 
       const variantSection = sessionVariantSection(scenario, session);
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
+      const customerReply = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
 
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",
-        content: customerReplyText,
+        content: customerReply.text,
         audioStatus: withAudio ? "pending" : "none",
         // Point at the streaming endpoint up front. The client plays it as soon
         // as the reply arrives (playback starts on the first chunk); the same
@@ -1137,12 +1181,21 @@ export async function registerRoutes(
       });
       transcript.push(customerMsg);
 
+      // customerReply.sessionEnded can only be true here if checkVulgarBaitStrike
+      // above somehow missed it and getCustomerReply's own internal check caught
+      // it instead (defense in depth, not the expected path since both read the
+      // same transcript) -- handle it the same way regardless of which check
+      // actually fired.
+      const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+      if (customerReply.sessionEnded) {
+        sessionPatch.status = VULGAR_ENDED_STATUS;
+        sessionPatch.completedAt = new Date().toISOString();
+      }
+
       // Respond immediately with the text reply. Audio is synthesized lazily and
       // streamed when the client requests the audio-stream URL above.
-      const updated = await storage.updateSession(session.id, {
-        transcript: JSON.stringify(transcript),
-      });
-      res.json({ ...updated, closeCheckpoint });
+      const updated = await storage.updateSession(session.id, sessionPatch);
+      res.json({ ...updated, closeCheckpoint, sessionEnded: customerReply.sessionEnded });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
@@ -1334,7 +1387,8 @@ export async function registerRoutes(
       scenario,
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
-      persist: (content, status) => updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status),
+      persist: (content, status, sessionEnded) =>
+        updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status, sessionEnded),
     });
   });
 
@@ -4355,11 +4409,20 @@ async function computeSessionEscalationTier(session: Session, scenario: Scenario
 // Fills in a previously-created placeholder customer message with its final text
 // and audio status once the streamed reply has finished. Keeps replay working:
 // the persisted content is what /audio-stream re-synthesizes for later playback.
-async function updateSessionMsgContentAndStatus(
+//
+// `sessionEnded` is true only when the streamed reply was the second vulgar/
+// belligerent strike (see checkVulgarBaitStrike in server/llm.ts, threaded
+// through server/turnStream.ts's persist callback). When true this also ends
+// the session as a terminal state -- status + completedAt -- exactly like the
+// non-streaming /message branch does; the voice/streaming path must not be a
+// way to bypass that behavior just because the strike was detected mid-stream
+// instead of before the SSE hand-off.
+export async function updateSessionMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getSession(sessionId);
   if (!latest) return;
@@ -4367,16 +4430,22 @@ async function updateSessionMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateSession(sessionId, patch);
 }
 
 // The demo's counterpart to updateSessionMsgContentAndStatus, writing to
-// demo_sessions instead of sessions.
-async function updateDemoMsgContentAndStatus(
+// demo_sessions instead of sessions. Same sessionEnded handling as above.
+export async function updateDemoMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getDemoSession(sessionId);
   if (!latest) return;
@@ -4384,7 +4453,12 @@ async function updateDemoMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateDemoSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateDemoSession(sessionId, patch);
 }
 
 interface RunTurnStreamOptions {
@@ -4393,7 +4467,7 @@ interface RunTurnStreamOptions {
   scenario: Scenario;
   voice: string;
   instructions?: string;
-  persist: (content: string, status: MsgAudioStatus) => Promise<void>;
+  persist: (content: string, status: MsgAudioStatus, sessionEnded: boolean) => Promise<void>;
 }
 
 // One streamed customer turn for a real trainee session. Derives the inputs that

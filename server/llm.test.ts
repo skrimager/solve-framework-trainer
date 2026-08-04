@@ -8,9 +8,13 @@ import {
   CONVERSATION_REALISM_RULES,
   computeScoreCacheHash,
   scoreTranscript,
+  getCustomerReply,
+  streamCustomerReply,
+  checkVulgarBaitStrike,
   type ScoreResponder,
   type ScoreCacheStore,
 } from "./llm";
+import { detectVulgarBait, countPriorVulgarStrikes, VULGAR_STRIKE_ONE_REPLY, VULGAR_STRIKE_TWO_REPLY } from "./vulgarBait";
 import type { TranscriptMessage, ScoreCache, InsertScoreCache } from "@shared/schema";
 
 const PERSONA = "You are Denise, 52, looking at a home in a manufactured-housing community.";
@@ -2111,3 +2115,189 @@ describe("worked example (spec): the premature warranty question", () => {
 function escapeForRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ===========================================================================
+// Vulgar/belligerent bait: detection, strike bookkeeping, and the scripted
+// reply/session-ending behavior in getCustomerReply + streamCustomerReply.
+// ===========================================================================
+// The live incident this covers: a consultant sent hostile/dismissive lines
+// ("fuck off", "sorry not worth my time") at the simulated customer and the
+// session never reached a recommendation. See server/vulgarBait.ts.
+
+describe("detectVulgarBait", () => {
+  test("flags common profanity as a whole word", () => {
+    assert.equal(detectVulgarBait("fuck off, I'm done here"), true);
+    assert.equal(detectVulgarBait("this is bullshit"), true);
+    assert.equal(detectVulgarBait("you're an asshole"), true);
+  });
+
+  test("flags multi-word bait phrases even without a listed single word", () => {
+    assert.equal(detectVulgarBait("sorry not worth my time, piss off"), true);
+    assert.equal(detectVulgarBait("go to hell with this demo"), true);
+  });
+
+  test("does not false-positive inside an unrelated longer word", () => {
+    // "assassin" contains "ass" but must not trip an "asshole"-style match; more
+    // to the point, word-boundary matching must not fire on substrings that
+    // merely contain a banned word as part of a longer, unrelated word.
+    assert.equal(detectVulgarBait("classic assessment of the market"), false);
+  });
+
+  test("ordinary consultant language never flags", () => {
+    assert.equal(detectVulgarBait("What's your timeline for moving?"), false);
+    assert.equal(detectVulgarBait("Let's talk about your budget."), false);
+  });
+
+  test("empty or whitespace-only text never flags", () => {
+    assert.equal(detectVulgarBait(""), false);
+    assert.equal(detectVulgarBait("   "), false);
+  });
+});
+
+describe("countPriorVulgarStrikes", () => {
+  test("counts only consultant turns, and only the ones that flag", () => {
+    const transcript = [
+      msg("customer", "What's your best price?"),
+      msg("consultant", "fuck off, just give me a number"),
+      msg("customer", "Haha, that's funny..."),
+      msg("consultant", "Sorry, let's get back to it. What's your budget?"),
+      msg("customer", "Around $20,000."),
+    ];
+    assert.equal(countPriorVulgarStrikes(transcript), 1);
+  });
+
+  test("a customer turn containing a flagged word is never counted (role must be consultant)", () => {
+    const transcript = [msg("customer", "Are you fucking kidding me with this price")];
+    assert.equal(countPriorVulgarStrikes(transcript), 0);
+  });
+
+  test("a clean transcript counts zero strikes", () => {
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    assert.equal(countPriorVulgarStrikes(transcript), 0);
+  });
+});
+
+describe("checkVulgarBaitStrike", () => {
+  test("no strike when the transcript has no consultant turn yet", () => {
+    assert.equal(checkVulgarBaitStrike([msg("customer", "Hi there.")]), null);
+  });
+
+  test("no strike when the last consultant message is clean, even if an earlier one was vulgar", () => {
+    // The vulgar check only ever looks at the LAST consultant turn for whether
+    // THIS turn is a strike; an earlier flagged turn still counts toward the
+    // running total (see the next test), but a clean latest turn is not itself
+    // a new strike.
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "Sorry about that. What's your budget?"),
+    ];
+    assert.equal(checkVulgarBaitStrike(transcript), null);
+  });
+
+  test("first offense returns the scripted strike-one reply and does not end the session", () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+
+  test("second offense returns the scripted strike-two reply and ends the session", () => {
+    const transcript = [
+      msg("customer", "What's your best price?"),
+      msg("consultant", "fuck off, just answer"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+  });
+
+  test("the in-flight consultant message itself is excluded from the prior-strike count", () => {
+    // Only one PRIOR consultant turn was vulgar; the current (last) one is the
+    // second vulgar turn overall, so this call must see priorStrikes = 1 and
+    // report the ending strike, not miscount it as strike 1 again or as strike 3.
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "still not worth my time, piss off"),
+    ];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.equal(result?.sessionEnded, true);
+  });
+});
+
+// These prove the model is genuinely never invoked on a strike, for BOTH the
+// non-streaming and streaming reply paths -- not merely that the code LOOKS
+// like it returns early. The suite runs with OPENAI_API_KEY=sk-test-dummy and
+// no network mocking, so a real (unmocked) OpenAI call synchronously rejects
+// with AuthenticationError before any request completes. If either function's
+// early-return were removed or bypassed, these tests would fail with that
+// same AuthenticationError instead of resolving.
+describe("getCustomerReply / streamCustomerReply - vulgar strikes never reach the model", () => {
+  test("getCustomerReply: first strike resolves with the scripted line and sessionEnded=false, without calling OpenAI", async () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = await getCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+
+  test("getCustomerReply: second strike resolves with the scripted ending line and sessionEnded=true, without calling OpenAI", async () => {
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const result = await getCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+  });
+
+  test("getCustomerReply: a clean transcript is NOT short-circuited (it genuinely reaches the model and fails on the dummy key)", async () => {
+    // Sanity check for the two tests above: proves the dummy-key/no-mock setup
+    // really does fail when the strike short-circuit does NOT apply, so their
+    // passing is meaningful rather than an artifact of every call succeeding
+    // regardless of path.
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    await assert.rejects(getCustomerReply(PERSONA, transcript, "beginner", 0, ""));
+  });
+
+  test("streamCustomerReply: first strike sends the scripted line through onSentence exactly once, sessionEnded=false, without calling OpenAI", async () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const sentences: Array<{ text: string; index: number }> = [];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "", (text, index) =>
+      sentences.push({ text, index }),
+    );
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+    // Voice mode gets the strike line the same way it gets any normal sentence:
+    // via onSentence, so the caller's TTS pipeline (deps.synthesize in
+    // server/turnStream.ts) synthesizes it exactly like ordinary customer
+    // speech, rather than the strike silently becoming text-only.
+    assert.deepEqual(sentences, [{ text: VULGAR_STRIKE_ONE_REPLY, index: 0 }]);
+  });
+
+  test("streamCustomerReply: second strike sends the scripted ending line through onSentence, sessionEnded=true, without calling OpenAI", async () => {
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const sentences: Array<{ text: string; index: number }> = [];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "", (text, index) =>
+      sentences.push({ text, index }),
+    );
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+    assert.deepEqual(sentences, [{ text: VULGAR_STRIKE_TWO_REPLY, index: 0 }]);
+  });
+
+  test("streamCustomerReply: a clean transcript is NOT short-circuited (it genuinely reaches the model and fails on the dummy key)", async () => {
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    await assert.rejects(streamCustomerReply(PERSONA, transcript, "beginner", 0, "", () => {}));
+  });
+
+  test("streamCustomerReply: onSentence works even with no handler passed (default no-op), first strike", async () => {
+    // streamCustomerReply's onSentence parameter defaults to a no-op, so a
+    // caller that omits it (unlikely in practice, but the signature allows it)
+    // must not throw when a strike fires.
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+});
