@@ -473,6 +473,7 @@ describe("public demo endpoints", () => {
       leads.push(created);
       return created;
     };
+    (storage as any).listContacts = async () => leads;
     (storage as any).listDemoSessionsByFingerprint = async (fp: string) =>
       sessions.filter((s) => s.deviceFingerprint === fp);
     (storage as any).listDemoSessionsByIp = async (ip: string) =>
@@ -490,6 +491,16 @@ describe("public demo endpoints", () => {
     __setFetchForTests(null);
     delete process.env.RESEND_API_KEY;
   });
+
+  // Flushes the microtask/macrotask queue enough times for a fire-and-forget
+  // `void enrollX(...)` call (awaited internally, but never awaited by the
+  // caller) to finish, so its effects can be asserted after the HTTP response
+  // has already returned.
+  async function flushAsync(rounds = 10): Promise<void> {
+    for (let i = 0; i < rounds; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
 
   let ipCounter = 0;
   function freshIp(): string {
@@ -640,6 +651,95 @@ describe("public demo endpoints", () => {
     assert.equal(body.verified, true);
     assert.equal(body.limitReached, true);
     assert.equal(body.token, undefined);
+  });
+
+  test("verify creates exactly one Contact with source voice_demo on first verification", async () => {
+    signups.push({
+      id: 1,
+      email: "shane9399@gmail.com",
+      code: "444444",
+      codeExpiresAt: codeExpiryFrom(Date.now()),
+      verified: false,
+      sessionsUsed: 0,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastSentAt: null,
+    } as DemoSignup);
+    // The shared updateDemoSignup mock mutates the signup object in place,
+    // which would flip signup.verified to true before the handler's own
+    // `if (!signup.verified)` check runs (the real DB-backed implementation
+    // never mutates its input -- it returns a fresh row via `.returning()`).
+    // Override it here to match production semantics for this test.
+    (storage as any).updateDemoSignup = async (id: number, patch: any) => {
+      const s = signups.find((x) => x.id === id);
+      if (!s) return undefined;
+      const updated = { ...s, ...patch };
+      const idx = signups.indexOf(s);
+      signups[idx] = updated;
+      return updated;
+    };
+    const res = await post("/api/demo/verify", { email: "shane9399@gmail.com", code: "444444" });
+    assert.equal(res.status, 200);
+    // enrollDemoVoiceContact is fire-and-forget; flush the microtask queue so
+    // its (mocked, synchronous-resolving) storage calls have settled.
+    await flushAsync();
+    assert.equal(leads.length, 1);
+    assert.equal(leads[0].email, "shane9399@gmail.com");
+    assert.equal(leads[0].source, "voice_demo");
+    assert.equal(leads[0].type, "role_play");
+    assert.equal(leads[0].name, "Shane9399");
+  });
+
+  test("verifying an already-verified signup again does not create a duplicate Contact", async () => {
+    signups.push({
+      id: 1,
+      email: "repeat@example.com",
+      code: "555555",
+      codeExpiresAt: codeExpiryFrom(Date.now()),
+      verified: true,
+      sessionsUsed: 0,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastSentAt: null,
+    } as DemoSignup);
+    // Simulate the second (repeat) code cycle: a fresh code on an already-verified signup.
+    (storage as any).getDemoSignupByEmail = async () => signups[0];
+    const res = await post("/api/demo/verify", { email: "repeat@example.com", code: "555555" });
+    assert.equal(res.status, 200);
+    await flushAsync();
+    assert.equal(leads.length, 0, "the outer !signup.verified guard should prevent any enrollment call at all");
+  });
+
+  test("verify still returns 200 with a token even if contact creation fails", async () => {
+    signups.push({
+      id: 1,
+      email: "willfail@example.com",
+      code: "666666",
+      codeExpiresAt: codeExpiryFrom(Date.now()),
+      verified: false,
+      sessionsUsed: 0,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastSentAt: null,
+    } as DemoSignup);
+    (storage as any).listContacts = async () => {
+      throw new Error("simulated DB failure");
+    };
+    // Same non-mutating override as above, so this test actually exercises the
+    // enrollDemoVoiceContact call path (first verification) rather than
+    // accidentally skipping it because of the shared mock's mutate-in-place quirk.
+    (storage as any).updateDemoSignup = async (id: number, patch: any) => {
+      const s = signups.find((x) => x.id === id);
+      if (!s) return undefined;
+      const updated = { ...s, ...patch };
+      const idx = signups.indexOf(s);
+      signups[idx] = updated;
+      return updated;
+    };
+    const res = await post("/api/demo/verify", { email: "willfail@example.com", code: "666666" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.verified, true);
+    assert.ok(body.token, "the response must still carry a demo token even when contact creation blows up");
+    await flushAsync();
+    // No throw escaped, and the process/response above already proved it never blocked.
   });
 
   // The session-start tests below all pass an `industry`, because the live

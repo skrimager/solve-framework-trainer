@@ -19,6 +19,13 @@ import {
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
+  DEFAULT_STATUS,
+  VOICE_DEMO_SOURCE,
+  VOICE_DEMO_TYPE,
+  humanizeEmailLocalPart,
+  buildVoiceDemoContact,
+  hasVoiceDemoContact,
+  enrollDemoVoiceContact,
 } from "./contacts";
 import type { AdminUser, Contact, ContactEvent } from "@shared/schema";
 
@@ -603,5 +610,152 @@ describe("admin contacts HTTP routes", () => {
       const res = await fetch(`${baseUrl}${path}`, { method });
       assert.equal(res.status, 401, `${method} ${path} should be 401 without a session`);
     }
+  });
+});
+
+// ===========================================================================
+// Voice-demo Contact auto-creation (pure unit tests, no DB, no HTTP).
+// See server/demo.test.ts for the /api/demo/verify integration coverage.
+// ===========================================================================
+
+describe("humanizeEmailLocalPart", () => {
+  test("capitalizes a plain local-part", () => {
+    assert.equal(humanizeEmailLocalPart("shane9399@gmail.com"), "Shane9399");
+  });
+
+  test("splits on dots/dashes/underscores/plus into separate capitalized words", () => {
+    assert.equal(humanizeEmailLocalPart("jacquelyn.foland@outlook.com"), "Jacquelyn Foland");
+    assert.equal(humanizeEmailLocalPart("tina-ann_rivers+demo@riversteamaz.com"), "Tina Ann Rivers Demo");
+  });
+
+  test("lowercases the rest of an all-caps or mixed-case word", () => {
+    assert.equal(humanizeEmailLocalPart("OZLENG@yahoo.com"), "Ozleng");
+  });
+});
+
+describe("buildVoiceDemoContact", () => {
+  test("maps every field per spec, tagged with the voice_demo source", () => {
+    const row = buildVoiceDemoContact("kasotharvey@gmail.com", "2026-06-01T12:00:00.000Z");
+    assert.equal(row.name, "Kasotharvey");
+    assert.equal(row.email, "kasotharvey@gmail.com");
+    assert.equal(row.company, null);
+    assert.equal(row.message, "Signed up for the SOLVE voice demo.");
+    assert.equal(row.source, VOICE_DEMO_SOURCE);
+    assert.equal(row.source, "voice_demo");
+    assert.equal(row.type, VOICE_DEMO_TYPE);
+    assert.equal(row.type, "role_play");
+    assert.equal(row.priority, DEFAULT_PRIORITY);
+    assert.equal(row.status, DEFAULT_STATUS);
+    assert.equal(row.status, "new");
+    assert.equal(row.createdAt, "2026-06-01T12:00:00.000Z");
+  });
+
+  test("uses the exact createdAt passed in (backdating support for the backfill script)", () => {
+    const row = buildVoiceDemoContact("ozleng@yahoo.com", "2025-01-15T08:30:00.000Z");
+    assert.equal(row.createdAt, "2025-01-15T08:30:00.000Z");
+  });
+});
+
+describe("hasVoiceDemoContact", () => {
+  test("true when a voice_demo contact exists for the email, case-insensitively", () => {
+    const existing = [contact({ email: "Shane9399@Gmail.com", source: "voice_demo" })];
+    assert.equal(hasVoiceDemoContact(existing, "shane9399@gmail.com"), true);
+  });
+
+  test("false when the only existing contact for that email has a different source", () => {
+    // e.g. sheld68@gmail.com / ksyost@pldi.net already have CTA-form (role_play) rows.
+    const existing = [contact({ email: "sheld68@gmail.com", source: "role_play" })];
+    assert.equal(hasVoiceDemoContact(existing, "sheld68@gmail.com"), false);
+  });
+
+  test("false when no contact exists for that email at all", () => {
+    assert.equal(hasVoiceDemoContact([], "nobody@example.com"), false);
+  });
+});
+
+describe("enrollDemoVoiceContact", () => {
+  test("creates exactly one Contact with source voice_demo on first verification", async () => {
+    const created: Contact[] = [];
+    const deps = {
+      storage: {
+        listContacts: async () => [] as Contact[],
+        createLead: async (row: any) => {
+          const c = { id: created.length + 1, ...row } as Contact;
+          created.push(c);
+          return c;
+        },
+      },
+      now: () => new Date("2026-08-01T00:00:00.000Z"),
+    };
+    await enrollDemoVoiceContact(deps, { email: "new-lead@example.com" });
+    assert.equal(created.length, 1);
+    assert.equal(created[0].email, "new-lead@example.com");
+    assert.equal(created[0].source, "voice_demo");
+    assert.equal(created[0].type, "role_play");
+    assert.equal(created[0].createdAt, "2026-08-01T00:00:00.000Z");
+  });
+
+  test("does not create a duplicate when a voice_demo contact already exists for the email", async () => {
+    let createCalls = 0;
+    const deps = {
+      storage: {
+        listContacts: async () => [contact({ email: "repeat@example.com", source: "voice_demo" })],
+        createLead: async (row: any) => {
+          createCalls += 1;
+          return { id: 99, ...row } as Contact;
+        },
+      },
+    };
+    await enrollDemoVoiceContact(deps, { email: "repeat@example.com" });
+    assert.equal(createCalls, 0);
+  });
+
+  test("still creates a voice_demo contact even if a role_play (CTA form) contact already exists for the email", async () => {
+    let createCalls = 0;
+    const deps = {
+      storage: {
+        listContacts: async () => [contact({ email: "both-forms@example.com", source: "role_play" })],
+        createLead: async (row: any) => {
+          createCalls += 1;
+          return { id: 1, ...row } as Contact;
+        },
+      },
+    };
+    await enrollDemoVoiceContact(deps, { email: "both-forms@example.com" });
+    assert.equal(createCalls, 1, "a separate CTA-form lead must not block the voice-demo contact");
+  });
+
+  test("never throws when storage rejects (best-effort, same posture as enrollDemoDrip)", async () => {
+    const deps = {
+      storage: {
+        listContacts: async () => {
+          throw new Error("db down");
+        },
+        createLead: async () => {
+          throw new Error("should not be reached");
+        },
+      },
+    };
+    await assert.doesNotReject(enrollDemoVoiceContact(deps, { email: "x@example.com" }));
+  });
+
+  test("checks archived contacts too, so an archived voice_demo row still blocks a duplicate", async () => {
+    let createCalls = 0;
+    const seenFilters: unknown[] = [];
+    const deps = {
+      storage: {
+        listContacts: async (filters?: unknown) => {
+          seenFilters.push(filters);
+          return [contact({ email: "archived@example.com", source: "voice_demo", archivedAt: "2026-01-01T00:00:00.000Z" })];
+        },
+        createLead: async (row: any) => {
+          createCalls += 1;
+          return { id: 1, ...row } as Contact;
+        },
+      },
+    };
+    await enrollDemoVoiceContact(deps, { email: "archived@example.com" });
+    assert.equal(createCalls, 0);
+    assert.deepEqual(seenFilters[0], { archived: "all" });
   });
 });

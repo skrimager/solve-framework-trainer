@@ -109,6 +109,7 @@ import {
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
+  enrollDemoVoiceContact,
   type ContactArchiveView,
   type ContactFilters,
 } from "./contacts";
@@ -2049,6 +2050,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // throws, so it can never block or fail the verify response.
     if (!signup.verified) {
       void enrollDemoDrip({ storage, send: sendInboundEmail }, { id: signup.id, email });
+      // Also auto-create a Contact so this lead shows up in the admin Contacts
+      // tab for manual follow-up. Same fire-and-forget/best-effort posture as
+      // enrollDemoDrip above: never awaited, never throws, so it can never
+      // block or change this endpoint's response either way.
+      void enrollDemoVoiceContact({ storage }, { email });
     }
 
     if (isSessionLimitReached(signup.sessionsUsed, email)) {
