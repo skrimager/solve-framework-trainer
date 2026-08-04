@@ -25,6 +25,15 @@ export const offices = pgTable("offices", {
   // Null = active; a value = archived (hidden from the default Sales list but
   // reversible via unarchive). Never touches Stripe or dependent rows.
   archivedAt: text("archived_at"),
+  // Per-office Command Center widget visibility, JSON text (same convention as
+  // sessions.rubricScores/transcript): { [widgetKey: string]: boolean }. NULL
+  // means "no preferences saved yet" -> every widget defaults to visible (see
+  // DEFAULT_DASHBOARD_WIDGET_CONFIG in server/routes.ts). A widget key missing
+  // from a saved config also defaults to visible, so shipping a brand new
+  // widget in a later release never silently hides it for offices that
+  // customized their dashboard before that widget existed. Full drag-and-drop
+  // ordering is a future phase; this only ever stores on/off booleans.
+  dashboardWidgetConfig: text("dashboard_widget_config"),
 });
 
 export const insertOfficeSchema = createInsertSchema(offices).omit({
