@@ -4026,6 +4026,648 @@ export function buildDashboardStats(
   };
 }
 
+// ===========================================================================
+// Command Center widget data — additive analytics for the redesigned manager
+// dashboard (mission-control style). Every value here is DERIVED from the
+// same real users/sessions/scenarios rows buildDashboardStats already reads;
+// nothing is mocked. Kept as its own pure builder (buildCommandCenterExtras)
+// so it is unit-testable exactly like buildDashboardStats, and so the
+// original function/tests above are untouched.
+// ===========================================================================
+
+// The full set of togglable widget keys, in their default display order. This
+// is the single source of truth for both the settings UI and the "missing key
+// defaults to visible" rule, so a newly shipped widget is never silently
+// hidden for an office that saved a config before that widget existed.
+export const DASHBOARD_WIDGET_KEYS = [
+  "teamHealth",
+  "conversations",
+  "completionRate",
+  "certifications",
+  "alerts",
+  "liveFeed",
+  "performanceOverTime",
+  "skillRadar",
+  "topPerformers",
+  "conversationOutcomes",
+  "scoreDistribution",
+  "achievements",
+  "popularScenarios",
+  "ctaPanel",
+  "summaryStrip",
+] as const;
+export type DashboardWidgetKey = (typeof DASHBOARD_WIDGET_KEYS)[number];
+export type DashboardWidgetConfig = Record<string, boolean>;
+
+// Every widget defaults to visible when an office has never saved a config —
+// matches the reference design's full layout, and the spec's "default state:
+// all widgets visible" requirement.
+export function defaultDashboardWidgetConfig(): DashboardWidgetConfig {
+  return Object.fromEntries(DASHBOARD_WIDGET_KEYS.map((k) => [k, true]));
+}
+
+// Parses the office's stored dashboardWidgetConfig JSON text into a full,
+// defaulted config: unknown/malformed JSON, a non-object, or a missing key all
+// fall back to "visible", so this function can never make a widget disappear
+// that the manager didn't explicitly turn off.
+export function resolveDashboardWidgetConfig(raw: string | null | undefined): DashboardWidgetConfig {
+  const defaults = defaultDashboardWidgetConfig();
+  if (!raw) return defaults;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return defaults;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults;
+  const merged: DashboardWidgetConfig = { ...defaults };
+  for (const key of DASHBOARD_WIDGET_KEYS) {
+    const value = (parsed as Record<string, unknown>)[key];
+    if (typeof value === "boolean") merged[key] = value;
+  }
+  return merged;
+}
+
+// Team Health Score: a single 0-100 composite so a manager can gauge "is my
+// office doing well" at a glance, built entirely from real signals already on
+// the dashboard — no separate/invented metric. Weighted: 50% team average
+// score (quality), 30% completion rate (follow-through), 20% activity rate
+// (share of consultants who are seat-active AND practiced in the period).
+// Any signal that has no data yet is excluded and the remaining weights are
+// re-normalized, so an office with zero sessions doesn't get unfairly zeroed
+// out on quality alone.
+export function computeTeamHealthScore(input: {
+  teamAverageScore: number | null;
+  completionRate: number | null; // 0-100
+  activityRate: number | null; // 0-100
+}): number | null {
+  const parts: { value: number; weight: number }[] = [];
+  if (input.teamAverageScore !== null) parts.push({ value: input.teamAverageScore, weight: 0.5 });
+  if (input.completionRate !== null) parts.push({ value: input.completionRate, weight: 0.3 });
+  if (input.activityRate !== null) parts.push({ value: input.activityRate, weight: 0.2 });
+  if (parts.length === 0) return null;
+  const totalWeight = parts.reduce((sum, p) => sum + p.weight, 0);
+  const weighted = parts.reduce((sum, p) => sum + p.value * p.weight, 0);
+  return Math.round(weighted / totalWeight);
+}
+
+// Score-band distribution across ALL scored completed sessions in the period
+// (not per-consultant), matching the reference "Score Distribution" bar chart.
+// Bands are fixed and always returned in order, even at zero, so the chart
+// never reflows.
+const SCORE_BANDS: { key: string; label: string; min: number; max: number }[] = [
+  { key: "0-59", label: "0-59", min: 0, max: 59 },
+  { key: "60-69", label: "60-69", min: 60, max: 69 },
+  { key: "70-79", label: "70-79", min: 70, max: 79 },
+  { key: "80-89", label: "80-89", min: 80, max: 89 },
+  { key: "90-100", label: "90-100", min: 90, max: 100 },
+];
+
+export function computeScoreDistribution(
+  scores: number[],
+): { band: string; count: number; percent: number }[] {
+  const total = scores.length;
+  return SCORE_BANDS.map(({ key, label, min, max }) => {
+    const count = scores.filter((s) => s >= min && s <= max).length;
+    return {
+      band: label,
+      count,
+      percent: total > 0 ? Math.round((count / total) * 100) : 0,
+    };
+  }).map(({ band, count, percent }) => ({ band, count, percent }));
+}
+
+// Conversation Outcomes donut: buckets every session in the period into one of
+// four REAL, derivable states (no invented "deal outcome" field exists on
+// sessions, so this reuses status + score, the only outcome signals that
+// actually exist):
+//   Successful  — completed AND scored >= SUCCESS_SCORE (strong session)
+//   Converted   — completed AND scored, below SUCCESS_SCORE but still scored
+//   In Progress — status 'in_progress' or 'saved' (not yet finished)
+//   No Outcome  — completed but never scored (scoring failed/unavailable)
+const OUTCOME_SUCCESS_SCORE = 85;
+
+export function computeConversationOutcomes(
+  sessionsInPeriod: Pick<Session, "status" | "score">[],
+): { outcome: string; count: number }[] {
+  let successful = 0;
+  let converted = 0;
+  let inProgress = 0;
+  let noOutcome = 0;
+  for (const s of sessionsInPeriod) {
+    if (s.status === "completed") {
+      if (s.score === null) noOutcome += 1;
+      else if (s.score >= OUTCOME_SUCCESS_SCORE) successful += 1;
+      else converted += 1;
+    } else {
+      inProgress += 1;
+    }
+  }
+  return [
+    { outcome: "Successful", count: successful },
+    { outcome: "Converted", count: converted },
+    { outcome: "In Progress", count: inProgress },
+    { outcome: "No Outcome", count: noOutcome },
+  ];
+}
+
+// Alerts: consultants who genuinely need a manager's attention right now.
+// Every reason is derived from real fields already on `users`/`sessions`:
+//   - inactive: seat-active consultant with no completed session in the
+//     lookback window (default 14 days) — going quiet.
+//   - lowScore: seat-active consultant whose average over their last few
+//     scored sessions has fallen below the streak-qualifying bar.
+// A consultant can trigger multiple reasons; the alert count is the number of
+// consultants with at least one reason (not the number of reasons), so the
+// KPI strip count matches "how many people need a look", not double-counted.
+const ALERT_INACTIVITY_DAYS = 14;
+const ALERT_RECENT_SESSION_SAMPLE = 3;
+
+export function computeAlerts(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  now: Date,
+): { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[] {
+  const cutoff = now.getTime() - ALERT_INACTIVITY_DAYS * ONE_DAY_MS;
+  const alerts: { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[] = [];
+  for (const u of consultants) {
+    if (!u.seatActive) continue;
+    const mine = sessionsByUser.get(u.id) ?? [];
+    const completed = mine.filter((s) => s.status === "completed");
+    const reasons: ("inactive" | "lowScore")[] = [];
+
+    const lastCompletedAt = completed
+      .map((s) => s.completedAt ?? s.createdAt)
+      .filter((d): d is string => Boolean(d))
+      .sort()
+      .at(-1);
+    if (!lastCompletedAt || new Date(lastCompletedAt).getTime() < cutoff) {
+      reasons.push("inactive");
+    }
+
+    const recentScored = completed
+      .filter((s) => s.score !== null)
+      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
+      .slice(0, ALERT_RECENT_SESSION_SAMPLE);
+    if (recentScored.length > 0) {
+      const avg = recentScored.reduce((sum, s) => sum + (s.score as number), 0) / recentScored.length;
+      if (avg < STREAK_QUALIFYING_SCORE) reasons.push("lowScore");
+    }
+
+    if (reasons.length > 0) alerts.push({ id: u.id, displayName: u.displayName, reasons });
+  }
+  return alerts;
+}
+
+// Live Feed: a chronological stream of real recent events a manager would
+// want to see at a glance — certifications earned, high-scoring completed
+// sessions, and any completed session in general — each with a real
+// timestamp. Built entirely from users/sessions rows already fetched for the
+// rest of the dashboard; nothing here is a separate event log.
+const LIVE_FEED_HIGH_SCORE = 90;
+
+export type LiveFeedEvent = {
+  id: string;
+  type: "certification" | "high_score" | "session_completed";
+  userId: number;
+  displayName: string;
+  detail: string;
+  occurredAt: string;
+};
+
+export function buildLiveFeed(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  limit = 12,
+): LiveFeedEvent[] {
+  const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+  const userById = new Map(officeUsers.map((u) => [u.id, u]));
+  const events: LiveFeedEvent[] = [];
+
+  for (const u of officeUsers) {
+    if (u.consultingCertifiedAt) {
+      events.push({
+        id: `cert-consulting-${u.id}`,
+        type: "certification",
+        userId: u.id,
+        displayName: u.displayName,
+        detail: "Earned Consulting Certification",
+        occurredAt: u.consultingCertifiedAt,
+      });
+    }
+    if (u.leadershipCertifiedAt) {
+      events.push({
+        id: `cert-leadership-${u.id}`,
+        type: "certification",
+        userId: u.id,
+        displayName: u.displayName,
+        detail: "Earned Leadership Certification",
+        occurredAt: u.leadershipCertifiedAt,
+      });
+    }
+  }
+
+  for (const s of officeSessions) {
+    if (s.status !== "completed" || !s.completedAt) continue;
+    const user = userById.get(s.userId);
+    if (!user) continue;
+    const scenario = scenarioById.get(s.scenarioId);
+    const scenarioTitle = scenario?.title ?? "a scenario";
+    if (s.score !== null && s.score >= LIVE_FEED_HIGH_SCORE) {
+      events.push({
+        id: `score-${s.id}`,
+        type: "high_score",
+        userId: user.id,
+        displayName: user.displayName,
+        detail: `Scored ${s.score} on ${scenarioTitle}`,
+        occurredAt: s.completedAt,
+      });
+    } else {
+      events.push({
+        id: `session-${s.id}`,
+        type: "session_completed",
+        userId: user.id,
+        displayName: user.displayName,
+        detail: `Completed ${scenarioTitle}`,
+        occurredAt: s.completedAt,
+      });
+    }
+  }
+
+  return events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, limit);
+}
+
+// Popular Scenarios This Week: the scenarios with the most completed sessions
+// in the period, each with the office's average score on it and its session
+// count — matches the reference's card grid exactly, using only real
+// scenario/session rows.
+export function computePopularScenarios(
+  sessionsInPeriod: Session[],
+  allScenarios: Scenario[],
+  limit = 5,
+): { scenarioId: number; title: string; vertical: string; averageScore: number | null; sessionCount: number }[] {
+  const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+  const byScenario = new Map<number, Session[]>();
+  for (const s of sessionsInPeriod) {
+    if (s.status !== "completed") continue;
+    const list = byScenario.get(s.scenarioId) ?? [];
+    list.push(s);
+    byScenario.set(s.scenarioId, list);
+  }
+  return Array.from(byScenario.entries())
+    .map(([scenarioId, list]) => {
+      const scenario = scenarioById.get(scenarioId);
+      const scored = list.filter((s) => s.score !== null);
+      const averageScore = scored.length
+        ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+        : null;
+      return {
+        scenarioId,
+        title: scenario?.title ?? "Unknown scenario",
+        vertical: scenario?.vertical ?? "unknown",
+        averageScore,
+        sessionCount: list.length,
+      };
+    })
+    .sort((a, b) => b.sessionCount - a.sessionCount)
+    .slice(0, limit);
+}
+
+// Recent Achievements: derived badges, NOT a new parallel badge system (there
+// is no existing badges/achievements table in shared/schema.ts — confirmed by
+// search before writing this). Every badge below is computed purely from
+// fields that already exist: certification flags, the leaderboard rank order,
+// individual session scores, and the real practice-streak calculation used
+// elsewhere on this dashboard (computeStreak). This keeps "Recent Achievements"
+// honest: it is a presentation layer over data the app already tracks, not a
+// second source of truth.
+export type Achievement = {
+  id: string;
+  userId: number;
+  displayName: string;
+  badge: "gold_achiever" | "silver_achiever" | "top_performer" | "role_play_master" | "streak_master";
+  label: string;
+  earnedAt: string | null;
+};
+
+const STREAK_MASTER_DAYS = 5;
+const ROLE_PLAY_MASTER_SESSIONS = 25;
+
+export function computeAchievements(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  leaderboard: { id: number; displayName: string; averageScore: number | null }[],
+  now: Date,
+  limit = 8,
+): Achievement[] {
+  const achievements: Achievement[] = [];
+
+  for (const u of consultants) {
+    if (u.consultingCertifiedAt) {
+      achievements.push({
+        id: `gold-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "gold_achiever",
+        label: "Gold Achiever",
+        earnedAt: u.consultingCertifiedAt,
+      });
+    }
+    if (u.leadershipCertifiedAt) {
+      achievements.push({
+        id: `silver-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "silver_achiever",
+        label: "Silver Achiever",
+        earnedAt: u.leadershipCertifiedAt,
+      });
+    }
+
+    const mine = sessionsByUser.get(u.id) ?? [];
+    const completedCount = mine.filter((s) => s.status === "completed").length;
+    if (completedCount >= ROLE_PLAY_MASTER_SESSIONS) {
+      const lastCompletedAt = mine
+        .filter((s) => s.status === "completed")
+        .map((s) => s.completedAt)
+        .filter((d): d is string => Boolean(d))
+        .sort()
+        .at(-1) ?? null;
+      achievements.push({
+        id: `roleplay-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "role_play_master",
+        label: "Role Play Master",
+        earnedAt: lastCompletedAt,
+      });
+    }
+
+    const streak = computeStreak(mine, now);
+    if (streak >= STREAK_MASTER_DAYS) {
+      achievements.push({
+        id: `streak-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "streak_master",
+        label: "Streak Master",
+        earnedAt: now.toISOString(),
+      });
+    }
+  }
+
+  // Top Performer: the #1 ranked consultant on the leaderboard (if any have a
+  // scored average) — exactly one badge, matching "Top Performer" being a
+  // single-holder title in the reference design.
+  const top = leaderboard.find((l) => l.averageScore !== null);
+  if (top) {
+    achievements.push({
+      id: `top-${top.id}`,
+      userId: top.id,
+      displayName: top.displayName,
+      badge: "top_performer",
+      label: "Top Performer",
+      earnedAt: now.toISOString(),
+    });
+  }
+
+  return achievements
+    .sort((a, b) => (b.earnedAt ?? "").localeCompare(a.earnedAt ?? ""))
+    .slice(0, limit);
+}
+
+// Trend delta helper: percentage change from a prior-period value to a current
+// value, matching the reference's "+14% vs last 7 days" style deltas. Returns
+// null when the prior value is 0 (division by zero / no baseline) so the UI
+// can render "—" instead of a misleading Infinity/NaN.
+export function percentDelta(current: number, previous: number): number | null {
+  if (previous === 0) return current === 0 ? 0 : null;
+  return Math.round(((current - previous) / previous) * 100);
+}
+
+// Pure aggregation of the additional Command Center widget data, split out
+// from buildDashboardStats so the original, already-tested function is never
+// touched. `now` and the office's saved widget config are both injectable for
+// deterministic tests.
+export function buildCommandCenterExtras(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  now: Date = new Date(),
+) {
+  const consultants = officeUsers.filter((u) => u.role === "consultant");
+  const sessionsByUser = groupSessionsByUser(officeSessions);
+
+  const periodDays = DASHBOARD_PERIOD_DAYS;
+  const periodSince = new Date(now.getTime() - periodDays * ONE_DAY_MS);
+  const priorPeriodSince = new Date(periodSince.getTime() - periodDays * ONE_DAY_MS);
+
+  const inPeriod = (iso: string | null) => !!iso && new Date(iso) >= periodSince;
+  const inPriorPeriod = (iso: string | null) =>
+    !!iso && new Date(iso) >= priorPeriodSince && new Date(iso) < periodSince;
+
+  const sessionsThisPeriod = officeSessions.filter((s) => inPeriod(s.completedAt ?? (s.status !== "completed" ? s.createdAt : null)));
+  const completedThisPeriod = officeSessions.filter((s) => s.status === "completed" && inPeriod(s.completedAt));
+  const completedPriorPeriod = officeSessions.filter((s) => s.status === "completed" && inPriorPeriod(s.completedAt));
+  const startedThisPeriod = officeSessions.filter((s) => inPeriod(s.createdAt));
+  const startedPriorPeriod = officeSessions.filter((s) => inPriorPeriod(s.createdAt));
+
+  // --- Conversations (this week vs last week) ---
+  const conversationsThisPeriod = completedThisPeriod.length;
+  const conversationsPriorPeriod = completedPriorPeriod.length;
+  const conversationsDelta = percentDelta(conversationsThisPeriod, conversationsPriorPeriod);
+  const conversationsSparkline = sparklineByDay(completedThisPeriod, periodSince, now);
+
+  // --- Completion rate (completed / started, this week vs last week) ---
+  const completionRateFor = (started: Session[], completed: Session[]) =>
+    started.length > 0 ? Math.round((completed.length / started.length) * 100) : null;
+  const completionRateThisPeriod = completionRateFor(startedThisPeriod, completedThisPeriod);
+  const completionRatePriorPeriod = completionRateFor(startedPriorPeriod, completedPriorPeriod);
+  const completionRateDelta =
+    completionRateThisPeriod !== null && completionRatePriorPeriod !== null
+      ? percentDelta(completionRateThisPeriod, completionRatePriorPeriod)
+      : null;
+
+  // --- Certifications earned this period vs prior period ---
+  const certifiedThisPeriod = officeUsers.filter(
+    (u) => inPeriod(u.consultingCertifiedAt) || inPeriod(u.leadershipCertifiedAt),
+  ).length;
+  const certifiedPriorPeriod = officeUsers.filter(
+    (u) => inPriorPeriod(u.consultingCertifiedAt) || inPriorPeriod(u.leadershipCertifiedAt),
+  ).length;
+  const certificationsDelta = percentDelta(certifiedThisPeriod, certifiedPriorPeriod);
+
+  // --- Team average score, this week vs last week (for Team Health delta) ---
+  const avgScoreOf = (list: Session[]) => {
+    const scored = list.filter((s) => s.score !== null);
+    return scored.length
+      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+      : null;
+  };
+  const teamAverageThisPeriod = avgScoreOf(completedThisPeriod);
+  const teamAveragePriorPeriod = avgScoreOf(completedPriorPeriod);
+
+  const activeConsultantCount = consultants.filter((u) => u.seatActive).length;
+  const activityRateThisPeriod =
+    consultants.length > 0
+      ? Math.round(
+          (consultants.filter((u) => (sessionsByUser.get(u.id) ?? []).some((s) => s.status === "completed" && inPeriod(s.completedAt)))
+            .length /
+            consultants.length) *
+            100,
+        )
+      : null;
+  const activityRatePriorPeriod =
+    consultants.length > 0
+      ? Math.round(
+          (consultants.filter((u) => (sessionsByUser.get(u.id) ?? []).some((s) => s.status === "completed" && inPriorPeriod(s.completedAt)))
+            .length /
+            consultants.length) *
+            100,
+        )
+      : null;
+
+  const teamHealthScore = computeTeamHealthScore({
+    teamAverageScore: teamAverageThisPeriod,
+    completionRate: completionRateThisPeriod,
+    activityRate: activityRateThisPeriod,
+  });
+  const teamHealthPrior = computeTeamHealthScore({
+    teamAverageScore: teamAveragePriorPeriod,
+    completionRate: completionRatePriorPeriod,
+    activityRate: activityRatePriorPeriod,
+  });
+  const teamHealthDelta =
+    teamHealthScore !== null && teamHealthPrior !== null ? percentDelta(teamHealthScore, teamHealthPrior) : null;
+
+  // --- Performance over time: office avg vs the office's own top-20% cohort,
+  // by completion day. "Top 20%" and "office avg" are BOTH scoped to this
+  // office's own consultants only — never a cross-office/company comparison,
+  // since offices must never see another office's performance data (and no
+  // internal SOLVE Framework business data belongs on this screen either).
+  const performanceOverTime = buildPerformanceOverTime(officeSessions, consultants, sessionsByUser, periodSince, now);
+
+  // --- Score distribution + conversation outcomes, scoped to this period ---
+  const scoresThisPeriod = completedThisPeriod.filter((s) => s.score !== null).map((s) => s.score as number);
+  const scoreDistribution = computeScoreDistribution(scoresThisPeriod);
+  const conversationOutcomes = computeConversationOutcomes(sessionsThisPeriod);
+
+  // --- Alerts, live feed, popular scenarios, achievements ---
+  const alerts = computeAlerts(consultants, sessionsByUser, now);
+  const liveFeed = buildLiveFeed(officeUsers, officeSessions, allScenarios, 12);
+  const popularScenarios = computePopularScenarios(completedThisPeriod, allScenarios, 5);
+  const leaderboardForBadges = consultants.map((u) => {
+    const scored = (sessionsByUser.get(u.id) ?? []).filter((s) => s.status === "completed" && s.score !== null);
+    const averageScore = scored.length
+      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+      : null;
+    return { id: u.id, displayName: u.displayName, averageScore };
+  }).sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1));
+  const achievements = computeAchievements(consultants, sessionsByUser, leaderboardForBadges, now, 8);
+
+  // --- Bottom summary strip ---
+  const totalSessionsAllTime = officeSessions.length;
+  const hoursTrainedThisPeriod = Math.round(
+    completedThisPeriod.reduce((sum, s) => sum + (s.durationSeconds ?? 0), 0) / 3600,
+  );
+  const goalProgress = teamHealthScore; // office's own composite health score doubles as "goal progress" (0-100); no separate goal-setting UI exists yet.
+
+  return {
+    teamHealth: { score: teamHealthScore, deltaPercent: teamHealthDelta },
+    conversations: {
+      count: conversationsThisPeriod,
+      deltaPercent: conversationsDelta,
+      sparkline: conversationsSparkline,
+    },
+    completionRate: { percent: completionRateThisPeriod, deltaPercent: completionRateDelta },
+    certifications: { count: certifiedThisPeriod, deltaPercent: certificationsDelta },
+    alerts,
+    liveFeed,
+    performanceOverTime,
+    scoreDistribution,
+    conversationOutcomes,
+    popularScenarios,
+    achievements,
+    summaryStrip: {
+      teamMembersActive: activeConsultantCount,
+      totalSessions: totalSessionsAllTime,
+      avgScore: teamAverageThisPeriod,
+      goalProgress,
+      certificationsTotal: officeUsers.filter((u) => u.consultingCertified || u.leadershipCertified).length,
+      hoursTrainedThisPeriod,
+    },
+  };
+}
+
+// Sparkline: an ordered array of daily completed-session counts across the
+// period window, oldest first, for tiny inline trend charts on KPI cards.
+function sparklineByDay(completed: Session[], since: Date, until: Date): number[] {
+  const byDay = new Map<string, number>();
+  const cursor = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate()));
+  const end = new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), until.getUTCDate()));
+  while (cursor <= end) {
+    byDay.set(utcDayKey(cursor), 0);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  for (const s of completed) {
+    const day = (s.completedAt ?? "").slice(0, 10);
+    if (byDay.has(day)) byDay.set(byDay.get(day) !== undefined ? day : day, (byDay.get(day) ?? 0) + 1);
+  }
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, count]) => count);
+}
+
+// Team Performance Over Time: by completion day within the period, the
+// office's overall average score vs the average of just its top-20% cohort
+// (ranked by all-time average score). Both series are scoped to this office
+// only. Days with no scored session in a series simply carry null so the
+// chart shows a gap rather than a misleading dip to zero.
+function buildPerformanceOverTime(
+  officeSessions: Session[],
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  since: Date,
+  until: Date,
+): { date: string; teamScore: number | null; top20: number | null }[] {
+  const ranking = rankConsultantsByAverageScore(consultants, sessionsByUser).filter((r) => r.averageScore !== null);
+  const top20Count = Math.max(1, Math.ceil(ranking.length * 0.2));
+  const top20Ids = new Set(ranking.slice(0, top20Count).map((r) => r.id));
+
+  const days: string[] = [];
+  const cursor = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate()));
+  const end = new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), until.getUTCDate()));
+  while (cursor <= end) {
+    days.push(utcDayKey(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  const byDayAll = new Map<string, { total: number; count: number }>();
+  const byDayTop = new Map<string, { total: number; count: number }>();
+  for (const s of officeSessions) {
+    if (s.status !== "completed" || s.score === null || !s.completedAt) continue;
+    const day = s.completedAt.slice(0, 10);
+    if (!days.includes(day)) continue;
+    const bucketAll = byDayAll.get(day) ?? { total: 0, count: 0 };
+    bucketAll.total += s.score;
+    bucketAll.count += 1;
+    byDayAll.set(day, bucketAll);
+    if (top20Ids.has(s.userId)) {
+      const bucketTop = byDayTop.get(day) ?? { total: 0, count: 0 };
+      bucketTop.total += s.score;
+      bucketTop.count += 1;
+      byDayTop.set(day, bucketTop);
+    }
+  }
+
+  return days.map((date) => ({
+    date,
+    teamScore: byDayAll.has(date) ? Math.round(byDayAll.get(date)!.total / byDayAll.get(date)!.count) : null,
+    top20: byDayTop.has(date) ? Math.round(byDayTop.get(date)!.total / byDayTop.get(date)!.count) : null,
+  }));
+}
+
 export function registerManagerDashboardRoutes(app: Express): void {
   // Office-scoped aggregate analytics for the manager command center. Reuses the
   // same manager/QA + own-office authorization as the roster routes.
@@ -4059,6 +4701,92 @@ export function registerManagerDashboardRoutes(app: Express): void {
     ]);
 
     res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios, new Date(), officeCredits));
+  });
+
+  // Additive Command Center widget data (team health, live feed, outcomes,
+  // score distribution, achievements, popular scenarios, etc.) — same
+  // manager/QA + own-office + paid-add-on gating as /dashboard-stats above,
+  // kept as a separate endpoint so the original dashboard-stats response
+  // shape (and its existing tests) are never touched.
+  app.get("/api/manager/dashboard-command-center", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+
+    res.json({
+      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, new Date()),
+      widgetConfig: resolveDashboardWidgetConfig(office?.dashboardWidgetConfig ?? null),
+    });
+  });
+
+  // Per-office widget visibility config: manager-only, own-office-only read
+  // and write of which Command Center widgets are shown. Missing keys always
+  // default to visible (see resolveDashboardWidgetConfig), and a PUT only
+  // ever touches the dashboardWidgetConfig column — no other office fields.
+  app.get("/api/manager/dashboard-widget-config", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view dashboard settings" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    res.json({ widgetConfig: resolveDashboardWidgetConfig(office.dashboardWidgetConfig ?? null) });
+  });
+
+  app.put("/api/manager/dashboard-widget-config", async (req, res) => {
+    const requesterId = Number(req.body?.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can change dashboard settings" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    const incoming = req.body?.widgetConfig;
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+      return res.status(400).json({ message: "widgetConfig must be an object of widget key -> boolean" });
+    }
+    // Merge onto the office's current saved config (not the request body raw)
+    // so a partial toggle payload can never accidentally reset unrelated
+    // widgets back to their defaults.
+    const current = resolveDashboardWidgetConfig(office.dashboardWidgetConfig ?? null);
+    const merged: DashboardWidgetConfig = { ...current };
+    for (const key of DASHBOARD_WIDGET_KEYS) {
+      const value = (incoming as Record<string, unknown>)[key];
+      if (typeof value === "boolean") merged[key] = value;
+    }
+
+    const updated = await storage.updateOffice(office.id, { dashboardWidgetConfig: JSON.stringify(merged) });
+    res.json({ widgetConfig: resolveDashboardWidgetConfig(updated?.dashboardWidgetConfig ?? null) });
   });
 }
 
