@@ -351,7 +351,7 @@ export default function ManagerLogin() {
                       onChange={(e) => setUsername(e.target.value)}
                       autoComplete="username"
                       required
-                      className="pl-9 text-white placeholder:text-slate-500"
+                      className="manager-login-input pl-9 text-white placeholder:text-slate-500"
                       style={{
                         backgroundColor: "rgba(5,12,28,0.6)",
                         borderColor: "rgba(148,197,255,0.25)",
@@ -381,7 +381,7 @@ export default function ManagerLogin() {
                       onChange={(e) => setPassword(e.target.value)}
                       autoComplete="current-password"
                       required
-                      className="pl-9 pr-10 text-white placeholder:text-slate-500"
+                      className="manager-login-input pl-9 pr-10 text-white placeholder:text-slate-500"
                       style={{
                         backgroundColor: "rgba(5,12,28,0.6)",
                         borderColor: "rgba(148,197,255,0.25)",
