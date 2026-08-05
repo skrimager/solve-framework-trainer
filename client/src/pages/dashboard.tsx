@@ -50,6 +50,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
@@ -143,6 +144,7 @@ type CommandCenterExtras = {
     displayName: string;
     detail: string;
     occurredAt: string;
+    sessionId: number | null;
   }[];
   performanceOverTime: { date: string; teamScore: number | null; top20: number | null }[];
   scoreDistribution: { band: string; count: number; percent: number }[];
@@ -371,7 +373,7 @@ export default function Dashboard() {
               extrasLoading={extrasLoading}
               office={office}
               isManager={user?.role === "manager"}
-              navigate={navigate}
+              onGoToScenarios={() => setSection("scenarios")}
             />
           )}
           {section === "team" && (
@@ -549,7 +551,7 @@ function chartTooltipStyle() {
 function DeltaBadge({ value, testId }: { value: number | null; testId?: string }) {
   if (value === null) {
     return (
-      <span className="text-[11px] font-medium text-white/35" data-testid={testId}>
+      <span className="text-xs font-medium text-white/35" data-testid={testId}>
         No prior data
       </span>
     );
@@ -558,11 +560,88 @@ function DeltaBadge({ value, testId }: { value: number | null; testId?: string }
   const color = up ? GREEN_LIGHT : RED_LIGHT;
   const Icon = up ? TrendingUp : TrendingDown;
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] font-semibold" style={{ color }} data-testid={testId}>
-      <Icon className="w-3 h-3" />
+    <span
+      className="inline-flex items-center gap-1 text-base font-bold leading-none whitespace-nowrap"
+      style={{ color }}
+      data-testid={testId}
+    >
+      <Icon className="w-4 h-4 shrink-0" />
       {up ? "+" : ""}
       {value}%
     </span>
+  );
+}
+
+// Turns a raw alert record (id/displayName/reasons) into the human-readable
+// sentences a manager actually needs, e.g. "Jordan Reyes hasn't practiced in
+// 15+ days." A consultant with multiple reasons gets one line per reason.
+function alertMessages(alert: CommandCenterExtras["alerts"][number]): string[] {
+  return alert.reasons.map((reason) => {
+    if (reason === "inactive") {
+      return `${alert.displayName} hasn't practiced in 14+ days.`;
+    }
+    return `${alert.displayName}'s recent scores have dropped below the qualifying bar.`;
+  });
+}
+
+// The ALERTS KPI card. Clicking it opens a modal listing what the alerts
+// actually are, derived from real consultant data (session recency, score
+// trend) already computed server-side in computeAlerts.
+function AlertsCard({ alerts }: { alerts: CommandCenterExtras["alerts"] }) {
+  const [open, setOpen] = useState(false);
+  const rows = alerts.flatMap((a) => alertMessages(a).map((text, i) => ({ key: `${a.id}-${i}`, text })));
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="rounded-xl border p-4 flex flex-col justify-between lg:col-span-1 text-left w-full transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2"
+        style={{ backgroundColor: NAVY, borderColor: `${RED}45` }}
+        data-testid="kpi-alerts"
+      >
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Alerts</p>
+          <Bell className="w-3.5 h-3.5" style={{ color: RED_LIGHT }} />
+        </div>
+        <p className="text-2xl font-bold" style={{ color: RED_LIGHT }}>
+          {alerts.length}
+        </p>
+        <p className="text-[11px] font-medium text-white/50">Needs your attention</p>
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent
+          className="border"
+          style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+          data-testid="modal-alerts"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <Bell className="w-4 h-4" style={{ color: RED_LIGHT }} />
+              Alerts
+            </DialogTitle>
+            <DialogDescription className="text-white/55">
+              Consultants who need a look, based on session recency and recent scores.
+            </DialogDescription>
+          </DialogHeader>
+          {rows.length === 0 ? (
+            <EmptyState message="No alerts right now, your team is on track." testId="empty-alerts-modal" />
+          ) : (
+            <ul className="space-y-2" data-testid="list-alerts-modal">
+              {rows.map((r) => (
+                <li
+                  key={r.key}
+                  className="rounded-lg px-3 py-2.5 text-sm text-white/85"
+                  style={{ backgroundColor: PANEL }}
+                  data-testid={`alert-row-${r.key}`}
+                >
+                  {r.text}
+                </li>
+              ))}
+            </ul>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -641,7 +720,7 @@ function CommandCenterSection({
   extrasLoading,
   office,
   isManager,
-  navigate,
+  onGoToScenarios,
 }: {
   stats?: DashboardStats;
   statsLoading: boolean;
@@ -650,7 +729,7 @@ function CommandCenterSection({
   extrasLoading: boolean;
   office?: Office;
   isManager: boolean;
-  navigate: (path: string) => void;
+  onGoToScenarios: () => void;
 }) {
   if (locked) return <AddOnLocked office={office} isManager={isManager} />;
 
@@ -691,7 +770,9 @@ function CommandCenterSection({
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Team Health Score</p>
                 <div className="mt-2 flex items-center gap-3">
                   <RingGauge value={extras.teamHealth.score} color={GREEN_LIGHT} />
-                  <DeltaBadge value={extras.teamHealth.deltaPercent} testId="delta-team-health" />
+                  <div className="min-w-0">
+                    <DeltaBadge value={extras.teamHealth.deltaPercent} testId="delta-team-health" />
+                  </div>
                 </div>
               </div>
             )}
@@ -699,7 +780,9 @@ function CommandCenterSection({
               <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${BLUE}30` }} data-testid="kpi-conversations">
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Conversations</p>
                 <p className="mt-2 text-2xl font-bold text-white">{extras.conversations.count}</p>
-                <DeltaBadge value={extras.conversations.deltaPercent} testId="delta-conversations" />
+                <div className="mt-1">
+                  <DeltaBadge value={extras.conversations.deltaPercent} testId="delta-conversations" />
+                </div>
                 <div className="mt-2">
                   <Sparkline data={extras.conversations.sparkline} color={BLUE_LIGHT} />
                 </div>
@@ -711,33 +794,22 @@ function CommandCenterSection({
                 <p className="mt-2 text-2xl font-bold text-white">
                   {extras.completionRate.percent !== null ? `${extras.completionRate.percent}%` : "—"}
                 </p>
-                <DeltaBadge value={extras.completionRate.deltaPercent} testId="delta-completion-rate" />
+                <div className="mt-1">
+                  <DeltaBadge value={extras.completionRate.deltaPercent} testId="delta-completion-rate" />
+                </div>
               </div>
             )}
             {show("certifications") && (
               <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${GOLD}30` }} data-testid="kpi-certifications-earned">
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Certifications Earned</p>
                 <p className="mt-2 text-2xl font-bold text-white">{extras.certifications.count}</p>
-                <DeltaBadge value={extras.certifications.deltaPercent} testId="delta-certifications" />
+                <div className="mt-1">
+                  <DeltaBadge value={extras.certifications.deltaPercent} testId="delta-certifications" />
+                </div>
               </div>
             )}
           </div>
-          {show("alerts") && (
-            <div
-              className="rounded-xl border p-4 flex flex-col justify-between lg:col-span-1"
-              style={{ backgroundColor: NAVY, borderColor: `${RED}45` }}
-              data-testid="kpi-alerts"
-            >
-              <div className="flex items-center justify-between">
-                <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Alerts</p>
-                <Bell className="w-3.5 h-3.5" style={{ color: RED_LIGHT }} />
-              </div>
-              <p className="text-2xl font-bold" style={{ color: RED_LIGHT }}>
-                {extras.alerts.length}
-              </p>
-              <p className="text-[11px] font-medium text-white/50">Needs your attention</p>
-            </div>
-          )}
+          {show("alerts") && <AlertsCard alerts={extras.alerts} />}
         </div>
       )}
 
@@ -866,7 +938,7 @@ function CommandCenterSection({
               <PopularScenariosGrid scenarios={extras.popularScenarios} />
             </Panel>
           )}
-          {show("ctaPanel") && <ElevateTeamCta navigate={navigate} />}
+          {show("ctaPanel") && <ElevateTeamCta onGoToScenarios={onGoToScenarios} />}
         </div>
       )}
 
@@ -877,6 +949,7 @@ function CommandCenterSection({
 }
 
 function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
+  const [openSessionId, setOpenSessionId] = useState<number | null>(null);
   if (events.length === 0) {
     return <EmptyState message="No recent activity yet" testId="empty-live-feed" />;
   }
@@ -886,32 +959,155 @@ function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
     return { Icon: MessageSquareText, color: BLUE_LIGHT };
   };
   return (
-    <ul className="space-y-2 max-h-[22rem] overflow-y-auto pr-1" data-testid="list-live-feed">
-      {events.map((e) => {
-        const { Icon, color } = iconFor(e.type);
-        return (
-          <li
-            key={e.id}
-            className="flex items-start gap-2.5 rounded-lg px-3 py-2"
-            style={{ backgroundColor: PANEL }}
-            data-testid={`live-feed-row-${e.id}`}
-          >
-            <span
-              className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
-              style={{ backgroundColor: `${color}22`, color }}
-              aria-hidden="true"
-            >
-              <Icon className="h-3.5 w-3.5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium text-white truncate">{e.displayName}</p>
-              <p className="text-xs text-white/55 truncate">{e.detail}</p>
+    <>
+      <ul className="space-y-2 max-h-[22rem] overflow-y-auto pr-1" data-testid="list-live-feed">
+        {events.map((e) => {
+          const { Icon, color } = iconFor(e.type);
+          const clickable = e.sessionId !== null;
+          return (
+            <li key={e.id}>
+              <button
+                type="button"
+                disabled={!clickable}
+                onClick={() => clickable && setOpenSessionId(e.sessionId)}
+                className={`flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left transition-colors ${
+                  clickable ? "cursor-pointer hover:brightness-110 focus:outline-none focus-visible:ring-2" : "cursor-default"
+                }`}
+                style={{ backgroundColor: PANEL }}
+                data-testid={`live-feed-row-${e.id}`}
+              >
+                <span
+                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
+                  style={{ backgroundColor: `${color}22`, color }}
+                  aria-hidden="true"
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-white truncate">{e.displayName}</p>
+                  <p className="text-xs text-white/55 truncate">{e.detail}</p>
+                </div>
+                <span className="shrink-0 text-[10px] text-white/35 whitespace-nowrap">{fmtRelativeTime(e.occurredAt)}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
+    </>
+  );
+}
+
+type ManagerSessionDetail = {
+  id: number;
+  consultantId: number;
+  consultantName: string;
+  scenarioTitle: string;
+  vertical: string | null;
+  status: string;
+  score: number | null;
+  rubricScores: Record<string, number> | null;
+  feedback: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+const ALL_RUBRIC_LABELS: Record<string, string> = {
+  // Consulting/discovery rubric (the five SOLVE dimensions).
+  needsDiscovery: "Needs Discovery",
+  objectionPrevention: "Objection Prevention",
+  trustBuilding: "Trust Building",
+  naturalClose: "Natural Close",
+  relationshipContinuity: "Relationship Continuity",
+  // Leadership / conflict-management rubric.
+  activeListening: "Active Listening",
+  empathyAcknowledgment: "Empathy Acknowledgment",
+  rootCauseDiscovery: "Root Cause Discovery",
+  solutionVisualization: "Solution Visualization",
+  blamelessResolution: "Blameless Resolution",
+};
+
+function fmtFullDate(iso: string | null): string {
+  if (!iso) return "Not completed";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Not completed";
+  return d.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+// Session detail modal opened from a Live Feed entry. Fetches the full,
+// untruncated session record from the manager-scoped endpoint (own-office
+// consultants only, see GET /api/manager/session/:id in server/routes.ts).
+function SessionDetailModal({ sessionId, onClose }: { sessionId: number | null; onClose: () => void }) {
+  const { user } = useAuth();
+  const { data, isLoading, isError } = useQuery<ManagerSessionDetail>({
+    queryKey: [`/api/manager/session/${sessionId}?requesterId=${user?.id}`],
+    enabled: sessionId !== null && !!user,
+  });
+
+  return (
+    <Dialog open={sessionId !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent
+        className="border max-h-[85vh] overflow-y-auto"
+        style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+        data-testid="modal-session-detail"
+      >
+        <DialogHeader>
+          <DialogTitle className="text-white">Session detail</DialogTitle>
+          <DialogDescription className="text-white/55">
+            Full scenario, score, and rubric breakdown for this completed session.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <Skeleton className="h-48 rounded-lg" />}
+        {isError && (
+          <p className="text-sm text-white/60" data-testid="text-session-detail-error">
+            Couldn't load this session. It may belong to a different office.
+          </p>
+        )}
+        {data && (
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-semibold text-white" data-testid="text-session-detail-consultant">
+                {data.consultantName}
+              </p>
+              <p className="text-sm text-white/70" data-testid="text-session-detail-scenario">
+                {data.scenarioTitle}
+              </p>
+              <p className="text-xs text-white/40 mt-1" data-testid="text-session-detail-completed-at">
+                Completed {fmtFullDate(data.completedAt)}
+              </p>
             </div>
-            <span className="shrink-0 text-[10px] text-white/35 whitespace-nowrap">{fmtRelativeTime(e.occurredAt)}</span>
-          </li>
-        );
-      })}
-    </ul>
+            <div className="flex items-center gap-3 rounded-lg px-3 py-2.5" style={{ backgroundColor: PANEL }}>
+              <span className="text-xs uppercase tracking-wide text-white/45">Score</span>
+              <span className="text-2xl font-bold" style={{ color: GREEN_LIGHT }} data-testid="text-session-detail-score">
+                {data.score ?? "—"}
+              </span>
+            </div>
+            {data.rubricScores && (
+              <div>
+                <p className="text-xs uppercase tracking-wide text-white/45 mb-2">Rubric breakdown</p>
+                <ul className="space-y-1.5" data-testid="list-session-detail-rubric">
+                  {Object.entries(data.rubricScores).map(([key, value]) => (
+                    <li key={key} className="flex items-center justify-between text-sm">
+                      <span className="text-white/70">{ALL_RUBRIC_LABELS[key] ?? key}</span>
+                      <span className="font-semibold text-white">{value}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {data.feedback && (
+              <div>
+                <p className="text-xs uppercase tracking-wide text-white/45 mb-1">Feedback</p>
+                <p className="text-sm text-white/70 whitespace-pre-wrap">{data.feedback}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1076,7 +1272,7 @@ function PopularScenariosGrid({ scenarios }: { scenarios: CommandCenterExtras["p
   );
 }
 
-function ElevateTeamCta({ navigate }: { navigate: (path: string) => void }) {
+function ElevateTeamCta({ onGoToScenarios }: { onGoToScenarios: () => void }) {
   return (
     <div
       className="rounded-xl border p-5 flex flex-col justify-between gap-4 relative overflow-hidden"
@@ -1100,7 +1296,7 @@ function ElevateTeamCta({ navigate }: { navigate: (path: string) => void }) {
       <div className="relative flex flex-col gap-2">
         <Button
           type="button"
-          onClick={() => navigate("/command-center")}
+          onClick={onGoToScenarios}
           className="gap-1.5 justify-start"
           style={{ backgroundColor: BLUE, color: "white" }}
           data-testid="button-go-training-center"

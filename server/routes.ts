@@ -4426,6 +4426,10 @@ export type LiveFeedEvent = {
   displayName: string;
   detail: string;
   occurredAt: string;
+  // The backing session id, so a manager can click through to full session
+  // detail (GET /api/manager/session/:id). Null for certification events,
+  // which have no single backing session.
+  sessionId: number | null;
 };
 
 export function buildLiveFeed(
@@ -4447,6 +4451,7 @@ export function buildLiveFeed(
         displayName: u.displayName,
         detail: "Earned Consulting Certification",
         occurredAt: u.consultingCertifiedAt,
+        sessionId: null,
       });
     }
     if (u.leadershipCertifiedAt) {
@@ -4457,6 +4462,7 @@ export function buildLiveFeed(
         displayName: u.displayName,
         detail: "Earned Leadership Certification",
         occurredAt: u.leadershipCertifiedAt,
+        sessionId: null,
       });
     }
   }
@@ -4475,6 +4481,7 @@ export function buildLiveFeed(
         displayName: user.displayName,
         detail: `Scored ${s.score} on ${scenarioTitle}`,
         occurredAt: s.completedAt,
+        sessionId: s.id,
       });
     } else {
       events.push({
@@ -4484,6 +4491,7 @@ export function buildLiveFeed(
         displayName: user.displayName,
         detail: `Completed ${scenarioTitle}`,
         occurredAt: s.completedAt,
+        sessionId: s.id,
       });
     }
   }
@@ -4980,6 +4988,67 @@ export function registerManagerDashboardRoutes(app: Express): void {
 
     const updated = await storage.updateOffice(office.id, { dashboardWidgetConfig: JSON.stringify(merged) });
     res.json({ widgetConfig: resolveDashboardWidgetConfig(updated?.dashboardWidgetConfig ?? null) });
+  });
+
+  // Live Feed session detail: a manager/QA clicks an entry in the Live Feed
+  // widget and needs the full picture (consultant, full scenario title, score,
+  // rubric breakdown, completion time). Scoped strictly to sessions belonging
+  // to a consultant in the requester's own office, same requesterId + role +
+  // office pattern as the rest of this file's manager routes. This is
+  // intentionally a separate route from the trainee-facing GET /api/sessions/:id
+  // (which has no office scoping, since a trainee only ever links to their own
+  // session) so manager access to any office's data never depends on that
+  // route accidentally staying unscoped.
+  app.get("/api/manager/session/:id", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view session detail" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ message: "Not found" });
+
+    const consultant = await storage.getUser(session.userId);
+    // A manager may only view sessions belonging to a consultant in their own
+    // office. Returning 404 rather than 403 here avoids confirming to a
+    // cross-office requester that a given session id even exists.
+    if (!consultant || consultant.officeId !== requester.officeId) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    const scenario = await storage.getScenario(session.scenarioId);
+    let rubricScores: Record<string, number> | null = null;
+    if (session.rubricScores) {
+      try {
+        rubricScores = JSON.parse(session.rubricScores);
+      } catch {
+        rubricScores = null;
+      }
+    }
+
+    res.json({
+      id: session.id,
+      consultantId: consultant.id,
+      consultantName: consultant.displayName,
+      scenarioTitle: scenario?.title ?? "Unknown scenario",
+      vertical: scenario?.vertical ?? null,
+      status: session.status,
+      score: session.score,
+      rubricScores,
+      feedback: session.feedback,
+      createdAt: session.createdAt,
+      completedAt: session.completedAt,
+    });
   });
 }
 

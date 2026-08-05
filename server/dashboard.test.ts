@@ -586,8 +586,11 @@ describe("buildLiveFeed", () => {
     const feed = buildLiveFeed(users, sessions, scenarios);
     assert.equal(feed.length, 3);
     assert.equal(feed[0].type, "high_score"); // 03-05, score 95
+    assert.equal(feed[0].sessionId, 100);
     assert.equal(feed[1].type, "certification"); // 03-04
+    assert.equal(feed[1].sessionId, null); // certifications have no backing session
     assert.equal(feed[2].type, "session_completed"); // 03-01
+    assert.equal(feed[2].sessionId, 101);
   });
 
   test("respects the limit", () => {
@@ -795,6 +798,8 @@ describe("command center + widget-config HTTP endpoints", () => {
       officeRecord = { ...officeRecord, ...patch };
       return officeRecord;
     };
+    (storage as any).getSession = async (id: number) => sessions.find((s) => s.id === id);
+    (storage as any).getScenario = async (id: number) => scenarios.find((s) => s.id === id);
   });
 
   test("GET dashboard-command-center requires manager/qa role", async () => {
@@ -863,5 +868,39 @@ describe("command center + widget-config HTTP endpoints", () => {
       body: JSON.stringify({ requesterId: 1, widgetConfig: "nope" }),
     });
     assert.equal(res.status, 400);
+  });
+
+  test("GET manager/session/:id requires manager/qa role", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=3`);
+    assert.equal(res.status, 403);
+  });
+
+  test("GET manager/session/:id returns full detail for a session in the requester's own office", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.consultantName, "Alice A");
+    assert.equal(body.scenarioTitle, "Kicking Tires");
+    assert.equal(body.score, 90);
+    assert.ok(body.rubricScores);
+    assert.equal(body.rubricScores.trustBuilding, 90);
+    assert.equal(body.completedAt, "2026-03-01T00:00:00.000Z");
+  });
+
+  test("GET manager/session/:id 404s for a session in a different office", async () => {
+    // Session 100 belongs to Alice (office 1). A manager from a different
+    // office must never be able to view it, even by guessing the id.
+    const otherManager = mkUser({ id: 900, role: "manager", officeId: OTHER_OFFICE_ID, username: "othermgr" });
+    users.push(otherManager);
+    (storage as any).getOffice = async (id: number) =>
+      id === officeRecord.id ? officeRecord : id === OTHER_OFFICE_ID ? { id: OTHER_OFFICE_ID, managerItemId: "si_dash_2" } : undefined;
+
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=900`);
+    assert.equal(res.status, 404);
+  });
+
+  test("GET manager/session/:id 404s for a session id that does not exist", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/999999?requesterId=1`);
+    assert.equal(res.status, 404);
   });
 });
