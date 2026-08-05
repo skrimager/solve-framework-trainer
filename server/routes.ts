@@ -3881,8 +3881,42 @@ const DISCOVERY_DIMENSIONS: { key: string; label: string }[] = [
   { key: "relationshipContinuity", label: "Relationship continuity" },
 ];
 
-// One trailing week of practice counts as "this period" for the KPI strip.
+// One trailing week of practice counts as "this period" for the KPI strip
+// when a manager has not selected a custom date range. This remains the
+// backward-compatible default when a dashboard request omits since/until.
 const DASHBOARD_PERIOD_DAYS = 7;
+
+// Resolved period boundaries the whole dashboard aggregation is scoped to.
+// `days` is only used for the prior-period comparison window (deltas), and
+// is computed from the actual since/until span rather than assumed to be 7.
+export type DashboardPeriod = { since: Date; until: Date; days: number; label: string };
+
+// Builds the period boundaries a dashboard request should use. When both
+// `sinceParam` and `untilParam` (ISO date strings) are provided, they define
+// the window exactly; otherwise falls back to the historical trailing
+// DASHBOARD_PERIOD_DAYS window ending at `now`, preserving old behavior for
+// any caller that does not pass the new params. `days` is derived from the
+// resolved span (at least 1) so prior-period deltas scale with whatever range
+// the manager picked, rather than always comparing against a 7-day baseline.
+export function resolveDashboardPeriod(
+  sinceParam: string | undefined,
+  untilParam: string | undefined,
+  now: Date = new Date(),
+): DashboardPeriod {
+  const parsedSince = sinceParam ? new Date(sinceParam) : null;
+  const parsedUntil = untilParam ? new Date(untilParam) : null;
+  const validSince = parsedSince && !Number.isNaN(parsedSince.getTime()) ? parsedSince : null;
+  const validUntil = parsedUntil && !Number.isNaN(parsedUntil.getTime()) ? parsedUntil : null;
+
+  if (validSince) {
+    const until = validUntil ?? now;
+    const days = Math.max(1, Math.ceil((until.getTime() - validSince.getTime()) / (24 * 60 * 60 * 1000)));
+    return { since: validSince, until, days, label: "Custom range" };
+  }
+
+  const since = new Date(now.getTime() - DASHBOARD_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  return { since, until: now, days: DASHBOARD_PERIOD_DAYS, label: "This week" };
+}
 
 function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -4063,13 +4097,16 @@ export function buildStreaksAndRankings(
 
 // Pure aggregation of the manager dashboard payload, split out from the route so
 // it can be unit-tested with in-memory fixtures. `now` is injectable so the
-// "this period" window is deterministic in tests.
+// "this period" window is deterministic in tests. `period` defaults to the
+// historical trailing 7-day window when omitted, so any existing caller that
+// does not pass one keeps the old behavior exactly.
 export function buildDashboardStats(
   officeUsers: User[],
   officeSessions: Session[],
   allScenarios: Scenario[],
   now: Date = new Date(),
   academyCredits: import("@shared/schema").AcademyCredit[] = [],
+  period: DashboardPeriod = resolveDashboardPeriod(undefined, undefined, now),
 ) {
   const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
   const consultants = officeUsers.filter((u) => u.role === "consultant");
@@ -4081,9 +4118,9 @@ export function buildDashboardStats(
     ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
     : null;
 
-  const periodSince = new Date(now.getTime() - DASHBOARD_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  const periodSince = period.since;
   const practiceSessionsThisPeriod = completed.filter(
-    (s) => s.completedAt && new Date(s.completedAt) >= periodSince,
+    (s) => s.completedAt && new Date(s.completedAt) >= periodSince && new Date(s.completedAt) <= period.until,
   ).length;
 
   const certificationsEarned = consultants.filter((u) => u.consultingCertified).length;
@@ -4190,7 +4227,7 @@ export function buildDashboardStats(
     .sort((a, b) => b.count - a.count);
 
   return {
-    period: { label: "This week", days: DASHBOARD_PERIOD_DAYS, since: periodSince.toISOString() },
+    period: { label: period.label, days: period.days, since: period.since.toISOString(), until: period.until.toISOString() },
     kpis: {
       teamAverageScore,
       practiceSessionsThisPeriod,
@@ -4650,21 +4687,24 @@ export function percentDelta(current: number, previous: number): number | null {
 // Pure aggregation of the additional Command Center widget data, split out
 // from buildDashboardStats so the original, already-tested function is never
 // touched. `now` and the office's saved widget config are both injectable for
-// deterministic tests.
+// deterministic tests. `period` defaults to the historical trailing 7-day
+// window when omitted, matching the old hardcoded behavior exactly.
 export function buildCommandCenterExtras(
   officeUsers: User[],
   officeSessions: Session[],
   allScenarios: Scenario[],
   now: Date = new Date(),
+  period: DashboardPeriod = resolveDashboardPeriod(undefined, undefined, now),
 ) {
   const consultants = officeUsers.filter((u) => u.role === "consultant");
   const sessionsByUser = groupSessionsByUser(officeSessions);
 
-  const periodDays = DASHBOARD_PERIOD_DAYS;
-  const periodSince = new Date(now.getTime() - periodDays * ONE_DAY_MS);
+  const periodDays = period.days;
+  const periodSince = period.since;
+  const periodUntil = period.until;
   const priorPeriodSince = new Date(periodSince.getTime() - periodDays * ONE_DAY_MS);
 
-  const inPeriod = (iso: string | null) => !!iso && new Date(iso) >= periodSince;
+  const inPeriod = (iso: string | null) => !!iso && new Date(iso) >= periodSince && new Date(iso) <= periodUntil;
   const inPriorPeriod = (iso: string | null) =>
     !!iso && new Date(iso) >= priorPeriodSince && new Date(iso) < periodSince;
 
@@ -4678,7 +4718,7 @@ export function buildCommandCenterExtras(
   const conversationsThisPeriod = completedThisPeriod.length;
   const conversationsPriorPeriod = completedPriorPeriod.length;
   const conversationsDelta = percentDelta(conversationsThisPeriod, conversationsPriorPeriod);
-  const conversationsSparkline = sparklineByDay(completedThisPeriod, periodSince, now);
+  const conversationsSparkline = sparklineByDay(completedThisPeriod, periodSince, periodUntil);
 
   // --- Completion rate (completed / started, this week vs last week) ---
   const completionRateFor = (started: Session[], completed: Session[]) =>
@@ -4747,7 +4787,7 @@ export function buildCommandCenterExtras(
   // office's own consultants only — never a cross-office/company comparison,
   // since offices must never see another office's performance data (and no
   // internal SOLVE Framework business data belongs on this screen either).
-  const performanceOverTime = buildPerformanceOverTime(officeSessions, consultants, sessionsByUser, periodSince, now);
+  const performanceOverTime = buildPerformanceOverTime(officeSessions, consultants, sessionsByUser, periodSince, periodUntil);
 
   // --- Score distribution + conversation outcomes, scoped to this period ---
   const scoresThisPeriod = completedThisPeriod.filter((s) => s.score !== null).map((s) => s.score as number);
@@ -4869,9 +4909,40 @@ function buildPerformanceOverTime(
   }));
 }
 
+// Earliest session timestamp for an office (by createdAt, since that is set
+// the moment a session starts and is never null, unlike completedAt). This is
+// what "All time" resolves to on the client: from the office's very first
+// session up to now. Returns null when the office has no sessions yet, so the
+// caller can fall back to the default period instead of an invalid range.
+function earliestSessionDate(officeSessions: Session[]): Date | null {
+  let earliest: Date | null = null;
+  for (const s of officeSessions) {
+    const when = s.createdAt ? new Date(s.createdAt) : null;
+    if (!when || Number.isNaN(when.getTime())) continue;
+    if (!earliest || when < earliest) earliest = when;
+  }
+  return earliest;
+}
+
+// Reads the optional since/until ISO date-string query params shared by both
+// dashboard endpoints below. Both are optional; when either is missing (or
+// unparseable), resolveDashboardPeriod falls back to the historical trailing
+// 7-day default, preserving backward compatibility for any existing caller.
+function readPeriodParams(req: Request): { since?: string; until?: string } {
+  const since = typeof req.query.since === "string" ? req.query.since : undefined;
+  const until = typeof req.query.until === "string" ? req.query.until : undefined;
+  return { since, until };
+}
+
 export function registerManagerDashboardRoutes(app: Express): void {
   // Office-scoped aggregate analytics for the manager command center. Reuses the
   // same manager/QA + own-office authorization as the roster routes.
+  //
+  // Query params (both optional, ISO date strings):
+  //   since - start of the reporting window (inclusive)
+  //   until - end of the reporting window (inclusive); defaults to now
+  // When since is omitted, the endpoint falls back to the historical trailing
+  // 7-day window ending now, exactly matching the endpoint's old behavior.
   app.get("/api/manager/dashboard-stats", async (req, res) => {
     const requesterId = Number(req.query.requesterId);
     if (!requesterId) {
@@ -4901,7 +4972,16 @@ export function registerManagerDashboardRoutes(app: Express): void {
       storage.listAcademyCreditsByOffice(requester.officeId),
     ]);
 
-    res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios, new Date(), officeCredits));
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+
+    res.json({
+      ...buildDashboardStats(officeUsers, officeSessions, allScenarios, now, officeCredits, period),
+      // The office's earliest session (createdAt), so the client can resolve
+      // its "All time" preset to a real start date without a separate request.
+      earliestSessionAt: earliestSessionDate(officeSessions)?.toISOString() ?? null,
+    });
   });
 
   // Additive Command Center widget data (team health, live feed, outcomes,
@@ -4909,6 +4989,11 @@ export function registerManagerDashboardRoutes(app: Express): void {
   // manager/QA + own-office + paid-add-on gating as /dashboard-stats above,
   // kept as a separate endpoint so the original dashboard-stats response
   // shape (and its existing tests) are never touched.
+  //
+  // Accepts the same optional since/until ISO date-string query params as
+  // /api/manager/dashboard-stats, and resolves them the same way (see
+  // resolveDashboardPeriod), so both endpoints are always scoped to the same
+  // manager-selected range.
   app.get("/api/manager/dashboard-command-center", async (req, res) => {
     const requesterId = Number(req.query.requesterId);
     if (!requesterId) {
@@ -4931,8 +5016,12 @@ export function registerManagerDashboardRoutes(app: Express): void {
       storage.listScenarios(),
     ]);
 
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+
     res.json({
-      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, new Date()),
+      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, now, period),
       widgetConfig: resolveDashboardWidgetConfig(office?.dashboardWidgetConfig ?? null),
     });
   });

@@ -45,12 +45,17 @@ import {
   GraduationCap,
   MessageSquareText,
   FileBarChart,
+  CalendarDays,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import type { DateRange } from "react-day-picker";
+import { format as dateFnsFormat } from "date-fns";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
@@ -98,7 +103,8 @@ function officeActive(office?: Office): boolean {
 }
 
 type DashboardStats = {
-  period: { label: string; days: number; since: string };
+  period: { label: string; days: number; since: string; until?: string };
+  earliestSessionAt?: string | null;
   kpis: {
     teamAverageScore: number | null;
     practiceSessionsThisPeriod: number;
@@ -224,11 +230,185 @@ const NAV: { key: Section; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "settings", label: "Dashboard Settings", icon: Settings },
 ];
 
+// ---------------------------------------------------------------------------
+// Command Center date range. Controls every widget on the dashboard (KPI
+// cards, deltas, the performance-over-time chart, score distribution,
+// conversation outcomes, live feed period-scoping, popular scenarios, etc).
+// Defaults to the last 30 days on page load, per product requirements (a
+// more useful default than the old hardcoded 7-day window, though 7 days
+// remains one of the presets).
+// ---------------------------------------------------------------------------
+type DateRangeValue = { since: Date; until: Date; preset: DateRangePreset };
+type DateRangePreset = "7d" | "30d" | "90d" | "all" | "custom";
+
+function startOfDay(d: Date): Date {
+  const copy = new Date(d);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+
+function endOfDay(d: Date): Date {
+  const copy = new Date(d);
+  copy.setHours(23, 59, 59, 999);
+  return copy;
+}
+
+function daysAgo(n: number, now: Date): Date {
+  return startOfDay(new Date(now.getTime() - n * 24 * 60 * 60 * 1000));
+}
+
+function defaultDateRange(now: Date = new Date()): DateRangeValue {
+  return { since: daysAgo(29, now), until: endOfDay(now), preset: "30d" };
+}
+
+// Short "Mon D" formatter for range labels, e.g. "Mar 1" or "Aug 4". Uses
+// date-fns (already a dependency elsewhere in this codebase) rather than a
+// new formatting library.
+function fmtRangeDate(d: Date): string {
+  return dateFnsFormat(d, "MMM d");
+}
+
+// Human label for the currently selected range, shown in card/chart captions
+// instead of a fixed "(last 7 days)" or "This week" string.
+function rangeLabel(range: DateRangeValue): string {
+  if (range.preset === "7d") return "Last 7 days";
+  if (range.preset === "30d") return "Last 30 days";
+  if (range.preset === "90d") return "Last 90 days";
+  if (range.preset === "all") return "All time";
+  return `${fmtRangeDate(range.since)} - ${fmtRangeDate(range.until)}`;
+}
+
+const DATE_RANGE_PRESETS: { key: DateRangePreset; label: string }[] = [
+  { key: "7d", label: "7 days" },
+  { key: "30d", label: "30 days" },
+  { key: "90d", label: "90 days" },
+  { key: "all", label: "All time" },
+];
+
+function DateRangePicker({
+  range,
+  onChange,
+  earliestSessionAt,
+}: {
+  range: DateRangeValue;
+  onChange: (next: DateRangeValue) => void;
+  earliestSessionAt: string | null | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<DateRange | undefined>({ from: range.since, to: range.until });
+
+  const applyPreset = (preset: DateRangePreset) => {
+    const now = new Date();
+    if (preset === "7d") return onChange({ since: daysAgo(6, now), until: endOfDay(now), preset });
+    if (preset === "30d") return onChange({ since: daysAgo(29, now), until: endOfDay(now), preset });
+    if (preset === "90d") return onChange({ since: daysAgo(89, now), until: endOfDay(now), preset });
+    if (preset === "all") {
+      const earliest = earliestSessionAt ? startOfDay(new Date(earliestSessionAt)) : daysAgo(29, now);
+      return onChange({ since: earliest, until: endOfDay(now), preset });
+    }
+  };
+
+  const applyCustomRange = () => {
+    if (!draft?.from) return;
+    const since = startOfDay(draft.from);
+    const until = endOfDay(draft.to ?? draft.from);
+    onChange({ since, until, preset: "custom" });
+    setOpen(false);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-testid="control-date-range-picker">
+      {DATE_RANGE_PRESETS.map(({ key, label }) => {
+        const active = range.preset === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => applyPreset(key)}
+            data-testid={`button-range-preset-${key}`}
+            aria-pressed={active}
+            className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors border"
+            style={
+              active
+                ? { backgroundColor: ORANGE, borderColor: ORANGE, color: "white" }
+                : { backgroundColor: "transparent", borderColor: BORDER, color: "rgba(255,255,255,0.7)" }
+            }
+          >
+            {label}
+          </button>
+        );
+      })}
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (next) setDraft({ from: range.since, to: range.until });
+        }}
+      >
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            data-testid="button-range-custom"
+            aria-pressed={range.preset === "custom"}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors border"
+            style={
+              range.preset === "custom"
+                ? { backgroundColor: ORANGE, borderColor: ORANGE, color: "white" }
+                : { backgroundColor: "transparent", borderColor: BORDER, color: "rgba(255,255,255,0.7)" }
+            }
+          >
+            <CalendarDays className="w-3.5 h-3.5" />
+            Custom
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          className="w-auto p-0 border"
+          align="start"
+          style={{ backgroundColor: NAVY, borderColor: BORDER }}
+          data-testid="popover-range-calendar"
+        >
+          <div className="text-white">
+            <Calendar
+              mode="range"
+              numberOfMonths={2}
+              defaultMonth={draft?.from}
+              selected={draft}
+              onSelect={setDraft}
+              disabled={{ after: new Date() }}
+              className="text-white"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2 border-t p-3" style={{ borderColor: BORDER }}>
+            <p className="text-xs text-white/50" data-testid="text-range-draft">
+              {draft?.from ? fmtRangeDate(draft.from) : "Start date"}
+              {" - "}
+              {draft?.to ? fmtRangeDate(draft.to) : "End date"}
+            </p>
+            <Button size="sm" onClick={applyCustomRange} disabled={!draft?.from} data-testid="button-apply-range">
+              Apply
+            </Button>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 // Shared by 'manager' and 'qa' roles (both review across consultants).
 export default function Dashboard() {
   const { user, setUser } = useAuth();
   const [, navigate] = useLocation();
   const [section, setSection] = useState<Section>("dashboard");
+
+  // Command Center date range. Defaults to the last 30 days on load; the
+  // manager can switch to 7/90 days, all time, or a custom calendar range,
+  // and every dashboard widget below re-scopes to it. Included in both query
+  // keys below so switching the range triggers a refetch and each range is
+  // cached separately (queryKey doubles as the literal fetch URL, see
+  // getQueryFn in lib/queryClient.ts).
+  const [dateRange, setDateRange] = useState<DateRangeValue>(() => defaultDateRange());
+  const sinceParam = dateRange.since.toISOString();
+  const untilParam = dateRange.until.toISOString();
 
   const { data: office } = useQuery<Office>({
     queryKey: [`/api/offices/${user?.officeId}`],
@@ -239,7 +419,7 @@ export default function Dashboard() {
   });
 
   const { data: stats, isLoading: statsLoading, isError: statsError } = useQuery<DashboardStats>({
-    queryKey: [`/api/manager/dashboard-stats?requesterId=${user?.id}`],
+    queryKey: [`/api/manager/dashboard-stats?requesterId=${user?.id}&since=${sinceParam}&until=${untilParam}`],
     enabled: !!user,
   });
 
@@ -247,7 +427,7 @@ export default function Dashboard() {
   // merged into dashboard-stats) so the original endpoint/response shape is
   // never touched. Same 403-on-no-add-on behavior as dashboard-stats.
   const { data: extras, isLoading: extrasLoading, isError: extrasError } = useQuery<CommandCenterExtras>({
-    queryKey: [`/api/manager/dashboard-command-center?requesterId=${user?.id}`],
+    queryKey: [`/api/manager/dashboard-command-center?requesterId=${user?.id}&since=${sinceParam}&until=${untilParam}`],
     enabled: !!user,
   });
 
@@ -374,6 +554,9 @@ export default function Dashboard() {
               office={office}
               isManager={user?.role === "manager"}
               onGoToScenarios={() => setSection("scenarios")}
+              dateRange={dateRange}
+              onDateRangeChange={setDateRange}
+              earliestSessionAt={stats?.earliestSessionAt}
             />
           )}
           {section === "team" && (
@@ -721,6 +904,9 @@ function CommandCenterSection({
   office,
   isManager,
   onGoToScenarios,
+  dateRange,
+  onDateRangeChange,
+  earliestSessionAt,
 }: {
   stats?: DashboardStats;
   statsLoading: boolean;
@@ -730,13 +916,21 @@ function CommandCenterSection({
   office?: Office;
   isManager: boolean;
   onGoToScenarios: () => void;
+  dateRange: DateRangeValue;
+  onDateRangeChange: (next: DateRangeValue) => void;
+  earliestSessionAt?: string | null;
 }) {
+  const rangeControl = (
+    <DateRangePicker range={dateRange} onChange={onDateRangeChange} earliestSessionAt={earliestSessionAt} />
+  );
+
   if (locked) return <AddOnLocked office={office} isManager={isManager} />;
 
   const loading = statsLoading || extrasLoading || !stats || !extras;
   if (loading) {
     return (
       <div className="space-y-6">
+        {rangeControl}
         <div className="grid gap-3 grid-cols-2 lg:grid-cols-5">
           {Array.from({ length: 5 }).map((_, i) => (
             <Skeleton key={i} className="h-28 rounded-xl" />
@@ -756,9 +950,11 @@ function CommandCenterSection({
 
   const cfg = extras.widgetConfig ?? {};
   const show = (key: DashboardWidgetKey) => cfg[key] !== false;
+  const label = rangeLabel(dateRange);
 
   return (
     <div className="space-y-6">
+      {rangeControl}
       {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
 
       {/* Row 1: KPI cards (Team Health, Conversations, Completion Rate, Certifications, Alerts) */}
@@ -819,7 +1015,7 @@ function CommandCenterSection({
           {show("performanceOverTime") && (
             <Panel
               title="Team performance over time"
-              caption="Team average vs. your office's top 20% (last 7 days)"
+              caption={`Team average vs. your office's top 20% (${label})`}
               testId="panel-performance-over-time"
               accent={BLUE}
               className="lg:col-span-2"
@@ -907,12 +1103,12 @@ function CommandCenterSection({
       {(show("conversationOutcomes") || show("scoreDistribution") || show("achievements")) && (
         <div className="grid gap-6 lg:grid-cols-3">
           {show("conversationOutcomes") && (
-            <Panel title="Conversation Outcomes" caption="This period's completed conversations" testId="panel-conversation-outcomes" accent={PURPLE}>
+            <Panel title="Conversation Outcomes" caption={`Completed conversations, ${label}`} testId="panel-conversation-outcomes" accent={PURPLE}>
               <ConversationOutcomesDonut data={extras.conversationOutcomes} />
             </Panel>
           )}
           {show("scoreDistribution") && (
-            <Panel title="Score Distribution" caption="Sessions by score band, this period" testId="panel-score-distribution" accent={ORANGE}>
+            <Panel title="Score Distribution" caption={`Sessions by score band, ${label}`} testId="panel-score-distribution" accent={ORANGE}>
               <ScoreDistributionChart data={extras.scoreDistribution} />
             </Panel>
           )}
@@ -929,7 +1125,7 @@ function CommandCenterSection({
         <div className="grid gap-6 lg:grid-cols-3">
           {show("popularScenarios") && (
             <Panel
-              title="Popular Scenarios This Week"
+              title={`Popular Scenarios (${label})`}
               caption="Most-practiced scenarios and their average score"
               testId="panel-popular-scenarios"
               accent={BLUE}
@@ -943,7 +1139,7 @@ function CommandCenterSection({
       )}
 
       {/* Row 6: Bottom summary strip */}
-      {show("summaryStrip") && <SummaryStrip data={extras.summaryStrip} />}
+      {show("summaryStrip") && <SummaryStrip data={extras.summaryStrip} label={label} />}
     </div>
   );
 }
@@ -1319,14 +1515,14 @@ function ElevateTeamCta({ onGoToScenarios }: { onGoToScenarios: () => void }) {
   );
 }
 
-function SummaryStrip({ data }: { data: CommandCenterExtras["summaryStrip"] }) {
+function SummaryStrip({ data, label }: { data: CommandCenterExtras["summaryStrip"]; label: string }) {
   const items: { label: string; value: string; sub?: string; color: string }[] = [
     { label: "Team Members", value: String(data.teamMembersActive), sub: "Active users", color: BLUE_LIGHT },
     { label: "Total Sessions", value: String(data.totalSessions), sub: "All time", color: GREEN_LIGHT },
-    { label: "Avg Score", value: data.avgScore !== null ? String(data.avgScore) : "—", sub: "This period", color: ORANGE_LIGHT },
+    { label: "Avg Score", value: data.avgScore !== null ? String(data.avgScore) : "—", sub: label, color: ORANGE_LIGHT },
     { label: "Goal Progress", value: data.goalProgress !== null ? `${data.goalProgress}%` : "—", sub: "Team health", color: PURPLE_LIGHT },
     { label: "Certifications", value: String(data.certificationsTotal), sub: "Total earned", color: GOLD_LIGHT },
-    { label: "Hours Trained", value: String(data.hoursTrainedThisPeriod), sub: "This period", color: RED_LIGHT },
+    { label: "Hours Trained", value: String(data.hoursTrainedThisPeriod), sub: label, color: RED_LIGHT },
   ];
   return (
     <div
@@ -1635,7 +1831,16 @@ function SettingsSection({
     },
     onSuccess: (result) => {
       queryClient.setQueryData([`/api/manager/dashboard-widget-config?requesterId=${userId}`], result);
-      queryClient.invalidateQueries({ queryKey: [`/api/manager/dashboard-command-center?requesterId=${userId}`] });
+      // The command-center query key now also carries since/until, so match
+      // by prefix (any cached range for this requester) rather than an exact
+      // key, otherwise switching date ranges would leave stale widget config
+      // cached under the previously active range's key.
+      queryClient.invalidateQueries({
+        predicate: (query) => {
+          const key = query.queryKey[0];
+          return typeof key === "string" && key.startsWith(`/api/manager/dashboard-command-center?requesterId=${userId}`);
+        },
+      });
     },
     onError: (err: any) => {
       toast({ title: "Couldn't save that change", description: humanError(err), variant: "destructive" });

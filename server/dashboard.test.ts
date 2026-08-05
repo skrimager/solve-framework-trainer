@@ -23,6 +23,7 @@ import {
   defaultDashboardWidgetConfig,
   resolveDashboardWidgetConfig,
   DASHBOARD_WIDGET_KEYS,
+  resolveDashboardPeriod,
 } from "./routes";
 import type { User, Session, Scenario } from "@shared/schema";
 
@@ -287,6 +288,111 @@ describe("manager dashboard HTTP endpoint", () => {
     const body = await res.json();
     assert.equal(body.kpis.consultantCount, 3);
     assert.ok(Array.isArray(body.streaksAndRankings));
+  });
+
+  test("omitting since/until falls back to the historical trailing 7-day window", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.days, 7);
+    assert.equal(body.period.label, "This week");
+    assert.ok(typeof body.period.since === "string");
+    assert.ok(typeof body.period.until === "string");
+  });
+
+  test("an explicit since/until narrows the period and scopes practiceSessionsThisPeriod", async () => {
+    // Fixtures' completed sessions land 2026-03-01..03. A since/until window
+    // covering only 2026-03-01 should see just Alice's first session (id 100).
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.label, "Custom range");
+    assert.equal(body.kpis.practiceSessionsThisPeriod, 1);
+  });
+
+  test("a wider since/until captures more sessions than the 7-day default", async () => {
+    const wide = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    );
+    const wideBody = await wide.json();
+    const narrow = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    );
+    const narrowBody = await narrow.json();
+    assert.ok(wideBody.kpis.practiceSessionsThisPeriod >= narrowBody.kpis.practiceSessionsThisPeriod);
+  });
+
+  test("an unparseable since falls back to the default 7-day window instead of erroring", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=not-a-date`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.days, 7);
+    assert.equal(body.period.label, "This week");
+  });
+
+  test("returns the office's earliest session timestamp for the client's all-time preset", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const body = await res.json();
+    // Fixtures' earliest session (by createdAt) is id 100 on 2026-03-01.
+    assert.equal(body.earliestSessionAt, "2026-03-01T00:00:00.000Z");
+  });
+
+  test("an office with no sessions yet returns a null earliestSessionAt", async () => {
+    sessions.length = 0;
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const body = await res.json();
+    assert.equal(body.earliestSessionAt, null);
+  });
+});
+
+describe("resolveDashboardPeriod", () => {
+  const now = new Date("2026-03-08T00:00:00.000Z");
+
+  test("defaults to a trailing 7-day window ending now when since/until are omitted", () => {
+    const period = resolveDashboardPeriod(undefined, undefined, now);
+    assert.equal(period.days, 7);
+    assert.equal(period.label, "This week");
+    assert.equal(period.until.getTime(), now.getTime());
+    assert.equal(period.since.getTime(), now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  });
+
+  test("an explicit since with no until defaults until to now", () => {
+    const since = "2026-01-01T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, undefined, now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.getTime(), now.getTime());
+    assert.equal(period.label, "Custom range");
+  });
+
+  test("an explicit since and until define the window exactly, and days spans the range", () => {
+    const since = "2026-02-01T00:00:00.000Z";
+    const until = "2026-03-03T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, until, now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.toISOString(), until);
+    assert.equal(period.days, 30); // Feb 1 -> Mar 3
+  });
+
+  test("all-time (an early since like an office's earliest session) resolves to a wide multi-month span", () => {
+    const since = "2026-01-05T00:00:00.000Z"; // e.g. office's earliest session
+    const period = resolveDashboardPeriod(since, undefined, now);
+    assert.ok(period.days >= 60);
+    assert.equal(period.since.toISOString(), since);
+  });
+
+  test("an unparseable since falls back to the default window", () => {
+    const period = resolveDashboardPeriod("not-a-date", undefined, now);
+    assert.equal(period.days, 7);
+    assert.equal(period.label, "This week");
+  });
+
+  test("an unparseable until is ignored in favor of now, while a valid since is kept", () => {
+    const since = "2026-01-01T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, "not-a-date", now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.getTime(), now.getTime());
   });
 });
 
@@ -813,6 +919,31 @@ describe("command center + widget-config HTTP endpoints", () => {
     const body = await res.json();
     assert.ok(body.teamHealth);
     assert.deepEqual(body.widgetConfig, defaultDashboardWidgetConfig());
+  });
+
+  test("an explicit since/until makes the performance-over-time series span the full selected range, not just 7 days", async () => {
+    // Fixtures' sessions run 2026-03-01..04; a since/until spanning Jan-Apr
+    // must produce far more than the old hardcoded 8-day (7-day + today) series.
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.performanceOverTime.length > 8, "expected the day-by-day series to cover the full multi-month range");
+  });
+
+  test("a narrow since/until still returns a day-by-day series clipped to that exact range", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
+    );
+    const body = await res.json();
+    assert.equal(body.performanceOverTime.length, 2);
+  });
+
+  test("omitting since/until keeps the old 7-day-trailing conversations sparkline length", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=1`);
+    const body = await res.json();
+    assert.equal(body.conversations.sparkline.length, 8); // periodSince..now inclusive, UTC days
   });
 
   test("GET dashboard-widget-config returns saved defaults when nothing is stored", async () => {
