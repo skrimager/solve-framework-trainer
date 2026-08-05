@@ -4,54 +4,77 @@ import { useAuth } from "@/lib/auth";
 import { wrongCredentialTypeRedirect, ROUTES } from "@/lib/routes";
 import styles from "./manager-login.module.css";
 
-// Manager command-center login. Exact rebuild from a pixel-precise reference
-// HTML/CSS file provided by the product owner (see
-// /tmp/reference-command-center.html), replacing the previous freehand
-// "cinematic mission control room" redesign that was rejected as not close
-// enough to spec. Every color, spacing, and shape value in
-// manager-login.module.css is copied verbatim from that reference: same
-// background-room decorative layer (top-ring / world-map / analytics-panel /
-// console-room), same login-card corner brackets, same CSS-only logo mark, same
-// submit-button hover sweep. Do not "reinterpret" these values.
+// Manager command-center login. Cinematic command-room overhaul v2.
 //
-// Same backend flow as the consultant login (single POST /api/login; role is
-// backend-derived). Signing in swaps this route to the manager dashboard (see
-// CommandCenter in App.tsx), so this component never navigates on its own
-// success — it just updates auth state and CommandCenter re-renders into the
-// dashboard.
+// This is a full visual rebuild of the background/decorative layer and the
+// login card chrome to match a cinematic reference image and a 23-point
+// written brief from the product owner (military/aerospace operations
+// center feel, taller vertical composition, richer ceiling ring, more
+// detailed world map and analytics panels, more realistic chair silhouettes,
+// a monitor console row, and a calmer navy-forward color balance with orange
+// as a controlled accent). All of this is achieved with layered CSS only
+// (gradients, box-shadows, pseudo-elements, clip-path, filters) - no new
+// markup-driven behavior and no new dependencies.
+//
+// Real functionality is unchanged from the previous version: same backend
+// flow as the consultant login (single POST /api/login; role is
+// backend-derived). Signing in swaps this route to the manager dashboard
+// (see CommandCenter in App.tsx), so this component never navigates on its
+// own success - it just updates auth state and CommandCenter re-renders into
+// the dashboard.
 
 function WorldMap() {
   return (
     <div className={styles.worldMap} aria-hidden="true">
-      <span className={styles.mapDot} style={{ left: "12%", top: "25%" }} />
-      <span className={`${styles.mapDot} ${styles.mapDotOrange}`} style={{ left: "31%", top: "53%" }} />
-      <span className={styles.mapDot} style={{ left: "57%", top: "34%" }} />
-      <span className={styles.mapDot} style={{ left: "79%", top: "65%" }} />
-      <span className={styles.mapLine} style={{ left: "13%", top: "27%", width: "43%", transform: "rotate(14deg)" }} />
-      <span className={styles.mapLine} style={{ left: "32%", top: "54%", width: "45%", transform: "rotate(-20deg)" }} />
-      <svg viewBox="0 0 600 340" width="100%" height="100%" aria-hidden="true">
-        <path
-          d="M20 88 L65 54 L119 45 L160 59 L188 91 L225 103 L234 137 L214 167 L237 196 L210 218 L176 215 L153 257 L107 283 L78 253 L70 212 L42 188 L53 147 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-        <path
-          d="M281 75 L329 53 L380 66 L410 95 L456 103 L485 132 L474 165 L434 181 L421 231 L382 273 L346 247 L328 202 L296 188 L306 143 L278 110 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-        <path
-          d="M493 224 L540 207 L576 228 L565 268 L525 286 L493 263 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-      </svg>
+      <div className={styles.mapNetwork}>
+        <svg viewBox="0 0 600 260" width="100%" height="100%" aria-hidden="true">
+          <g stroke="#1c8fdc" strokeWidth="0.7" opacity="0.55">
+            <path d="M40 40 L140 70" />
+            <path d="M140 70 L230 30" />
+            <path d="M140 70 L210 130" />
+            <path d="M230 30 L320 60" />
+            <path d="M320 60 L400 25" />
+            <path d="M320 60 L380 120" />
+            <path d="M400 25 L470 55" />
+            <path d="M210 130 L300 150" />
+            <path d="M300 150 L380 120" />
+            <path d="M380 120 L470 150" />
+            <path d="M470 55 L540 90" />
+            <path d="M470 150 L540 90" />
+          </g>
+          <g fill="#2fb6ff">
+            <circle cx="40" cy="40" r="2.2" />
+            <circle cx="140" cy="70" r="2.6" />
+            <circle cx="230" cy="30" r="2.2" />
+            <circle cx="320" cy="60" r="2.6" />
+            <circle cx="400" cy="25" r="2.2" />
+            <circle cx="470" cy="55" r="2.4" />
+            <circle cx="210" cy="130" r="2.2" />
+            <circle cx="300" cy="150" r="2.4" />
+            <circle cx="380" cy="120" r="2.6" />
+            <circle cx="470" cy="150" r="2.2" />
+            <circle cx="540" cy="90" r="2.4" />
+          </g>
+        </svg>
+      </div>
+      <div className={styles.mapSilhouette} />
+      <div className={styles.mapDotMatrix} />
+      <span className={`${styles.mapDot} ${styles.mapDotOrange}`} style={{ left: "36%", top: "68%" }} />
+      <span className={`${styles.mapDot} ${styles.mapDotOrange}`} style={{ left: "70%", top: "60%" }} />
+      <span className={styles.mapDot} style={{ left: "22%", top: "58%" }} />
+      <span className={styles.mapDot} style={{ left: "48%", top: "72%" }} />
+      <span className={styles.mapDot} style={{ left: "58%", top: "55%" }} />
+      <div className={styles.mapGrid} />
+    </div>
+  );
+}
+
+function LineChartCard() {
+  return (
+    <div className={`${styles.hudCard} ${styles.hudCardLarge}`}>
+      <div className={styles.hudCardLabel}>PERFORMANCE TREND</div>
+      <div className={styles.chartGrid} />
+      <div className={styles.chartLine} />
     </div>
   );
 }
@@ -69,13 +92,12 @@ function BarChart({ heights }: { heights: number[] }) {
 function AnalyticsPanel() {
   return (
     <div className={styles.analyticsPanel}>
-      <div className={`${styles.hudCard} ${styles.hudCardLarge}`}>
-        <div className={styles.chartLine} />
-      </div>
+      <LineChartCard />
       <div className={styles.hudCard}>
+        <div className={styles.hudCardLabel}>ACTIVITY</div>
         <BarChart heights={[23, 45, 36, 67, 54, 83, 72]} />
       </div>
-      <div className={styles.hudCard}>
+      <div className={`${styles.hudCard} ${styles.hudCardRing}`}>
         <div className={styles.successRing}>
           <div className={styles.successRingContent}>
             <small>SUCCESS</small>
@@ -84,7 +106,8 @@ function AnalyticsPanel() {
         </div>
       </div>
       <div className={`${styles.hudCard} ${styles.hudCardLarge}`}>
-        <BarChart heights={[25, 34, 49, 43, 66, 80, 93, 76, 88]} />
+        <div className={styles.hudCardLabel}>THROUGHPUT</div>
+        <BarChart heights={[25, 34, 49, 43, 66, 80, 93, 76, 88, 61, 70, 84]} />
       </div>
     </div>
   );
@@ -93,19 +116,55 @@ function AnalyticsPanel() {
 function ConsoleRoom() {
   return (
     <div className={styles.consoleRoom}>
+      <div className={styles.consoleFloor} />
       <div className={styles.consoleLine} />
-      <div className={`${styles.chair} ${styles.chairOne}`} />
-      <div className={`${styles.chair} ${styles.chairTwo}`} />
-      <div className={`${styles.chair} ${styles.chairThree}`} />
-      <div className={`${styles.chair} ${styles.chairFour}`} />
-      <div className={`${styles.chair} ${styles.chairFive}`} />
+      <div className={styles.deskRow} aria-hidden="true">
+        <span className={styles.desk} />
+        <span className={styles.desk} />
+        <span className={styles.desk} />
+      </div>
+      <div className={`${styles.chair} ${styles.chairOne}`}>
+        <span className={styles.chairBack} />
+        <span className={styles.chairArmLeft} />
+        <span className={styles.chairArmRight} />
+        <span className={styles.chairSeat} />
+        <span className={styles.chairBase} />
+      </div>
+      <div className={`${styles.chair} ${styles.chairTwo}`}>
+        <span className={styles.chairBack} />
+        <span className={styles.chairArmLeft} />
+        <span className={styles.chairArmRight} />
+        <span className={styles.chairSeat} />
+        <span className={styles.chairBase} />
+      </div>
+      <div className={`${styles.chair} ${styles.chairThree}`}>
+        <span className={styles.chairBack} />
+        <span className={styles.chairArmLeft} />
+        <span className={styles.chairArmRight} />
+        <span className={styles.chairSeat} />
+        <span className={styles.chairBase} />
+      </div>
+      <div className={`${styles.chair} ${styles.chairFour}`}>
+        <span className={styles.chairBack} />
+        <span className={styles.chairArmLeft} />
+        <span className={styles.chairArmRight} />
+        <span className={styles.chairSeat} />
+        <span className={styles.chairBase} />
+      </div>
+      <div className={`${styles.chair} ${styles.chairFive}`}>
+        <span className={styles.chairBack} />
+        <span className={styles.chairArmLeft} />
+        <span className={styles.chairArmRight} />
+        <span className={styles.chairSeat} />
+        <span className={styles.chairBase} />
+      </div>
     </div>
   );
 }
 
 // CSS-only logo mark: an orange/blue gradient bordered square with an orange
 // dot in the middle and a speech-bubble tail drawn as a CSS border-triangle.
-// No image asset, matching the reference exactly (it has no <img>).
+// No image asset, matching the reference (it has no <img>).
 function LogoMark() {
   return (
     <div className={styles.logoIcon} aria-hidden="true">
@@ -159,7 +218,11 @@ export default function ManagerLogin() {
   return (
     <main className={styles.page}>
       <div className={styles.backgroundRoom} aria-hidden="true">
-        <div className={styles.topRing} />
+        <div className={styles.ceilingRing}>
+          <span className={styles.ceilingRingOuter} />
+          <span className={styles.ceilingRingArcs} />
+          <span className={styles.ceilingRingInner} />
+        </div>
         <WorldMap />
         <AnalyticsPanel />
         <ConsoleRoom />
