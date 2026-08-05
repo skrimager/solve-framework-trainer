@@ -4,108 +4,26 @@ import { useAuth } from "@/lib/auth";
 import { wrongCredentialTypeRedirect, ROUTES } from "@/lib/routes";
 import styles from "./manager-login.module.css";
 
-// Manager command-center login. Exact rebuild from a pixel-precise reference
-// HTML/CSS file provided by the product owner (see
-// /tmp/reference-command-center.html), replacing the previous freehand
-// "cinematic mission control room" redesign that was rejected as not close
-// enough to spec. Every color, spacing, and shape value in
-// manager-login.module.css is copied verbatim from that reference: same
-// background-room decorative layer (top-ring / world-map / analytics-panel /
-// console-room), same login-card corner brackets, same CSS-only logo mark, same
-// submit-button hover sweep. Do not "reinterpret" these values.
+// Manager command-center login. Cinematic command-room overhaul v2.
 //
-// Same backend flow as the consultant login (single POST /api/login; role is
-// backend-derived). Signing in swaps this route to the manager dashboard (see
-// CommandCenter in App.tsx), so this component never navigates on its own
-// success — it just updates auth state and CommandCenter re-renders into the
-// dashboard.
-
-function WorldMap() {
-  return (
-    <div className={styles.worldMap} aria-hidden="true">
-      <span className={styles.mapDot} style={{ left: "12%", top: "25%" }} />
-      <span className={`${styles.mapDot} ${styles.mapDotOrange}`} style={{ left: "31%", top: "53%" }} />
-      <span className={styles.mapDot} style={{ left: "57%", top: "34%" }} />
-      <span className={styles.mapDot} style={{ left: "79%", top: "65%" }} />
-      <span className={styles.mapLine} style={{ left: "13%", top: "27%", width: "43%", transform: "rotate(14deg)" }} />
-      <span className={styles.mapLine} style={{ left: "32%", top: "54%", width: "45%", transform: "rotate(-20deg)" }} />
-      <svg viewBox="0 0 600 340" width="100%" height="100%" aria-hidden="true">
-        <path
-          d="M20 88 L65 54 L119 45 L160 59 L188 91 L225 103 L234 137 L214 167 L237 196 L210 218 L176 215 L153 257 L107 283 L78 253 L70 212 L42 188 L53 147 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-        <path
-          d="M281 75 L329 53 L380 66 L410 95 L456 103 L485 132 L474 165 L434 181 L421 231 L382 273 L346 247 L328 202 L296 188 L306 143 L278 110 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-        <path
-          d="M493 224 L540 207 L576 228 L565 268 L525 286 L493 263 Z"
-          fill="none"
-          stroke="#0caeff"
-          strokeWidth="2"
-          opacity=".7"
-        />
-      </svg>
-    </div>
-  );
-}
-
-function BarChart({ heights }: { heights: number[] }) {
-  return (
-    <div className={styles.barChart}>
-      {heights.map((h, i) => (
-        <span key={i} style={{ height: `${h}%` }} />
-      ))}
-    </div>
-  );
-}
-
-function AnalyticsPanel() {
-  return (
-    <div className={styles.analyticsPanel}>
-      <div className={`${styles.hudCard} ${styles.hudCardLarge}`}>
-        <div className={styles.chartLine} />
-      </div>
-      <div className={styles.hudCard}>
-        <BarChart heights={[23, 45, 36, 67, 54, 83, 72]} />
-      </div>
-      <div className={styles.hudCard}>
-        <div className={styles.successRing}>
-          <div className={styles.successRingContent}>
-            <small>SUCCESS</small>
-            <strong>92%</strong>
-          </div>
-        </div>
-      </div>
-      <div className={`${styles.hudCard} ${styles.hudCardLarge}`}>
-        <BarChart heights={[25, 34, 49, 43, 66, 80, 93, 76, 88]} />
-      </div>
-    </div>
-  );
-}
-
-function ConsoleRoom() {
-  return (
-    <div className={styles.consoleRoom}>
-      <div className={styles.consoleLine} />
-      <div className={`${styles.chair} ${styles.chairOne}`} />
-      <div className={`${styles.chair} ${styles.chairTwo}`} />
-      <div className={`${styles.chair} ${styles.chairThree}`} />
-      <div className={`${styles.chair} ${styles.chairFour}`} />
-      <div className={`${styles.chair} ${styles.chairFive}`} />
-    </div>
-  );
-}
+// The background is a generated photographic image of an empty command
+// room (ceiling ring, world map wall, analytics monitor wall, console
+// desks and chairs) set as the page background in manager-login.module.css.
+// The header text, logo mark, and login card below render as live DOM
+// elements on top of that image for accessibility, real functionality, and
+// responsiveness - none of the visible text or the login form is baked
+// into the image itself.
+//
+// Real functionality is unchanged from the previous version: same backend
+// flow as the consultant login (single POST /api/login; role is
+// backend-derived). Signing in swaps this route to the manager dashboard
+// (see CommandCenter in App.tsx), so this component never navigates on its
+// own success - it just updates auth state and CommandCenter re-renders into
+// the dashboard.
 
 // CSS-only logo mark: an orange/blue gradient bordered square with an orange
 // dot in the middle and a speech-bubble tail drawn as a CSS border-triangle.
-// No image asset, matching the reference exactly (it has no <img>).
+// No image asset, matching the reference (it has no <img>).
 function LogoMark() {
   return (
     <div className={styles.logoIcon} aria-hidden="true">
@@ -158,12 +76,6 @@ export default function ManagerLogin() {
 
   return (
     <main className={styles.page}>
-      <div className={styles.backgroundRoom} aria-hidden="true">
-        <div className={styles.topRing} />
-        <WorldMap />
-        <AnalyticsPanel />
-        <ConsoleRoom />
-      </div>
       <div className={styles.pageContent}>
         <header className={styles.brand}>
           <div className={styles.brandLockup}>
