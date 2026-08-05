@@ -12,9 +12,7 @@ import styles from "./manager-login.module.css";
 // The header text, logo mark, and login card below render as live DOM
 // elements on top of that image for accessibility, real functionality, and
 // responsiveness - none of the visible text or the login form is baked
-// into the image itself. The logo mark is the real SOLVE brand asset
-// (public/solve-logo-square.png), the same file used on the dashboard
-// sidebar, rendered as a plain img rather than a hand-drawn CSS shape.
+// into the image itself.
 //
 // Real functionality is unchanged from the previous version: same backend
 // flow as the consultant login (single POST /api/login; role is
@@ -22,6 +20,17 @@ import styles from "./manager-login.module.css";
 // (see CommandCenter in App.tsx), so this component never navigates on its
 // own success - it just updates auth state and CommandCenter re-renders into
 // the dashboard.
+
+// CSS-only logo mark: an orange/blue gradient bordered square with an orange
+// dot in the middle and a speech-bubble tail drawn as a CSS border-triangle.
+// No image asset, matching the reference (it has no img tag).
+function LogoMark() {
+  return (
+    <div className={styles.logoIcon} aria-hidden="true">
+      <span className={styles.logoDot} />
+    </div>
+  );
+}
 
 export default function ManagerLogin() {
   const [username, setUsername] = useState("");
@@ -70,11 +79,7 @@ export default function ManagerLogin() {
       <div className={styles.pageContent}>
         <header className={styles.brand}>
           <div className={styles.brandLockup}>
-            <img
-              src="/solve-logo-square.png"
-              alt="SOLVE Framework"
-              className={styles.logoIcon}
-            />
+            <LogoMark />
             <div className={styles.brandName}>
               <div className={styles.solve}>
                 SOLVE<span className={styles.period}>.</span>

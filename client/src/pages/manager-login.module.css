@@ -103,13 +103,40 @@
   margin-bottom: 34px;
 }
 
-/* Real SOLVE logo mark image, sized to sit next to the wordmark text. */
+/* Point 3: larger, brighter, more dimensional logo mark.
+   Gradient border sweeps orange (left and bottom edges) through a bright
+   orange-yellow highlight at the top-right corner, into a dark, almost-black
+   navy on the right edge, matching the reference art direction closely. */
 .logoIcon {
-  width: 88px;
-  height: 88px;
-  object-fit: contain;
-  flex: 0 0 auto;
-  filter: drop-shadow(0 0 22px rgba(20, 130, 230, 0.28));
+  width: 118px;
+  height: 98px;
+  position: relative;
+  border: 10px solid transparent;
+  border-radius: 26px;
+  background: linear-gradient(#071223, #071223) padding-box, linear-gradient(120deg, #ff5d00 0%, #ffac22 30%, #071223 68%) border-box;
+  box-shadow: 0 0 30px rgba(255, 122, 26, 0.3), inset 0 0 20px rgba(0, 30, 70, 0.25);
+}
+
+.logoIcon::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  bottom: -20px;
+  border-top: 22px solid #ff7900;
+  border-right: 14px solid transparent;
+  filter: drop-shadow(0 4px 5px rgba(0, 0, 0, 0.45));
+}
+
+.logoDot {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ffae29, #ff6500);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px rgba(255, 122, 26, 0.5);
 }
 
 .brandName {
@@ -618,7 +645,8 @@
 @media (max-width: 850px) {
   .pageContent { padding-top: 56px; }
   .brandLockup { gap: 14px; margin-bottom: 30px; }
-  .logoIcon { width: 68px; height: 68px; }
+  .logoIcon { width: 84px; height: 72px; border-width: 8px; border-radius: 19px; }
+  .logoIcon::before { left: 10px; bottom: -15px; border-top-width: 16px; border-right-width: 10px; }
   .framework { font-size: 14px; }
   .loginCard { padding: 36px 34px 32px; margin-top: 40px; }
   .analyticsPanel { opacity: 0.4; right: -6%; }
@@ -631,7 +659,9 @@
 @media (max-width: 560px) {
   .pageContent { width: 100%; padding: 36px 14px 34px; }
   .brandLockup { margin-bottom: 24px; }
-  .logoIcon { width: 48px; height: 48px; }
+  .logoIcon { width: 64px; height: 55px; border-width: 5px; border-radius: 14px; }
+  .logoDot { width: 14px; height: 14px; }
+  .logoIcon::before { left: 7px; bottom: -11px; border-top-width: 12px; border-right-width: 8px; }
   .solve { font-size: 38px; }
   .framework { margin-top: 10px; font-size: 10px; letter-spacing: 0.35em; }
   .headline { font-size: 32px; letter-spacing: 0.05em; }
