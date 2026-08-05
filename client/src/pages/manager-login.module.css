@@ -104,17 +104,18 @@
 }
 
 /* Point 3: larger, brighter, more dimensional logo mark.
-   Gradient border sweeps orange (left and bottom edges) through a bright
-   orange-yellow highlight at the top-right corner, into a dark, almost-black
-   navy on the right edge, matching the reference art direction closely. */
+   Gradient border sweeps orange (bottom-left, where the tail is, and the
+   left edge) through a bright orange-yellow highlight at the top, ending in
+   a clearly visible medium blue (matching --blue) on the right edge and
+   top-right corner, matching the reference art direction. */
 .logoIcon {
   width: 118px;
   height: 98px;
   position: relative;
   border: 10px solid transparent;
   border-radius: 26px;
-  background: linear-gradient(#071223, #071223) padding-box, linear-gradient(120deg, #ff5d00 0%, #ffac22 30%, #071223 68%) border-box;
-  box-shadow: 0 0 30px rgba(255, 122, 26, 0.3), inset 0 0 20px rgba(0, 30, 70, 0.25);
+  background: linear-gradient(#071223, #071223) padding-box, linear-gradient(135deg, #ff5d00 0%, #ffac22 38%, #1fa9ff 100%) border-box;
+  box-shadow: 0 0 30px rgba(255, 122, 26, 0.3), 0 0 40px rgba(31, 169, 255, 0.15), inset 0 0 20px rgba(0, 60, 110, 0.25);
 }
 
 .logoIcon::before {
