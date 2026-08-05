@@ -1,17 +1,13 @@
 /* Manager Command Center login: cinematic command-room overhaul v2.
  *
- * This rebuilds the visual layer (background decoration, login card chrome,
- * typography, spacing) to match a reference image and a 23-point written
- * brief from the product owner: a taller, more vertical composition, a
- * large glowing curved ceiling ring, a detailed illuminated world map, dark
- * translucent monitor-style analytics panels, a calmer navy-forward palette
- * with orange as a controlled accent, a more commanding login card with a
- * thin blue border instead of a bright cyan bracket, taller input fields,
- * a more dimensional submit button, and realistic high-back chair
- * silhouettes with a monitor desk row. Everything here is layered CSS only
- * (gradients, box-shadows, pseudo-elements, clip-path, filter,
- * backdrop-filter) - no new npm dependencies. Scoped as a CSS module so none
- * of this leaks into login.tsx, admin-login.tsx, or any other page.
+ * This uses a generated photographic background image (the command room
+ * environment: ceiling ring, world map wall, analytics monitor wall, empty
+ * chairs and console desks) as the page background, with the real login
+ * card, header text, and navigation rendered as live DOM elements on top
+ * for accessibility, real functionality, and responsiveness. A dark
+ * gradient vignette sits between the image and the foreground content for
+ * text and card legibility. Scoped as a CSS module so none of this leaks
+ * into login.tsx, admin-login.tsx, or any other page.
  */
 
 .page {
@@ -41,9 +37,12 @@
   margin: 0;
   font-family: Inter, Arial, Helvetica, sans-serif;
   color: var(--white);
-  background:
-    radial-gradient(ellipse 70% 45% at 50% 0%, rgba(15, 110, 210, 0.22), transparent 60%),
-    linear-gradient(180deg, #071729 0%, #030d1a 40%, #01060e 75%, #000305 100%);
+  background-color: #01060e;
+  background-image: url("../assets/command-center-background.jpg");
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center -300px;
+  background-attachment: local;
 }
 
 .page button,
@@ -61,11 +60,7 @@
   position: absolute;
   inset: 0;
   z-index: -5;
-  background-image:
-    linear-gradient(rgba(22, 130, 200, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(22, 130, 200, 0.06) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black, transparent 85%);
+  background: radial-gradient(ellipse 70% 45% at 50% 0%, rgba(15, 110, 210, 0.14), transparent 60%);
 }
 
 .page::after {
@@ -73,527 +68,16 @@
   position: absolute;
   inset: 0;
   z-index: -4;
-  background: radial-gradient(ellipse 65% 55% at 50% 38%, transparent 30%, rgba(0, 0, 0, 0.2) 60%, rgba(0, 0, 0, 0.88) 100%);
-}
-
-.backgroundRoom {
-  position: absolute;
-  inset: 0;
-  z-index: -3;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-/* Point 7: large curved ceiling structure - thick glowing orange inner ring,
- * blue outer ring, dark metallic curved ceiling, with depth/perspective
- * built from stacked radial arcs instead of a single thin border line. */
-.ceilingRing {
-  position: absolute;
-  width: 130%;
-  height: 340px;
-  top: -256px;
-  left: -15%;
-  border-radius: 50%;
-  background: radial-gradient(ellipse 50% 100% at 50% 100%, rgba(6, 26, 48, 0.75) 0%, rgba(4, 16, 30, 0.4) 55%, transparent 78%);
-  filter: drop-shadow(0 30px 50px rgba(0, 0, 0, 0.55));
-}
-
-.ceilingRingOuter {
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  border: 2px solid rgba(50, 165, 235, 0.7);
-  box-shadow:
-    0 0 30px rgba(30, 150, 230, 0.6),
-    0 0 70px rgba(15, 110, 200, 0.35),
-    inset 0 0 46px rgba(30, 150, 230, 0.2);
-}
-
-.ceilingRingOuter::before {
-  content: "";
-  position: absolute;
-  width: 88%;
-  height: 88%;
-  left: 6%;
-  top: 6%;
-  border-radius: 50%;
-  border: 1px solid rgba(80, 190, 255, 0.35);
-  box-shadow: inset 0 0 30px rgba(30, 150, 230, 0.15);
-}
-
-.ceilingRingOuter::after {
-  content: "";
-  position: absolute;
-  width: 112%;
-  height: 112%;
-  left: -6%;
-  top: -6%;
-  border-radius: 50%;
-  border: 1px solid rgba(30, 130, 210, 0.28);
-}
-
-.ceilingRingInner {
-  position: absolute;
-  width: 72%;
-  height: 68%;
-  left: 14%;
-  top: 26%;
-  border-radius: 50%;
-  border-bottom: 16px solid var(--orange);
-  border-left: 0;
-  border-right: 0;
-  filter: drop-shadow(0 0 26px rgba(255, 122, 26, 0.9)) drop-shadow(0 0 52px rgba(255, 90, 0, 0.55));
-}
-
-.ceilingRingInner::before {
-  content: "";
-  position: absolute;
-  inset: -24px -4% auto -4%;
-  height: 70px;
-  border-radius: 50%;
-  background: radial-gradient(ellipse 55% 100% at 50% 100%, rgba(255, 122, 26, 0.45), transparent 75%);
-  filter: blur(3px);
-}
-
-.ceilingRingInner::after {
-  content: "";
-  position: absolute;
-  width: 50%;
-  height: 45%;
-  left: 25%;
-  top: 10%;
-  border-radius: 50%;
-  border-bottom: 3px solid rgba(120, 200, 255, 0.6);
-  filter: drop-shadow(0 0 16px rgba(60, 170, 255, 0.65));
-}
-
-.ceilingRingArcs {
-  position: absolute;
-  width: 96%;
-  height: 90%;
-  left: 2%;
-  top: 4%;
-  border-radius: 50%;
-  border-top: 1px solid rgba(60, 175, 245, 0.3);
-  border-left: 1px solid transparent;
-  border-right: 1px solid transparent;
-  border-bottom: 1px solid transparent;
-}
-
-.ceilingRingArcs::before {
-  content: "";
-  position: absolute;
-  width: 106%;
-  height: 118%;
-  left: -3%;
-  top: -9%;
-  border-radius: 50%;
-  border-top: 1px solid rgba(40, 150, 230, 0.2);
-}
-
-/* Point 8: fuller illuminated world map with dots, network lines, and a
- * faint grid texture behind it for more "wall display" depth. A dense
- * dot-matrix "city lights" silhouette (built from a clip-path shape plus a
- * repeating radial-gradient dot pattern) reads as an illuminated US map,
- * with a network graph of nodes/links layered above it for the
- * "world map with connections" look. */
-.worldMap {
-  position: absolute;
-  left: 2%;
-  top: 20%;
-  width: 34%;
-  height: 46%;
-  opacity: 0.7;
-  filter: drop-shadow(0 0 20px rgba(20, 150, 255, 0.3));
-}
-
-.mapNetwork {
-  position: absolute;
-  left: -6%;
-  top: -30%;
-  width: 112%;
-  height: 65%;
-  opacity: 0.65;
-}
-
-.mapSilhouette {
-  position: absolute;
-  left: 4%;
-  top: 30%;
-  width: 92%;
-  height: 62%;
-  clip-path: polygon(2% 28%, 30% 22%, 55% 18%, 78% 20%, 88% 30%, 86% 40%, 90% 46%, 84% 52%, 86% 62%, 90% 72%, 82% 66%, 70% 64%, 58% 68%, 52% 78%, 44% 70%, 38% 66%, 24% 60%, 10% 52%, 4% 40%);
-  background: radial-gradient(ellipse 70% 60% at 45% 45%, rgba(20, 140, 230, 0.16), rgba(10, 80, 150, 0.06) 70%, transparent 100%);
-}
-
-.mapDotMatrix {
-  position: absolute;
-  left: 4%;
-  top: 30%;
-  width: 92%;
-  height: 62%;
-  clip-path: polygon(2% 28%, 30% 22%, 55% 18%, 78% 20%, 88% 30%, 86% 40%, 90% 46%, 84% 52%, 86% 62%, 90% 72%, 82% 66%, 70% 64%, 58% 68%, 52% 78%, 44% 70%, 38% 66%, 24% 60%, 10% 52%, 4% 40%);
-  background-image: radial-gradient(rgba(60, 190, 255, 0.9) 0.6px, transparent 0.9px);
-  background-size: 5px 5px;
-  filter: drop-shadow(0 0 6px rgba(40, 170, 255, 0.5));
-}
-
-.mapDotMatrix::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse 60% 55% at 55% 40%, rgba(255, 122, 26, 0.14), transparent 65%);
-}
-
-.mapGrid {
-  position: absolute;
-  inset: -8% -8%;
-  background-image:
-    linear-gradient(rgba(20, 130, 210, 0.12) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(20, 130, 210, 0.12) 1px, transparent 1px);
-  background-size: 22px 22px;
-  mask-image: radial-gradient(ellipse 70% 70% at 45% 45%, black, transparent 75%);
-  z-index: -1;
-}
-
-.mapDot {
-  position: absolute;
-  width: 4px;
-  height: 4px;
-  background: rgba(40, 190, 255, 0.9);
-  border-radius: 50%;
-  box-shadow: 0 0 8px rgba(40, 190, 255, 1), 0 0 16px rgba(20, 150, 255, 0.6);
-}
-
-.mapDotOrange {
-  width: 7px;
-  height: 7px;
-  background: var(--orange);
-  box-shadow: 0 0 10px var(--orange), 0 0 22px rgba(255, 122, 26, 0.8);
-}
-
-.mapLine {
-  position: absolute;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(40, 190, 255, 0.7), transparent);
-  transform-origin: left center;
-}
-
-/* Point 9: dark translucent monitor panels with gridlines, softer glow, and
- * more polished bar/line/ring visuals. */
-.analyticsPanel {
-  position: absolute;
-  right: 2.5%;
-  top: 20%;
-  width: 27%;
-  height: 48%;
-  display: grid;
-  grid-template-columns: 1fr 118px;
-  grid-template-rows: 1.25fr 1fr 1fr;
-  gap: 10px;
-  opacity: 0.7;
-}
-
-.hudCard {
-  position: relative;
-  border: 1px solid rgba(30, 150, 230, 0.32);
-  border-radius: 6px;
-  background: linear-gradient(150deg, rgba(6, 26, 46, 0.75), rgba(2, 10, 20, 0.55));
-  box-shadow: inset 0 0 26px rgba(10, 110, 200, 0.1), 0 0 22px rgba(0, 0, 0, 0.35);
-  padding: 12px 12px 8px;
-  overflow: hidden;
-}
-
-.hudCardLabel {
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  color: rgba(160, 200, 235, 0.55);
-  margin-bottom: 4px;
-}
-
-.hudCardLarge {
-  grid-column: 1 / -1;
-}
-
-.hudCardRing {
-  display: grid;
-  place-content: center;
-  border-color: transparent;
-  background: none;
-  box-shadow: none;
-}
-
-.chartGrid {
-  position: absolute;
-  inset: 20px 8px 10px 8px;
-  background-image:
-    linear-gradient(rgba(30, 150, 230, 0.14) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(30, 150, 230, 0.1) 1px, transparent 1px);
-  background-size: 100% 22%, 12.5% 100%;
-}
-
-.chartLine {
-  width: 100%;
-  height: 100%;
-  position: relative;
-  opacity: 0.95;
-}
-
-.chartLine::before {
-  content: "";
-  position: absolute;
-  inset: 28% 4% 12% 4%;
-  clip-path: polygon(0% 92%, 8% 84%, 16% 89%, 24% 66%, 34% 74%, 43% 46%, 51% 57%, 60% 30%, 69% 49%, 78% 18%, 87% 26%, 100% 4%, 100% 10%, 87% 32%, 78% 25%, 69% 55%, 60% 37%, 51% 64%, 43% 53%, 34% 81%, 24% 74%, 16% 96%, 8% 92%, 0% 99%);
-  background: linear-gradient(90deg, var(--blue-dim), var(--blue-light));
-  filter: drop-shadow(0 0 6px var(--blue));
-}
-
-.chartLine::after {
-  content: "";
-  position: absolute;
-  inset: 28% 4% 12% 4%;
-  clip-path: polygon(0% 100%, 8% 100%, 16% 100%, 24% 100%, 34% 100%, 43% 100%, 51% 100%, 60% 100%, 69% 100%, 78% 100%, 87% 100%, 100% 100%, 100% 7%, 87% 29%, 78% 22%, 69% 52%, 60% 34%, 51% 61%, 43% 50%, 34% 78%, 24% 71%, 16% 93%, 8% 89%, 0% 96%);
-  background: linear-gradient(180deg, rgba(40, 180, 255, 0.22), transparent);
-}
-
-.successRing {
-  position: relative;
-  width: 108px;
-  height: 108px;
-  margin: auto;
-  border-radius: 50%;
-  background: conic-gradient(var(--orange) 0deg 331deg, rgba(30, 90, 150, 0.35) 331deg 360deg);
-  box-shadow: 0 0 26px rgba(255, 122, 26, 0.5), 0 0 8px rgba(255, 122, 26, 0.6);
-}
-
-.successRing::before {
-  content: "";
-  position: absolute;
-  inset: 18px;
-  border-radius: inherit;
-  background: #061527;
-  box-shadow: inset 0 0 16px rgba(10, 100, 180, 0.3);
-}
-
-.successRingContent {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  text-align: center;
-  z-index: 1;
-}
-
-.successRingContent small {
-  font-size: 8px;
-  letter-spacing: 0.1em;
-  color: #a9b8ca;
-}
-
-.successRingContent strong {
-  font-size: 22px;
-  margin-top: 3px;
-  color: #f2f7ff;
-}
-
-.barChart {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 6px;
-  height: 100%;
-  padding-top: 8px;
-}
-
-.barChart span {
-  flex: 1;
-  min-width: 4px;
-  border-radius: 1px 1px 0 0;
-  background: linear-gradient(to top, var(--blue-dim), var(--blue-light));
-  box-shadow: 0 0 9px rgba(20, 150, 230, 0.45);
-}
-
-/* Point 18/19: lower command console - monitor desks with illuminated edges
- * plus more realistic high-back chair silhouettes (seat backs, armrests,
- * base, shadow separation from the background). */
-.consoleRoom {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 34%;
-  min-height: 300px;
-}
-
-.consoleFloor {
-  position: absolute;
-  inset: 0;
   background:
-    radial-gradient(ellipse 60% 100% at 50% 100%, rgba(20, 90, 160, 0.12), transparent 60%),
-    linear-gradient(to top, rgba(0, 2, 6, 1), rgba(1, 6, 13, 0.85) 45%, transparent 100%);
+    radial-gradient(ellipse 55% 42% at 50% 40%, transparent 40%, rgba(0, 0, 0, 0.32) 68%, rgba(0, 0, 0, 0.82) 100%),
+    linear-gradient(180deg, rgba(1, 6, 12, 0.35) 0%, rgba(1, 6, 12, 0.06) 14%, transparent 30%, transparent 70%, rgba(1, 6, 12, 0.5) 100%);
 }
 
-.consoleLine {
-  position: absolute;
-  left: 3%;
-  right: 3%;
-  bottom: 44%;
-  height: 3px;
-  border-radius: 50%;
-  background: linear-gradient(90deg, transparent 4%, rgba(255, 122, 26, 0.7) 20%, rgba(255, 122, 26, 0.7) 80%, transparent 96%);
-  box-shadow: 0 0 22px rgba(255, 122, 26, 0.55), 0 0 44px rgba(255, 100, 20, 0.3);
-  opacity: 0.85;
-}
-
-.consoleLine::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -14px;
-  height: 2px;
-  background: linear-gradient(90deg, transparent 8%, rgba(60, 175, 245, 0.5) 30%, rgba(60, 175, 245, 0.5) 70%, transparent 92%);
-  box-shadow: 0 0 16px rgba(40, 160, 230, 0.4);
-}
-
-.deskRow {
-  position: absolute;
-  left: 6%;
-  right: 6%;
-  bottom: 26%;
-  height: 10px;
-  display: flex;
-  justify-content: space-between;
-}
-
-.desk {
-  flex: 1;
-  max-width: 220px;
-  height: 10px;
-  margin: 0 4%;
-  border-radius: 2px;
-  background: linear-gradient(90deg, transparent, rgba(30, 150, 230, 0.5), transparent);
-  box-shadow: 0 0 16px rgba(20, 130, 220, 0.5), 0 6px 18px rgba(255, 100, 20, 0.12);
-  position: relative;
-}
-
-.desk::after {
-  content: "";
-  position: absolute;
-  left: 10%;
-  right: 10%;
-  bottom: -3px;
-  height: 2px;
-  background: rgba(255, 122, 26, 0.4);
-  filter: blur(1px);
-}
-
-.chair {
-  position: absolute;
-  bottom: 4%;
-  width: 10%;
-  max-width: 108px;
-  height: 52%;
-}
-
-.chairBack {
-  position: absolute;
-  left: 12%;
-  right: 12%;
-  bottom: 30%;
-  top: 0;
-  border-radius: 46% 46% 10% 10% / 20% 20% 6% 6%;
-  background: linear-gradient(180deg, #0d1a28 0%, #04080d 60%, #010204 100%);
-  box-shadow:
-    inset 4px 0 12px rgba(20, 90, 160, 0.2),
-    inset -4px 0 12px rgba(0, 0, 0, 0.65),
-    0 0 24px rgba(0, 0, 0, 0.6);
-}
-
-.chairBack::before {
-  content: "";
-  position: absolute;
-  left: 14%;
-  right: 14%;
-  top: 10%;
-  bottom: 42%;
-  border-radius: 40% 40% 12% 12%;
-  background: linear-gradient(180deg, rgba(20, 100, 170, 0.2), transparent 70%);
-}
-
-.chairBack::after {
-  content: "";
-  position: absolute;
-  left: -2%;
-  right: -2%;
-  top: 2%;
-  height: 14%;
-  border-radius: 50%;
-  background: linear-gradient(180deg, rgba(30, 120, 190, 0.22), transparent 80%);
-}
-
-.chairArmLeft,
-.chairArmRight {
-  position: absolute;
-  bottom: 34%;
-  width: 16%;
-  height: 22%;
-  border-radius: 4px;
-  background: linear-gradient(180deg, #0c1826, #030609);
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
-}
-
-.chairArmLeft {
-  left: 2%;
-}
-
-.chairArmRight {
-  right: 2%;
-}
-
-.chairSeat {
-  position: absolute;
-  left: 10%;
-  right: 10%;
-  bottom: 22%;
-  height: 16%;
-  border-radius: 20% 20% 10% 10% / 40% 40% 20% 20%;
-  background: linear-gradient(180deg, #0e1c2c, #050a10);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.65), inset 0 2px 6px rgba(20, 90, 160, 0.15);
-}
-
-.chairBase {
-  position: absolute;
-  left: 38%;
-  right: 38%;
-  bottom: 0;
-  height: 24%;
-  background: linear-gradient(180deg, #050a10, transparent);
-}
-
-.chairBase::before {
-  content: "";
-  position: absolute;
-  left: -60%;
-  right: -60%;
-  bottom: 2px;
-  height: 5px;
-  border-radius: 50%;
-  background: rgba(255, 122, 26, 0.28);
-  filter: blur(3px);
-}
-
-.chairOne { left: 4%; }
-.chairTwo { left: 24%; }
-.chairThree { left: 44%; transform: translateX(-6%); }
-.chairFour { right: 24%; }
-.chairFive { right: 4%; }
 
 .pageContent {
   width: min(1080px, 94%);
   margin: 0 auto;
-  padding: 96px 0 56px;
+  padding: 148px 0 56px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -733,8 +217,9 @@
   margin: 0;
   font-size: clamp(14px, 2.4vw, 19px);
   letter-spacing: 0.32em;
-  color: #c9d6e8;
+  color: #e4ebf6;
   text-transform: uppercase;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 18px rgba(0, 4, 10, 0.8);
 }
 
 /* Point 10/11: bigger, more commanding login card with a thin blue
