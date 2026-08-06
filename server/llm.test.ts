@@ -11,6 +11,7 @@ import {
   getCustomerReply,
   streamCustomerReply,
   checkVulgarBaitStrike,
+  STALL_DIAGNOSIS_RULES,
   type ScoreResponder,
   type ScoreCacheStore,
 } from "./llm";
@@ -1785,6 +1786,59 @@ describe("GRACEFUL_RELEASE_RULES - Rule F, scoring recognition", () => {
       { responder, cache: makeInMemoryCache() },
     );
     assert.ok(seen.includes(GRACEFUL_RELEASE_RULES));
+  });
+});
+
+describe("STALL_DIAGNOSIS_RULES - scoring stalls and objections as diagnostic moments", () => {
+  test("defines the decision-first philosophy and applies it throughout SOLVE", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /better decision than they would have made without them/);
+    assert.match(STALL_DIAGNOSIS_RULES, /not only near a close/);
+    assert.match(STALL_DIAGNOSIS_RULES, /Situation, Open, Listen, Visualize Success, Engineer, Confirm, and Solve/);
+    assert.match(STALL_DIAGNOSIS_RULES, /I don't know, I'll have to talk to my wife about that/);
+  });
+
+  test("requires validation and investigation instead of defensive assumptions", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /Never answer an assumption/);
+    assert.match(STALL_DIAGNOSIS_RULES, /What are you comparing us against/);
+    assert.match(STALL_DIAGNOSIS_RULES, /Validate before investigating/);
+    assert.match(STALL_DIAGNOSIS_RULES, /lets the customer name the specific concern/);
+    assert.match(STALL_DIAGNOSIS_RULES, /us versus the decision/);
+  });
+
+  test("rewards the unconsulted-stakeholder process and concise communication", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /validate the stall completely without resisting it/);
+    assert.match(STALL_DIAGNOSIS_RULES, /use a branching hypothetical to narrow the real concern/);
+    assert.match(STALL_DIAGNOSIS_RULES, /the skill being tested is the process of drawing the concern out/);
+    assert.match(STALL_DIAGNOSIS_RULES, /one good question, then silence/);
+    assert.match(STALL_DIAGNOSIS_RULES, /defending price before understanding the comparison/);
+  });
+
+  test("reaches the consulting rubric prompt the scorer actually sees", async () => {
+    let seen = "";
+    const responder: ScoreResponder = async (input) => {
+      seen = input;
+      return JSON.stringify({
+        needsDiscovery: 80,
+        objectionPrevention: 80,
+        trustBuilding: 80,
+        naturalClose: 80,
+        relationshipContinuity: 80,
+        closeOutcome: "recommendation_made",
+        feedback: "ok",
+      });
+    };
+    await scoreTranscript(
+      [
+        turn("consultant", "What are you comparing us against?"),
+        turn("customer", "I need to talk to my partner first."),
+      ],
+      "intermediate",
+      "consulting",
+      null,
+      { responder, cache: makeInMemoryCache() },
+    );
+    assert.ok(seen.includes(STALL_DIAGNOSIS_RULES));
+    assert.match(seen, /Score the quality of that process, not whether it produced a yes/);
   });
 });
 
