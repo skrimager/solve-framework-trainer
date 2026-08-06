@@ -23,13 +23,21 @@ import styles from "./manager-login.module.css";
 
 // Logo mark: an orange/blue gradient bordered rounded square with an orange
 // dot in the middle and a speech-bubble tail. The outline (rounded square
-// plus tail) is drawn as one continuous SVG path stroked with a single
-// linear gradient, so the tail fuses into the bubble with no seam - no CSS
-// border-triangle pseudo-element and no separate flat-colored shape.
+// plus tail) is one continuous filled shape - an outer boundary (square
+// corners plus a tail) and an inner boundary (the same square corners,
+// inset by the border thickness, no tail) combined with fill-rule evenodd
+// so the ring between them is the gradient border. A plain rounded rect
+// fill sits on top for the dark interior. The tail itself is a crisp
+// triangular pennant made of straight line segments (matching the
+// reference art direction, which is geometric and angular rather than a
+// soft rounded teardrop), and it is part of the same outer-boundary path
+// as the rounded corners rather than a separate pseudo-element, so the
+// join has no kink or seam and is filled with the same single gradient
+// in the same pass as the rest of the border.
 function LogoMark() {
   return (
     <div className={styles.logoIcon} aria-hidden="true">
-      <svg className={styles.logoOutline} viewBox="0 0 140 130">
+      <svg className={styles.logoOutline} viewBox="0 0 140 150">
         <defs>
           <linearGradient id="logoGradient" x1="0%" y1="100%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#ff5d00" />
@@ -38,26 +46,30 @@ function LogoMark() {
           </linearGradient>
         </defs>
         <path
+          fillRule="evenodd"
+          fill="url(#logoGradient)"
           d="M 11,33
              A 24,24 0 0 1 35,9
              L 105,9
              A 24,24 0 0 1 129,33
              L 129,75
              A 24,24 0 0 1 105,99
-             L 42,99
-             C 34,99 28,100 24,104
-             L 8,123
-             C 6,125.5 7,127.5 10,126.5
-             C 20,123 30,113 32,103
-             C 33,100.5 31,99.5 27,99.5
+             L 49,99
+             L 19,126
+             L 32,99.4
              A 24,24 0 0 1 11,75
+             Z
+             M 21,33
+             A 14,14 0 0 1 35,19
+             L 105,19
+             A 14,14 0 0 1 119,33
+             L 119,75
+             A 14,14 0 0 1 105,89
+             L 33,89
+             A 14,14 0 0 1 21,75
              Z"
-          fill="#071223"
-          stroke="url(#logoGradient)"
-          strokeWidth={10}
-          strokeLinejoin="round"
-          strokeLinecap="round"
         />
+        <rect x={21} y={19} width={98} height={70} rx={14} fill="#071223" />
       </svg>
       <span className={styles.logoDot} />
     </div>
