@@ -21,12 +21,44 @@ import styles from "./manager-login.module.css";
 // own success - it just updates auth state and CommandCenter re-renders into
 // the dashboard.
 
-// CSS-only logo mark: an orange/blue gradient bordered square with an orange
-// dot in the middle and a speech-bubble tail drawn as a CSS border-triangle.
-// No image asset, matching the reference (it has no img tag).
+// Logo mark: an orange/blue gradient bordered rounded square with an orange
+// dot in the middle and a speech-bubble tail. The outline (rounded square
+// plus tail) is drawn as one continuous SVG path stroked with a single
+// linear gradient, so the tail fuses into the bubble with no seam - no CSS
+// border-triangle pseudo-element and no separate flat-colored shape.
 function LogoMark() {
   return (
     <div className={styles.logoIcon} aria-hidden="true">
+      <svg className={styles.logoOutline} viewBox="0 0 140 130">
+        <defs>
+          <linearGradient id="logoGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#ff5d00" />
+            <stop offset="38%" stopColor="#ffac22" />
+            <stop offset="100%" stopColor="#1fa9ff" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M 11,33
+             A 24,24 0 0 1 35,9
+             L 105,9
+             A 24,24 0 0 1 129,33
+             L 129,75
+             A 24,24 0 0 1 105,99
+             L 42,99
+             C 34,99 28,100 24,104
+             L 8,123
+             C 6,125.5 7,127.5 10,126.5
+             C 20,123 30,113 32,103
+             C 33,100.5 31,99.5 27,99.5
+             A 24,24 0 0 1 11,75
+             Z"
+          fill="#071223"
+          stroke="url(#logoGradient)"
+          strokeWidth={10}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </svg>
       <span className={styles.logoDot} />
     </div>
   );
