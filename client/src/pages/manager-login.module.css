@@ -104,28 +104,30 @@
 }
 
 /* Point 3: larger, brighter, more dimensional logo mark.
-   Gradient border sweeps orange (bottom-left, where the tail is, and the
-   left edge) through a bright orange-yellow highlight at the top, ending in
-   a clearly visible medium blue (matching --blue) on the right edge and
-   top-right corner, matching the reference art direction. */
+   The rounded square plus its speech-bubble tail are drawn as one fused SVG
+   outline (see .logoOutline / LogoMark in manager-login.tsx) stroked with a
+   single gradient that sweeps orange (bottom-left, where the tail is, and
+   the left edge) through a bright orange-yellow highlight, ending in a
+   clearly visible medium blue (matching --blue) on the right edge and
+   top-right corner, matching the reference art direction. Drawing it as one
+   path means the tail has no seam against the square's border - both are
+   the same stroke in the same pass. This wrapper's box is sized to the
+   square body only; the SVG is taller than the wrapper so the tail can
+   extend below it without affecting layout of the text next to it. */
 .logoIcon {
   width: 118px;
   height: 98px;
   position: relative;
-  border: 10px solid transparent;
-  border-radius: 26px;
-  background: linear-gradient(#071223, #071223) padding-box, linear-gradient(135deg, #ff5d00 0%, #ffac22 38%, #1fa9ff 100%) border-box;
-  box-shadow: 0 0 30px rgba(255, 122, 26, 0.3), 0 0 40px rgba(31, 169, 255, 0.15), inset 0 0 20px rgba(0, 60, 110, 0.25);
 }
 
-.logoIcon::before {
-  content: "";
+.logoOutline {
   position: absolute;
-  left: 13px;
-  bottom: -20px;
-  border-top: 22px solid #ff7900;
-  border-right: 14px solid transparent;
-  filter: drop-shadow(0 4px 5px rgba(0, 0, 0, 0.45));
+  left: -11px;
+  top: -9px;
+  width: 140px;
+  height: 130px;
+  overflow: visible;
+  filter: drop-shadow(0 0 14px rgba(255, 122, 26, 0.22)) drop-shadow(0 0 18px rgba(31, 169, 255, 0.12));
 }
 
 .logoDot {
@@ -169,7 +171,7 @@
   padding-left: 6px;
   color: #d5deec;
   font-size: 20px;
-  letter-spacing: 0.46em;
+  letter-spacing: 0.95em;
   font-weight: 500;
 }
 
@@ -646,8 +648,8 @@
 @media (max-width: 850px) {
   .pageContent { padding-top: 56px; }
   .brandLockup { gap: 14px; margin-bottom: 30px; }
-  .logoIcon { width: 84px; height: 72px; border-width: 8px; border-radius: 19px; }
-  .logoIcon::before { left: 10px; bottom: -15px; border-top-width: 16px; border-right-width: 10px; }
+  .logoIcon { width: 84px; height: 72px; }
+  .logoOutline { width: 99.66px; height: 92.54px; left: -7.83px; top: -6.41px; }
   .framework { font-size: 14px; }
   .loginCard { padding: 36px 34px 32px; margin-top: 40px; }
   .analyticsPanel { opacity: 0.4; right: -6%; }
@@ -660,11 +662,11 @@
 @media (max-width: 560px) {
   .pageContent { width: 100%; padding: 36px 14px 34px; }
   .brandLockup { margin-bottom: 24px; }
-  .logoIcon { width: 64px; height: 55px; border-width: 5px; border-radius: 14px; }
+  .logoIcon { width: 64px; height: 55px; }
+  .logoOutline { width: 75.93px; height: 70.51px; left: -5.97px; top: -4.88px; }
   .logoDot { width: 14px; height: 14px; }
-  .logoIcon::before { left: 7px; bottom: -11px; border-top-width: 12px; border-right-width: 8px; }
   .solve { font-size: 38px; }
-  .framework { margin-top: 10px; font-size: 10px; letter-spacing: 0.35em; }
+  .framework { margin-top: 10px; font-size: 10px; letter-spacing: 0.95em; }
   .headline { font-size: 32px; letter-spacing: 0.05em; }
   .loginHeading { gap: 12px; font-size: 19px; letter-spacing: 0.13em; margin: 18px 0 14px; }
   .loginHeading::before, .loginHeading::after { width: 40px; max-width: none; }
