@@ -117,7 +117,9 @@ export function buildPersonaVariantSection(selected: SelectedPersonaVariant): st
     lines.push(`- Your personality and communication style this time: ${selected.personality}`);
   }
   if (selected.motivation) {
-    lines.push(`- What is most driving you this time: ${selected.motivation}`);
+    lines.push(
+      `- Your internal motivation this time: ${selected.motivation}. Keep this as private context, not a line you must announce or repeat. Let it shape your reactions and reveal it only when a relevant discovery question earns it or it naturally belongs in the topic being discussed.`,
+    );
   }
   if (selected.objections.length > 0) {
     lines.push(
