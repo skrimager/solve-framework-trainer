@@ -4,11 +4,13 @@ import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 import {
+  buildFinalAnsweredQuestionGate,
   buildConversationStateLines,
   buildDirectQuestionLines,
   deriveConversationState,
   deriveDirectQuestion,
   hasCustomerAcceptedProposal,
+  repeatsClosedAnsweredQuestion,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
@@ -553,7 +555,15 @@ export function buildCustomerReplyPrompt(
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
   const stateBlock = buildTurnStateBlock(transcript);
-  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
+  // The general state block supplies the complete conversation recap. The
+  // narrow final gate is intentionally repeated at the end of the volatile
+  // prompt so an answered fact is the last behavioral decision the model sees
+  // before it writes a customer line.
+  const finalAnsweredQuestionGate = buildFinalAnsweredQuestionGate(deriveConversationState(transcript));
+  const finalGateBlock = finalAnsweredQuestionGate.length > 0
+    ? `FINAL PRE-REPLY CHECK (do not mention this check):\n${finalAnsweredQuestionGate.join("\n")}\n\n`
+    : "";
+  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}${finalGateBlock}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";
   return `${stablePrefix}\n\n${variantBlock}${volatile}`;
@@ -635,18 +645,32 @@ export async function getCustomerReply(
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
   const promptCacheKey = cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier));
 
-  if (customerReplyTestResponder) {
-    return { text: (await customerReplyTestResponder({ input, model: CHAT_MODEL, promptCacheKey })).trim(), sessionEnded: false };
+  const requestReply = async (requestInput: string): Promise<string> => {
+    if (customerReplyTestResponder) {
+      return (await customerReplyTestResponder({ input: requestInput, model: CHAT_MODEL, promptCacheKey })).trim();
+    }
+    const response = await client.responses.create({
+      model: CHAT_MODEL,
+      input: requestInput,
+      prompt_cache_key: promptCacheKey,
+    });
+    logCachedTokens("customer-reply", response.usage);
+    return (response.output_text || "").trim();
+  };
+
+  let text = await requestReply(input);
+  const state = deriveConversationState(transcript);
+  if (repeatsClosedAnsweredQuestion(state, text)) {
+    const repairInput = `${input}\n\nVALIDATION FAILED: the draft below asks about a factual subject that the transcript says is ANSWERED AND CLOSED. Rewrite it now as one natural customer line. You may briefly acknowledge the stated answer, but do not ask any question or detail about that closed subject. Move to a genuinely unrelated concern or simply stop after acknowledging it. Output ONLY the replacement spoken line.\n\nREJECTED DRAFT: "${text}"`;
+    text = await requestReply(repairInput);
+    // A second deterministic guard makes this a reliability mechanism rather
+    // than a best-effort extra prompt. It is intentionally short and natural:
+    // accepting a clear factual answer is always preferable to making the
+    // consultant answer the same question a third time.
+    if (repeatsClosedAnsweredQuestion(state, text)) text = "Okay, that helps.";
   }
 
-  const response = await client.responses.create({
-    model: CHAT_MODEL,
-    input,
-    prompt_cache_key: promptCacheKey,
-  });
-
-  logCachedTokens("customer-reply", response.usage);
-  return { text: (response.output_text || "").trim(), sessionEnded: false };
+  return { text, sessionEnded: false };
 }
 
 // Streaming variant of getCustomerReply. Requests the model reply with
@@ -678,6 +702,21 @@ export async function streamCustomerReply(
   if (strike) {
     onSentence(strike.text, 0);
     return strike;
+  }
+
+  // A streamed token cannot be taken back once it reaches the trainee. When a
+  // concrete factual question is closed, generate through the validated
+  // non-streaming path first, then emit its complete sentences. This rare path
+  // trades token-by-token delivery for the same deterministic no-repeat
+  // guarantee text mode has; ordinary turns retain the normal low-latency
+  // streaming implementation below.
+  if (deriveConversationState(transcript).answeredCustomerQuestions.some((question) => question.status === "answered")) {
+    const validated = await getCustomerReply(customerPersona, transcript, difficulty, escalationTier, variantSection);
+    const streamer = createSentenceStreamer();
+    let index = 0;
+    for (const sentence of streamer.push(validated.text)) onSentence(sentence, index++);
+    for (const sentence of streamer.flush()) onSentence(sentence, index++);
+    return validated;
   }
 
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);

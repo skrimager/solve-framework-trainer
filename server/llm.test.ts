@@ -2037,6 +2037,23 @@ describe("buildCustomerReplyPrompt - answered factual-question memory", () => {
     );
   });
 
+  test("places a concrete towing closure gate immediately before the output instruction", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What specific towing package and towing capacity does this truck have?"),
+        msg("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+      ],
+      "advanced",
+    );
+    const gate = prompt.lastIndexOf("FINAL PRE-REPLY CHECK");
+    const output = prompt.lastIndexOf("Respond with your next line as the customer");
+    assert.ok(gate > prompt.lastIndexOf("Conversation so far:"));
+    assert.ok(gate < output);
+    assert.match(prompt.slice(gate, output), /TOWING-CAPABILITY BOUNDARY/);
+    assert.match(prompt.slice(gate, output), /What comes with the towing package/i);
+  });
+
   test("preserves one concise clarification when the consultant is genuinely vague", () => {
     const prompt = buildCustomerReplyPrompt(
       PERSONA,
@@ -2519,6 +2536,69 @@ describe("getCustomerReply - mocked Don Auto Sales answer discipline", () => {
       assert.doesNotMatch(usedReply, /good visibility|driver-assistance|smooth quiet highway ride/i);
       assert.doesNotMatch(usedReply, /\?$/);
       assert.doesNotMatch(usedReply, /\bwe (?:have|carry|offer|stock|recommend)\b/i);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
+  });
+});
+
+describe("getCustomerReply - closed factual-question repair", () => {
+  test("repairs a rephrased towing-package repeat before it reaches the caller", async () => {
+    const prompts: string[] = [];
+    const replies = [
+      "What features come with the towing package?",
+      "Okay, that helps. I would like to see the maintenance history next.",
+    ];
+    setCustomerReplyTestResponder(({ input }) => {
+      prompts.push(input);
+      const reply = replies.shift();
+      assert.ok(reply);
+      return reply;
+    });
+
+    try {
+      const result = await getCustomerReply(
+        personaVariantSeed["auto-sales-skeptical-negotiator"].core,
+        [
+          turn("customer", "What specific towing package and towing capacity does this truck have?"),
+          turn("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+        ],
+      );
+      assert.equal(result.text, "Okay, that helps. I would like to see the maintenance history next.");
+      assert.equal(prompts.length, 2);
+      assert.match(prompts[1], /VALIDATION FAILED/);
+      assert.match(prompts[1], /REJECTED DRAFT/);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
+  });
+
+  test("uses that same validated path before streaming a closed factual topic", async () => {
+    const replies = [
+      "What features come with the towing package?",
+      "Okay, that helps. I would like to see the maintenance history next.",
+    ];
+    const spoken: string[] = [];
+    setCustomerReplyTestResponder(() => {
+      const reply = replies.shift();
+      assert.ok(reply);
+      return reply;
+    });
+
+    try {
+      const result = await streamCustomerReply(
+        personaVariantSeed["auto-sales-skeptical-negotiator"].core,
+        [
+          turn("customer", "What specific towing package and towing capacity does this truck have?"),
+          turn("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+        ],
+        "intermediate",
+        0,
+        "",
+        (sentence) => spoken.push(sentence),
+      );
+      assert.equal(result.text, "Okay, that helps. I would like to see the maintenance history next.");
+      assert.deepEqual(spoken, ["Okay, that helps.", "I would like to see the maintenance history next."]);
     } finally {
       setCustomerReplyTestResponder(null);
     }

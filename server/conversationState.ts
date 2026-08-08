@@ -610,7 +610,7 @@ const SUBJECT_CAPTURE_PATTERNS: RegExp[] = [
 // Where a captured phrase stops being the subject and starts being the rest of
 // the sentence: "the safety rating on this one" is about the safety rating.
 const SUBJECT_TAIL_BREAK =
-  /\s+(?:on|in|for|with|at|like|that|this|these|those|here|there|though|but|and|when|if|as|does|do|did|is|are|was|were|can|could|will|would|should|has|have|had)\s+/i;
+  /\s+(?:on|in|for|with|at|like|that|this|these|those|here|there|though|but|when|if|as|does|do|did|is|are|was|were|can|could|will|would|should|has|have|had)\s+/i;
 
 const SUBJECT_LEADING_FILLER = /^(?:the|a|an|your|our|its|their|his|her|any|some|more|other|of)\s+/i;
 
@@ -1257,4 +1257,85 @@ export function buildConversationStateLines(state: ConversationState): string[] 
   }
 
   return lines;
+}
+
+// The normal state line says a factual subject is closed in the customer's own
+// words. A small number of product questions name one practical capability with
+// several interchangeable surface forms, though: "towing package", "tow
+// rating", and "features for towing" are not three independent discovery
+// topics. The live model was rationalizing its way around the general closure
+// instruction by picking one of those neighboring forms. This deliberately
+// narrow detector is only used to make the prompt's final gate concrete; it
+// does not change which questions are considered answered.
+function isTowingCapabilityQuestion(question: AnsweredCustomerQuestionState): boolean {
+  return /\b(?:towing|tow|trailer|hauling)\s+(?:package|capacity|rating|range|feature|features|option|options|configuration|configurations|spec|specs|specification|specifications|performance)\b/i.test(
+    question.question,
+  ) || /\b(?:towing|tow)\s+(?:package|capacity|rating|range)\b/i.test(question.label);
+}
+
+// A final, volatile-tail gate rather than another stable-prefix aspiration. It
+// sits immediately before generation, after both the transcript and the
+// ordinary state recap, so it is difficult to overlook or reinterpret when a
+// persona is inclined to "push for specifics." It only applies to questions
+// proven answered by deriveAnsweredCustomerQuestions.
+export function buildFinalAnsweredQuestionGate(state: ConversationState): string[] {
+  const closed = state.answeredCustomerQuestions.filter((question) => question.status === "answered");
+  if (closed.length === 0) return [];
+
+  const lines = [
+    "- FINAL ANSWERED-QUESTION GATE — apply this immediately before writing your line. A factual question listed below has already received a specific answer. You may briefly acknowledge it, but your reply MUST NOT contain a question seeking that fact, a detail/subpart of it, an explanation of it, or a differently worded version of it. Do not turn a closed question into a supposedly new question by starting with \"what about\", \"can you tell me\", \"does it have\", \"what comes with\", or \"how much\".",
+  ];
+
+  for (const question of closed) {
+    lines.push(
+      `  - CLOSED FACT: ${question.label}. The answer you already received is "${question.answer}". Treat every narrower, broader, or rephrased request for that same fact as CLOSED too.`,
+    );
+    if (isTowingCapabilityQuestion(question)) {
+      lines.push(
+        "  - TOWING-CAPABILITY BOUNDARY: towing capacity/rating/range, the towing package, towing features/options/configurations/specifications, trailer or hauling performance, and stability/control while towing are ONE closed practical subject here. They are not separate follow-ups. Do NOT ask, for example, \"What comes with the towing package?\", \"What towing features or specs does it have?\", \"How does it perform with a load?\", or \"What helps with stability when towing?\" Acknowledge the stated range and move to a genuinely unrelated need instead.",
+      );
+    }
+  }
+  return lines;
+}
+
+function questionContexts(text: string): string[] {
+  // Keep the check scoped to what the customer is actually asking. A line such
+  // as "I use it for hauling; what is the fuel economy?" should not be rejected
+  // merely because its explanatory sentence contains "hauling."
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  return sentences.flatMap((sentence, index) =>
+    sentence.includes("?") ? [[sentences[index - 1], sentence].filter(Boolean).join(" ")] : [],
+  );
+}
+
+function isTowingCapabilityRepeat(question: string): boolean {
+  const lower = question.toLowerCase();
+  // "Fuel economy when not towing" is an independent concern. The other
+  // patterns are capability/package variants explicitly closed by the prompt
+  // boundary above.
+  if (/\b(?:not|without)\s+towing\b/.test(lower)) return false;
+  return (
+    /\b(?:payload|trailer|trailering)\b/.test(lower) ||
+    /\b(?:towing|tow|hauling|haul)\b[\s\S]{0,80}\b(?:package|capacity|rating|range|feature|option|configuration|spec|performance|perform|handle|load|stability|control|ride quality|comfort)\b/.test(lower) ||
+    /\b(?:package|capacity|rating|range|feature|option|configuration|spec|performance|perform|handle|load|stability|control|ride quality|comfort)\b[\s\S]{0,80}\b(?:towing|tow|hauling|haul)\b/.test(lower)
+  );
+}
+
+// Deterministic backstop for the final prompt gate. The model still writes the
+// response; this function only recognizes a question that the transcript
+// already proves is closed so the caller can request one clean revision instead
+// of allowing an intermittent prompt-adherence miss to reach the trainee.
+export function repeatsClosedAnsweredQuestion(state: ConversationState, reply: string): boolean {
+  const closed = state.answeredCustomerQuestions.filter((question) => question.status === "answered");
+  if (closed.length === 0) return false;
+  const questions = questionContexts(reply);
+
+  return closed.some((closedQuestion) =>
+    questions.some((question) => {
+      if (isTowingCapabilityQuestion(closedQuestion) && isTowingCapabilityRepeat(question)) return true;
+      const subject = extractAskedSubject(question);
+      return subject ? subject.keywords.some((keyword) => closedQuestion.keywords.includes(keyword)) : false;
+    }),
+  );
 }

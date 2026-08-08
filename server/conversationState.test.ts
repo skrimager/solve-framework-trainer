@@ -7,11 +7,14 @@ import {
   SEQUENCING_STOP_THRESHOLD,
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
+  buildFinalAnsweredQuestionGate,
   buildDirectQuestionLines,
   deriveConversationState,
   deriveDirectQuestion,
+  extractAskedSubject,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
+  repeatsClosedAnsweredQuestion,
 } from "./conversationState";
 
 // Terse transcript builder: "c: ..." is the customer, "r: ..." is the rep.
@@ -752,6 +755,65 @@ describe("Rule Q: answered customer factual questions do not get re-asked", () =
     assert.equal(state.answeredCustomerQuestions.length, 1);
     assert.equal(state.answeredCustomerQuestions[0].status, "answered");
     assert.match(buildConversationStateLines(state).join("\n"), /same fact again with different wording/i);
+  });
+
+  test("keeps every towing-package/capacity surface form inside one final closed boundary", () => {
+    const initial = "What specific towing package and towing capacity does this truck have?";
+    const rephrase = "Can you tell me about the features that come with the towing package?";
+    const subject = extractAskedSubject(initial);
+    const rephrasedSubject = extractAskedSubject(rephrase);
+    assert.deepEqual(subject?.keywords, ["specific", "tow", "package", "capacity"]);
+    assert.deepEqual(rephrasedSubject?.keywords, ["feature"]);
+
+    const state = deriveConversationState(
+      t(initial.startsWith("c:") ? initial : `c: ${initial}`, "r: This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.match(gate, /TOWING-CAPABILITY BOUNDARY/);
+    assert.match(gate, /towing features\/options\/configurations\/specifications/i);
+    assert.match(gate, /What comes with the towing package/i);
+    assert.match(gate, /How does it perform with a load/i);
+  });
+
+  test("keeps the stronger towing boundary out of non-auto factual questions", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.doesNotMatch(gate, /TOWING-CAPABILITY BOUNDARY/);
+  });
+
+  test("recognizes rephrased towing capability questions without mistaking a separate fuel question for one", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What specific towing package and towing capacity does this truck have?",
+        "r: This truck can tow 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What features come with the towing package?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "How does it handle long distances when towing heavy loads?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(
+        state,
+        "What I really need to know next is how its payload capacity holds up under heavy use. What’s the maximum weight it can handle in the bed?",
+      ),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What fuel economy can I expect when not towing?"),
+      false,
+    );
   });
 
   test("works for a different vertical's named fact instead of vehicle vocabulary", () => {
