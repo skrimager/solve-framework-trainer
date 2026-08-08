@@ -11,6 +11,9 @@
 //   Rule 2  Has the rep already redirected this topic away twice? -> stop asking.
 //   Rule 3  Which concrete numbers/answers has the rep already given? -> never
 //           ask for them again.
+//   Rule Q  Which factual questions has the customer asked and received a
+//           specific answer to? -> accept that answer rather than asking the
+//           same question again in slightly different words.
 //   Rule 4  Has the rep established who decides and pays? -> honor it, and never
 //           spring a brand-new absent decision maker as a blocker.
 //   Rule 5  Has the customer already had its one "what else do you have" round?
@@ -164,7 +167,7 @@ export const PROPOSAL_MARKERS: RegExp[] = [
 
 // A number, price, date, or other concrete figure the rep has handed over. Once
 // given, the customer knows it and can never ask for it again from scratch.
-const QUOTED_FACT_PATTERN = /(\$\s?[\d,]+(?:\.\d{2})?|\b\d[\d,]*(?:\.\d+)?\s*(?:percent|%|miles|mpg|months?|weeks?|days?|years?|bedrooms?|baths?|square feet|sq ?ft)\b)/i;
+const QUOTED_FACT_PATTERN = /(\$\s?[\d,]+(?:\.\d{2})?|\b\d[\d,]*(?:\.\d+)?\s*(?:percent\b|%|miles\b|mpg\b|months?\b|weeks?\b|days?\b|years?\b|hours?\b|pounds?\b|lbs\b|tons?\b|bedrooms?\b|baths?\b|square feet\b|sq ?ft\b))/i;
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
@@ -410,6 +413,9 @@ export interface ConversationState {
   acceptedSolutionLine: string | null;
   // Concrete figures the rep has already provided.
   quotedFacts: string[];
+  // Factual questions the customer asked that the consultant answered
+  // specifically, or answered vaguely enough to permit one clarification.
+  answeredCustomerQuestions: AnsweredCustomerQuestionState[];
   // A number the customer named that the rep has since met, if any.
   metNeed: MetNeedState | null;
 }
@@ -585,18 +591,26 @@ const SOFT_ASK_MARKERS: RegExp[] = [
 const SUBJECT_CAPTURE_PATTERNS: RegExp[] = [
   /\b(?:tell me|talk|hear|know|curious|wondering|asking)\b[^?.!]{0,24}\babout\s+([^?.!,;]{2,60})/i,
   /\bwhat(?:'s| is| are)\s+(?:the|your|its|their)\s+([^?.!,;]{2,60})/i,
+  // "What towing capacity does it have?" / "What interest rate is this?"
+  // are common factual asks that do not include "the" after what.
+  /\bwhat\s+([^?.!,;]{2,60})/i,
   /\bhow(?:'s| is| are)\s+(?:the|its|their)\s+([^?.!,;]{2,60})/i,
   /\bwhat about\s+([^?.!,;]{2,60})/i,
   /\bhow about\s+([^?.!,;]{2,60})/i,
   /\bwhat kind of\s+([^?.!,;]{2,60})/i,
+  // "How much can it tow?" has its subject after "it", rather than directly
+  // after "how much".
+  /\bhow (?:much|many)\s+(?:can|does|do|would|will)\s+(?:it|this|that|they|we)\s+([^?.!,;]{2,60})/i,
   /\bhow (?:much|many)\s+([^?.!,;]{2,60})/i,
   /\bdoes it (?:have|come with|get)\s+([^?.!,;]{2,60})/i,
+  /\b(?:can|could|will|would) (?:it|this|that|they|we)\s+([^?.!,;]{2,60})/i,
+  /\bis (?:it|this|that|the)\s+([^?.!,;]{2,60})/i,
 ];
 
 // Where a captured phrase stops being the subject and starts being the rest of
 // the sentence: "the safety rating on this one" is about the safety rating.
 const SUBJECT_TAIL_BREAK =
-  /\s+(?:on|in|for|with|at|like|that|this|these|those|here|there|though|but|and|when|if|as|does|do|did|is|are|was|were|can|could|will|would|should|has|have|had)\s+/i;
+  /\s+(?:on|in|for|with|at|like|that|this|these|those|here|there|though|but|when|if|as|does|do|did|is|are|was|were|can|could|will|would|should|has|have|had)\s+/i;
 
 const SUBJECT_LEADING_FILLER = /^(?:the|a|an|your|our|its|their|his|her|any|some|more|other|of)\s+/i;
 
@@ -616,6 +630,10 @@ const SUBJECT_STOPWORDS = new Set([
 // a stemmer. "ss" endings are left alone so "business" does not become "busines".
 function normalizeKeyword(word: string): string {
   const w = word.toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Enough stemming to recognize "tow" / "towing" as the same factual
+  // subject. This is intentionally small and only used for matching a
+  // customer's own rephrased question or the consultant's answer.
+  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
   if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
   return w;
 }
@@ -674,7 +692,7 @@ function isSequencingRedirect(text: string): boolean {
 }
 
 function mentionsKeyword(text: string, keywords: string[]): boolean {
-  return keywords.some((k) => new RegExp(`\\b${k}s?\\b`, "i").test(text));
+  return keywords.some((k) => new RegExp(`\\b${k}(?:s|ing|ed)?\\b`, "i").test(text));
 }
 
 // Counts, per subject the customer raised, how many times the rep proposed
@@ -796,6 +814,155 @@ function deriveQuotedFacts(transcript: TranscriptMessage[]): string[] {
   return transcript
     .filter((m) => m.role === "consultant" && QUOTED_FACT_PATTERN.test(m.content))
     .map((m) => m.content.trim());
+}
+
+// ---------------------------------------------------------------------------
+// Rule Q: a factual question that has already received a real answer.
+//
+// Quoted facts above remember figures the consultant said, but they do not
+// establish what customer question that figure answered. That gap is what lets a
+// customer hear "12,000 to 14,000 pounds" and nevertheless ask another version
+// of "what can it tow?" on the next turn. This mirror-image state keeps the
+// customer's own factual ask attached to the consultant's immediate response.
+//
+// Detection stays deliberately conservative. It only closes a question when the
+// response contains an explicit factual shape (a number/range, a clear yes/no,
+// or a named feature) and either names the question's subject or is a direct
+// yes/no reply. A vague or evasive reply leaves room for exactly one
+// clarification; it is never treated as a specific answer.
+// ---------------------------------------------------------------------------
+
+export interface AnsweredCustomerQuestionState {
+  // The customer's own words for the factual subject, so this works across every
+  // vertical rather than through a vocabulary of vehicle-only topics.
+  label: string;
+  keywords: string[];
+  question: string;
+  answer: string;
+  // "answered" means the consultant supplied a concrete fact. "vague" means
+  // the answer was non-specific or evasive and the customer may clarify once.
+  status: "answered" | "vague";
+  // Once the customer has used its one clarification after a vague answer, the
+  // topic closes even if the follow-up response remained vague.
+  clarificationUsed: boolean;
+}
+
+const FACTUAL_QUESTION_MARKERS: RegExp[] = [
+  /\?/,
+  /\b(?:what|which|how|can|could|does|do|did|is|are|will|would|has|have)\b/i,
+];
+
+const SPECIFIC_FACT_MARKERS: RegExp[] = [
+  QUOTED_FACT_PATTERN,
+  // A spoken range may have the unit only after the second figure, e.g.
+  // "12,000 to 14,000 pounds." The quoted-fact pattern still sees the latter
+  // figure, but naming the full range here makes the intended evidence clear.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:to|-)\s*\d[\d,]*(?:\.\d+)?\s*(?:percent|%|miles|mpg|months?|weeks?|days?|hours?|pounds?|lbs|tons?|years?)\b/i,
+  /^(?:yes|no)\b/i,
+  /\b(?:yes|no),?\s+(?:it|we|that|they)\b/i,
+  /\b(?:it|we|that|they)\s+(?:does|do|is|are|has|have|can|cannot|can'?t|doesn'?t|don'?t)\b/i,
+  // A factual feature answer must actually name a feature after the verb. This
+  // avoids counting "it has what you need" as a real answer.
+  /\b(?:comes? with|includes?|is equipped with|has)\s+(?:the |a |an |standard |factory )?[a-z0-9][a-z0-9 -]{2,}\b/i,
+];
+
+const VAGUE_FACT_REPLY_MARKERS: RegExp[] = [
+  /\b(?:not sure|don'?t know|do not know|not certain|hard to say)\b/i,
+  /\b(?:need|have) to (?:check|confirm|verify|look up|find out|get)\b/i,
+  /\b(?:let me|i can) (?:check|confirm|verify|look up|find out|get)\b/i,
+  /\b(?:cannot|can'?t|unable to) (?:check|confirm|verify|say|tell|give)\b/i,
+  /\b(?:it|that) (?:depends|varies|should be|might be|could be|probably)\b/i,
+  /\b(?:generally|usually|typically|more or less|somewhere around)\b/i,
+];
+
+function subjectsOverlap(left: AskedSubject, right: AskedSubject): boolean {
+  return left.keywords.some((keyword) => right.keywords.includes(keyword));
+}
+
+function isFactualCustomerQuestion(text: string): AskedSubject | null {
+  if (!matchesAny(text, FACTUAL_QUESTION_MARKERS)) return null;
+  return extractAskedSubject(text);
+}
+
+function isSpecificFactualAnswer(answer: string, subject: AskedSubject): boolean {
+  const hasSpecificFact = matchesAny(answer, SPECIFIC_FACT_MARKERS);
+  if (!hasSpecificFact) return false;
+
+  const directBinaryReply =
+    /^(?:yes|no)\b/i.test(answer.trim()) ||
+    /\b(?:it|we|that|they)\s+(?:does|do|is|are|has|have|can|cannot|can'?t|doesn'?t|don'?t)\b/i.test(answer);
+  return directBinaryReply || mentionsKeyword(answer, subject.keywords);
+}
+
+function isVagueFactualAnswer(answer: string, subject: AskedSubject): boolean {
+  // A question-only discovery pivot is handled by the existing sequencing and
+  // direct-question rules. It is not a vague factual answer that invites a
+  // clarification loop.
+  if (isSequencingRedirect(answer)) return false;
+  if (answer.includes("?") && !matchesAny(answer, SPECIFIC_FACT_MARKERS)) return false;
+  return matchesAny(answer, VAGUE_FACT_REPLY_MARKERS) || mentionsKeyword(answer, subject.keywords);
+}
+
+function deriveAnsweredCustomerQuestions(transcript: TranscriptMessage[]): AnsweredCustomerQuestionState[] {
+  const tracked: AnsweredCustomerQuestionState[] = [];
+  let pending: { entry: AnsweredCustomerQuestionState; subject: AskedSubject } | null = null;
+
+  for (const message of transcript) {
+    const text = message.content.trim();
+    if (!text) continue;
+
+    if (message.role === "customer") {
+      const subject = isFactualCustomerQuestion(text);
+      if (!subject) {
+        pending = null;
+        continue;
+      }
+
+      const existing = tracked.find((entry) => subjectsOverlap(entry, subject));
+      if (existing) {
+        if (existing.status === "vague") {
+          existing.clarificationUsed = true;
+          pending = { entry: existing, subject };
+        } else {
+          // This is precisely the loop we are preventing. The topic was already
+          // concretely answered, so preserve that binding fact even if the
+          // consultant's redundant reply merely says "like I said" and omits
+          // the subject word.
+          pending = null;
+        }
+      } else {
+        const entry: AnsweredCustomerQuestionState = {
+          label: subject.label,
+          keywords: subject.keywords,
+          question: text,
+          answer: "",
+          status: "vague",
+          clarificationUsed: false,
+        };
+        tracked.push(entry);
+        pending = { entry, subject };
+      }
+      continue;
+    }
+
+    if (!pending) continue;
+    const { entry, subject } = pending;
+    if (isSpecificFactualAnswer(text, subject)) {
+      entry.answer = text;
+      entry.status = "answered";
+    } else if (isVagueFactualAnswer(text, subject)) {
+      entry.answer = text;
+      entry.status = "vague";
+    } else {
+      // The consultant neither answered the factual question nor gave the kind
+      // of vague/dodging response this rule governs. Leave it to the existing
+      // redirect/direct-question mechanisms rather than asserting a fact.
+      tracked.splice(tracked.indexOf(entry), 1);
+    }
+    pending = null;
+  }
+
+  return tracked.filter((entry) => entry.answer.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1169,7 @@ export function deriveConversationState(transcript: TranscriptMessage[]): Conver
     alternativesRoundSpent: isAlternativesRoundSpent(transcript),
     acceptedSolutionLine: deriveAcceptedSolutionLine(transcript),
     quotedFacts: deriveQuotedFacts(transcript),
+    answeredCustomerQuestions: deriveAnsweredCustomerQuestions(transcript),
     metNeed: deriveMetNeed(transcript),
   };
 }
@@ -1055,6 +1223,22 @@ export function buildConversationStateLines(state: ConversationState): string[] 
     );
   }
 
+  for (const question of state.answeredCustomerQuestions) {
+    if (question.status === "answered") {
+      lines.push(
+        `- You asked a factual question about ${question.label} ("${question.question}"), and the consultant gave you a specific, on-topic answer: "${question.answer}" That question is ANSWERED AND CLOSED. Accept it with a brief natural reaction if you reply to it (for example, "Okay, that helps" or "Got it"), then move to a genuinely different topic or the next natural beat. Do NOT ask another version of ${question.label}, do not ask for the same fact again with different wording, and do not act as though you did not hear the answer.`
+      );
+    } else if (question.clarificationUsed) {
+      lines.push(
+        `- You asked about ${question.label}, and the consultant's response was vague or non-specific: "${question.answer}" You already used your ONE fair clarification on this factual point. Do not ask it again in any wording. Acknowledge the limitation if it matters, then move on to a different topic or make your decision from what you have. Repeating a vague factual question over and over is not normal conversation.`
+      );
+    } else {
+      lines.push(
+        `- You asked about ${question.label}, but the consultant's response was vague or non-specific: "${question.answer}" You may ask ONE concise, more precise follow-up for the fact you still need. That is the only time you may press on this point. If the next response is still vague, acknowledge it and move on rather than repeating the question again.`
+      );
+    }
+  }
+
   if (state.metNeed) {
     const { statement, statedAmount, quote, quotedAmount, gapClosed } = state.metNeed;
     const gapNote = gapClosed
@@ -1073,4 +1257,85 @@ export function buildConversationStateLines(state: ConversationState): string[] 
   }
 
   return lines;
+}
+
+// The normal state line says a factual subject is closed in the customer's own
+// words. A small number of product questions name one practical capability with
+// several interchangeable surface forms, though: "towing package", "tow
+// rating", and "features for towing" are not three independent discovery
+// topics. The live model was rationalizing its way around the general closure
+// instruction by picking one of those neighboring forms. This deliberately
+// narrow detector is only used to make the prompt's final gate concrete; it
+// does not change which questions are considered answered.
+function isTowingCapabilityQuestion(question: AnsweredCustomerQuestionState): boolean {
+  return /\b(?:towing|tow|trailer|hauling)\s+(?:package|capacity|rating|range|feature|features|option|options|configuration|configurations|spec|specs|specification|specifications|performance)\b/i.test(
+    question.question,
+  ) || /\b(?:towing|tow)\s+(?:package|capacity|rating|range)\b/i.test(question.label);
+}
+
+// A final, volatile-tail gate rather than another stable-prefix aspiration. It
+// sits immediately before generation, after both the transcript and the
+// ordinary state recap, so it is difficult to overlook or reinterpret when a
+// persona is inclined to "push for specifics." It only applies to questions
+// proven answered by deriveAnsweredCustomerQuestions.
+export function buildFinalAnsweredQuestionGate(state: ConversationState): string[] {
+  const closed = state.answeredCustomerQuestions.filter((question) => question.status === "answered");
+  if (closed.length === 0) return [];
+
+  const lines = [
+    "- FINAL ANSWERED-QUESTION GATE — apply this immediately before writing your line. A factual question listed below has already received a specific answer. You may briefly acknowledge it, but your reply MUST NOT contain a question seeking that fact, a detail/subpart of it, an explanation of it, or a differently worded version of it. Do not turn a closed question into a supposedly new question by starting with \"what about\", \"can you tell me\", \"does it have\", \"what comes with\", or \"how much\".",
+  ];
+
+  for (const question of closed) {
+    lines.push(
+      `  - CLOSED FACT: ${question.label}. The answer you already received is "${question.answer}". Treat every narrower, broader, or rephrased request for that same fact as CLOSED too.`,
+    );
+    if (isTowingCapabilityQuestion(question)) {
+      lines.push(
+        "  - TOWING-CAPABILITY BOUNDARY: towing capacity/rating/range, the towing package, towing features/options/configurations/specifications, trailer or hauling performance, and stability/control while towing are ONE closed practical subject here. They are not separate follow-ups. Do NOT ask, for example, \"What comes with the towing package?\", \"What towing features or specs does it have?\", \"How does it perform with a load?\", or \"What helps with stability when towing?\" Acknowledge the stated range and move to a genuinely unrelated need instead.",
+      );
+    }
+  }
+  return lines;
+}
+
+function questionContexts(text: string): string[] {
+  // Keep the check scoped to what the customer is actually asking. A line such
+  // as "I use it for hauling; what is the fuel economy?" should not be rejected
+  // merely because its explanatory sentence contains "hauling."
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  return sentences.flatMap((sentence, index) =>
+    sentence.includes("?") ? [[sentences[index - 1], sentence].filter(Boolean).join(" ")] : [],
+  );
+}
+
+function isTowingCapabilityRepeat(question: string): boolean {
+  const lower = question.toLowerCase();
+  // "Fuel economy when not towing" is an independent concern. The other
+  // patterns are capability/package variants explicitly closed by the prompt
+  // boundary above.
+  if (/\b(?:not|without)\s+towing\b/.test(lower)) return false;
+  return (
+    /\b(?:payload|trailer|trailering)\b/.test(lower) ||
+    /\b(?:towing|tow|hauling|haul)\b[\s\S]{0,80}\b(?:package|capacity|rating|range|feature|option|configuration|spec|performance|perform|handle|load|stability|control|ride quality|comfort)\b/.test(lower) ||
+    /\b(?:package|capacity|rating|range|feature|option|configuration|spec|performance|perform|handle|load|stability|control|ride quality|comfort)\b[\s\S]{0,80}\b(?:towing|tow|hauling|haul)\b/.test(lower)
+  );
+}
+
+// Deterministic backstop for the final prompt gate. The model still writes the
+// response; this function only recognizes a question that the transcript
+// already proves is closed so the caller can request one clean revision instead
+// of allowing an intermittent prompt-adherence miss to reach the trainee.
+export function repeatsClosedAnsweredQuestion(state: ConversationState, reply: string): boolean {
+  const closed = state.answeredCustomerQuestions.filter((question) => question.status === "answered");
+  if (closed.length === 0) return false;
+  const questions = questionContexts(reply);
+
+  return closed.some((closedQuestion) =>
+    questions.some((question) => {
+      if (isTowingCapabilityQuestion(closedQuestion) && isTowingCapabilityRepeat(question)) return true;
+      const subject = extractAskedSubject(question);
+      return subject ? subject.keywords.some((keyword) => closedQuestion.keywords.includes(keyword)) : false;
+    }),
+  );
 }

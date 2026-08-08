@@ -4,11 +4,13 @@ import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 import {
+  buildFinalAnsweredQuestionGate,
   buildConversationStateLines,
   buildDirectQuestionLines,
   deriveConversationState,
   deriveDirectQuestion,
   hasCustomerAcceptedProposal,
+  repeatsClosedAnsweredQuestion,
 } from "./conversationState";
 import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
@@ -402,6 +404,23 @@ DIRECT QUESTIONS HAVE ONE REQUIRED TURN SHAPE: (1) give the consultant relevant 
 
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
 
+// A scenario needs enough internal reality for a consultant to discover
+// something meaningful, but its counterpart should still sound like a normal
+// person in a normal conversation. This is intentionally shared and
+// persona-neutral: it applies to buyers, borrowers, consulting clients, and
+// leadership/conflict counterparts alike.
+export const LOW_KEY_CUSTOMER_CONVERSATION_RULES = `Normal, low-key customer conversation (this is the default tone on EVERY turn):
+
+You have real hidden motivations, history, and concerns, but you are not conducting an interrogation or trying to win a debate. You are a normal person having an ordinary conversation with someone trying to understand and help you.
+
+STAY RELATIVELY QUIET AND RESPONSIVE. Most of the time, listen to what the consultant says, react naturally, and answer the question they asked. A short answer that ends on a period is often exactly right. Do not drive the exchange with a barrage of your own questions, stacked follow-ups, or repeated tests of the same fact.
+
+ASK YOUR OWN QUESTION ONLY WHEN IT GENUINELY HELPS YOUR DECISION MOVE FORWARD. One specific, timely customer question can be natural. Asking a new question every turn is not. Once the consultant gives a clear, specific, on-topic factual answer — a number, range, yes/no, named feature, date, rate, or other concrete fact — let that answer land: briefly acknowledge it and move forward. Do not rephrase the same question, ask for the same fact again, or make the consultant prove they just answered you.
+
+KEEP THE PRESSURE PROPORTIONATE. If the consultant is vague, evasive, or does not actually answer the fact you asked for, a single clear follow-up is fair. If they gave a real answer, accept it even if you remain generally skeptical. Your skepticism should show up in a different, genuine concern or in a measured reaction to the answer, not in hammering one topic until the conversation stops feeling human.
+
+The consultant leads discovery. Your role is to respond and reveal your real situation in layers when it is earned — not to dominate the conversation.`;
+
 // The product is a discovery-training tool, not a script-reading test. Personas
 // need durable internal motives so a consultant can uncover something meaningful,
 // but the model must not mistake those internal facts for a slogan to append to
@@ -453,17 +472,20 @@ export function buildCustomerReplyStablePrefix(
   // REASONABLE_CUSTOMER_RULES comes after the difficulty behavior so it is the
   // final word on any instruction above that could be read as "never accept an
   // answer". CUSTOMER_RESPONSIVENESS_RULES then resolves any instruction that
-  // could be read as permission to dodge a question. HIDDEN_MOTIVATION_DISCOVERY_RULES
-  // makes the persona's priorities durable internal state rather than a repeated
-  // spoken script, and CUSTOMER_ROLE_BOUNDARY_RULES is last so it overrides every
-  // earlier tendency to imitate the consultant or seller. These rules bound
-  // different axes (what the customer pushes back about, whether it answers,
-  // when it reveals motivation, and who is speaking), so none weakens the others.
+  // could be read as permission to dodge a question. LOW_KEY_CUSTOMER_CONVERSATION_RULES
+  // establishes a normal, responsive baseline rather than an interrogation.
+  // HIDDEN_MOTIVATION_DISCOVERY_RULES makes the persona's priorities durable
+  // internal state rather than a repeated spoken script, and
+  // CUSTOMER_ROLE_BOUNDARY_RULES is last so it overrides every earlier tendency
+  // to imitate the consultant or seller. These rules bound different axes (what
+  // the customer pushes back about, whether it answers, how much it drives the
+  // exchange, when it reveals motivation, and who is speaking), so none weakens
+  // the others.
   // Composing them here (rather than at each call site) is what makes every
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${LOW_KEY_CUSTOMER_CONVERSATION_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -533,7 +555,15 @@ export function buildCustomerReplyPrompt(
     .map((m) => `${m.role === "customer" ? "Customer (you)" : "Consultant"}: ${m.content}`)
     .join("\n");
   const stateBlock = buildTurnStateBlock(transcript);
-  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
+  // The general state block supplies the complete conversation recap. The
+  // narrow final gate is intentionally repeated at the end of the volatile
+  // prompt so an answered fact is the last behavioral decision the model sees
+  // before it writes a customer line.
+  const finalAnsweredQuestionGate = buildFinalAnsweredQuestionGate(deriveConversationState(transcript));
+  const finalGateBlock = finalAnsweredQuestionGate.length > 0
+    ? `FINAL PRE-REPLY CHECK (do not mention this check):\n${finalAnsweredQuestionGate.join("\n")}\n\n`
+    : "";
+  const volatile = `Conversation so far:\n${history || "(The consultant is about to greet you.)"}\n\n${stateBlock ? `${stateBlock}\n\n` : ""}${finalGateBlock}Respond with your next line as the customer, in character, following the conversation realism rules above. React to the consultant's last message and move the conversation forward. Output ONLY the spoken line, no labels or narration.`;
 
   const variantBlock = variantSection ? `${variantSection}\n\n` : "";
   return `${stablePrefix}\n\n${variantBlock}${volatile}`;
@@ -615,18 +645,32 @@ export async function getCustomerReply(
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
   const promptCacheKey = cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier));
 
-  if (customerReplyTestResponder) {
-    return { text: (await customerReplyTestResponder({ input, model: CHAT_MODEL, promptCacheKey })).trim(), sessionEnded: false };
+  const requestReply = async (requestInput: string): Promise<string> => {
+    if (customerReplyTestResponder) {
+      return (await customerReplyTestResponder({ input: requestInput, model: CHAT_MODEL, promptCacheKey })).trim();
+    }
+    const response = await client.responses.create({
+      model: CHAT_MODEL,
+      input: requestInput,
+      prompt_cache_key: promptCacheKey,
+    });
+    logCachedTokens("customer-reply", response.usage);
+    return (response.output_text || "").trim();
+  };
+
+  let text = await requestReply(input);
+  const state = deriveConversationState(transcript);
+  if (repeatsClosedAnsweredQuestion(state, text)) {
+    const repairInput = `${input}\n\nVALIDATION FAILED: the draft below asks about a factual subject that the transcript says is ANSWERED AND CLOSED. Rewrite it now as one natural customer line. You may briefly acknowledge the stated answer, but do not ask any question or detail about that closed subject. Move to a genuinely unrelated concern or simply stop after acknowledging it. Output ONLY the replacement spoken line.\n\nREJECTED DRAFT: "${text}"`;
+    text = await requestReply(repairInput);
+    // A second deterministic guard makes this a reliability mechanism rather
+    // than a best-effort extra prompt. It is intentionally short and natural:
+    // accepting a clear factual answer is always preferable to making the
+    // consultant answer the same question a third time.
+    if (repeatsClosedAnsweredQuestion(state, text)) text = "Okay, that helps.";
   }
 
-  const response = await client.responses.create({
-    model: CHAT_MODEL,
-    input,
-    prompt_cache_key: promptCacheKey,
-  });
-
-  logCachedTokens("customer-reply", response.usage);
-  return { text: (response.output_text || "").trim(), sessionEnded: false };
+  return { text, sessionEnded: false };
 }
 
 // Streaming variant of getCustomerReply. Requests the model reply with
@@ -658,6 +702,21 @@ export async function streamCustomerReply(
   if (strike) {
     onSentence(strike.text, 0);
     return strike;
+  }
+
+  // A streamed token cannot be taken back once it reaches the trainee. When a
+  // concrete factual question is closed, generate through the validated
+  // non-streaming path first, then emit its complete sentences. This rare path
+  // trades token-by-token delivery for the same deterministic no-repeat
+  // guarantee text mode has; ordinary turns retain the normal low-latency
+  // streaming implementation below.
+  if (deriveConversationState(transcript).answeredCustomerQuestions.some((question) => question.status === "answered")) {
+    const validated = await getCustomerReply(customerPersona, transcript, difficulty, escalationTier, variantSection);
+    const streamer = createSentenceStreamer();
+    let index = 0;
+    for (const sentence of streamer.push(validated.text)) onSentence(sentence, index++);
+    for (const sentence of streamer.flush()) onSentence(sentence, index++);
+    return validated;
   }
 
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
