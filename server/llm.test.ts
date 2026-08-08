@@ -6,9 +6,11 @@ import {
   buildCustomerReplyStablePrefix,
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
+  CUSTOMER_ROLE_BOUNDARY_RULES,
   computeScoreCacheHash,
   scoreTranscript,
   getCustomerReply,
+  setCustomerReplyTestResponder,
   streamCustomerReply,
   checkVulgarBaitStrike,
   STALL_DIAGNOSIS_RULES,
@@ -16,6 +18,7 @@ import {
   type ScoreCacheStore,
 } from "./llm";
 import { detectVulgarBait, countPriorVulgarStrikes, VULGAR_STRIKE_ONE_REPLY, VULGAR_STRIKE_TWO_REPLY } from "./vulgarBait";
+import { personaVariantSeed } from "./personaVariants";
 import type { TranscriptMessage, ScoreCache, InsertScoreCache } from "@shared/schema";
 
 const PERSONA = "You are Denise, 52, looking at a home in a manufactured-housing community.";
@@ -2353,5 +2356,62 @@ describe("getCustomerReply / streamCustomerReply - vulgar strikes never reach th
     const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
     const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "");
     assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+});
+
+
+// This exercises getCustomerReply itself (including its real prompt construction)
+// through a deterministic responder. It is intentionally mocked: no OpenAI request
+// is made, so the expected customer lines remain stable in CI while the test still
+// proves the generated prompt carries role, direct-answer, and running-memory state
+// across the exact two-turn Auto Sales failure shape.
+describe("getCustomerReply - mocked Don Auto Sales answer discipline", () => {
+  test("answers as Don, builds on disclosed facts, and never becomes the dealership", async () => {
+    const replies = [
+      "For us, safe and comfortable means good visibility, helpful driver-assistance features, a smooth quiet highway ride, and seats that will not leave us sore after six hours. We do not need luxury extras.",
+      "Used is the better fit for us. We are on a fixed retirement income, so I need a dependable car and a payment that will not make us feel squeezed each month.",
+    ];
+    const prompts: string[] = [];
+    setCustomerReplyTestResponder(({ input }) => {
+      prompts.push(input);
+      const reply = replies.shift();
+      assert.ok(reply, "the fixture must provide one reply for each getCustomerReply call");
+      return reply;
+    });
+
+    try {
+      const transcript: TranscriptMessage[] = [
+        turn("customer", "We are replacing our nine-year-old sedan. We are looking for a used car, nothing fancy."),
+        turn("consultant", "When you say safe and comfortable for the six-hour drive to your grandkids, what does that mean to you?"),
+      ];
+
+      const safetyReply = (await getCustomerReply(personaVariantSeed["demo-v2-auto-2"].core, transcript)).text;
+      transcript.push(turn("customer", safetyReply));
+      transcript.push(turn("consultant", "Would you rather focus on a new vehicle or a used one?"));
+      const usedReply = (await getCustomerReply(personaVariantSeed["demo-v2-auto-2"].core, transcript)).text;
+
+      assert.equal(prompts.length, 2);
+      assert.ok(prompts.every((prompt) => prompt.includes(CUSTOMER_ROLE_BOUNDARY_RULES)));
+      assert.match(prompts[0], /THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY/);
+      assert.match(prompts[1], /RUNNING CUSTOMER MEMORY CONTRACT/);
+      assert.match(prompts[1], /looking for a used car, nothing fancy/i);
+      assert.match(prompts[1], /good visibility, helpful driver-assistance features/i);
+
+      assert.match(safetyReply, /good visibility/i);
+      assert.match(safetyReply, /driver-assistance/i);
+      assert.match(safetyReply, /smooth quiet highway ride/i);
+      assert.doesNotMatch(safetyReply, /\bwe (?:have|carry|offer|stock|recommend)\b/i);
+      assert.doesNotMatch(safetyReply, /car dealer|what are you looking for/i);
+      assert.doesNotMatch(safetyReply, /\?$/);
+
+      assert.match(usedReply, /^Used is the better fit for us\./);
+      assert.match(usedReply, /fixed retirement income/i);
+      assert.match(usedReply, /payment that will not make us feel squeezed/i);
+      assert.doesNotMatch(usedReply, /good visibility|driver-assistance|smooth quiet highway ride/i);
+      assert.doesNotMatch(usedReply, /\?$/);
+      assert.doesNotMatch(usedReply, /\bwe (?:have|carry|offer|stock|recommend)\b/i);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
   });
 });
