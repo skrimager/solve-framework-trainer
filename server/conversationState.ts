@@ -8,7 +8,7 @@
 // "what have you already said"; this module extends it to the four state
 // questions that decide whether a conversation can actually reach an end:
 //
-//   Rule 2  Has the rep already redirected this topic away twice? -> stop asking.
+//   Rule 2  Has the rep already redirected this topic away? -> safety-net reminder to stop asking.
 //   Rule 3  Which concrete numbers/answers has the rep already given? -> never
 //           ask for them again.
 //   Rule Q  Which factual questions has the customer asked and received a
@@ -94,9 +94,10 @@ const ASK_MARKERS: RegExp[] = [
   /\bwhat kind of\b/i,
 ];
 
-// Number of rep redirects on the SAME topic after which the customer must drop
-// it entirely. The spec allows exactly one more ask after the first redirect, so
-// the second redirect closes the topic.
+// Number of rep redirects retained for the deterministic safety-net. The
+// reactive-only prompt now requires the customer to stop after the FIRST proper
+// redirect; this threshold remains only to catch a model failure that made an
+// impermissible callback anyway.
 export const DEFLECTION_STOP_THRESHOLD = 2;
 
 // The rep asking who makes or funds the decision. This is the discovery move the
@@ -512,9 +513,10 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
 // matter". Both forms are sequencing; only one of them says "first".
 // ---------------------------------------------------------------------------
 
-// Number of times the rep may sequence the SAME subject before the customer has
-// to drop it for good. Mirrors DEFLECTION_STOP_THRESHOLD deliberately: one more
-// ask is allowed after the first redirect, and the second one closes it.
+// Number of times the rep may sequence the SAME subject retained for the
+// deterministic safety-net. Reactive-only behavior forbids an independent
+// callback after the first proper sequencing; the second count only catches a
+// failed generation that violated that primary rule.
 export const SEQUENCING_STOP_THRESHOLD = 2;
 
 // Ordering phrases: the rep putting a topic later in the conversation rather
@@ -1130,7 +1132,7 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   const quoted = question.asks.map((a) => `"${a}"`).join(" ");
 
   lines.push(
-    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, and you may add a thought or a question of your own AFTER you have answered, but never instead of answering.`,
+    `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, but stop after the relevant answer. Do not append a thought or question that starts a separate customer agenda.`,
   );
   lines.push(
     `- FINAL DIRECT-ANSWER CHECK: answer the named subject before anything else. If they ask about safety, explicitly address safety; if they ask about comfort, explicitly address comfort; if they ask new versus used, state which you prefer; if they ask budget, address budget. Do not replace that subject with your recurring opening request, price, reliability, or another motivation. A private motivation may add context only AFTER it has answered the question.`,
@@ -1188,7 +1190,7 @@ export function buildConversationStateLines(state: ConversationState): string[] 
       );
     } else {
       lines.push(
-        `- The consultant has redirected ${t.label} once, telling you it is handled elsewhere. You may raise it at most ONE more time. If they redirect it again, it is closed for good and you must drop it permanently.`
+        `- The consultant has redirected ${t.label} once, telling you it is handled elsewhere. The reactive-only rule means you should not raise it again on your own. This count is only a safety-net in case you already failed to follow that rule; if they redirect it again, it is closed for good and you must drop it permanently.`
       );
     }
   }
@@ -1200,7 +1202,7 @@ export function buildConversationStateLines(state: ConversationState): string[] 
       );
     } else {
       lines.push(
-        `- You asked about ${t.label} and the consultant proposed getting to it later, after they understand what you need. That is a reasonable way to run the conversation and you accept it. You may raise ${t.label} at most ONE more time. If they sequence it again, it is closed for good and you must drop it permanently.`
+        `- You asked about ${t.label} and the consultant proposed getting to it later, after they understand what you need. That is a reasonable way to run the conversation and you accept it. The reactive-only rule means you should not raise ${t.label} again on your own. This count is only a safety-net in case you already failed to follow that rule; if they sequence it again, it is closed for good and you must drop it permanently.`
       );
     }
   }
@@ -1226,15 +1228,15 @@ export function buildConversationStateLines(state: ConversationState): string[] 
   for (const question of state.answeredCustomerQuestions) {
     if (question.status === "answered") {
       lines.push(
-        `- You asked a factual question about ${question.label} ("${question.question}"), and the consultant gave you a specific, on-topic answer: "${question.answer}" That question is ANSWERED AND CLOSED. Accept it with a brief natural reaction if you reply to it (for example, "Okay, that helps" or "Got it"), then move to a genuinely different topic or the next natural beat. Do NOT ask another version of ${question.label}, do not ask for the same fact again with different wording, and do not act as though you did not hear the answer.`
+        `- You asked a factual question about ${question.label} ("${question.question}"), and the consultant gave you a specific, on-topic answer: "${question.answer}" That question is ANSWERED AND CLOSED. Accept it with a brief natural reaction if you reply to it (for example, "Okay, that helps" or "Got it"), then return to reacting to the subject the consultant leads next. Do NOT ask another version of ${question.label}, do not ask for the same fact again with different wording, and do not act as though you did not hear the answer.`
       );
     } else if (question.clarificationUsed) {
       lines.push(
-        `- You asked about ${question.label}, and the consultant's response was vague or non-specific: "${question.answer}" You already used your ONE fair clarification on this factual point. Do not ask it again in any wording. Acknowledge the limitation if it matters, then move on to a different topic or make your decision from what you have. Repeating a vague factual question over and over is not normal conversation.`
+        `- You asked about ${question.label}, and the consultant's response was vague or non-specific: "${question.answer}" You already used your ONE fair clarification on this factual point. Do not ask it again in any wording. Acknowledge the limitation if it matters, then keep responding to the subject the consultant leads or make your decision from what you have. Repeating a vague factual question over and over is not normal conversation.`
       );
     } else {
       lines.push(
-        `- You asked about ${question.label}, but the consultant's response was vague or non-specific: "${question.answer}" You may ask ONE concise, more precise follow-up for the fact you still need. That is the only time you may press on this point. If the next response is still vague, acknowledge it and move on rather than repeating the question again.`
+        `- You asked about ${question.label}, but the consultant's response was vague or non-specific: "${question.answer}" If the consultant's current message is that vague response, you may make ONE concise clarification directly about it. Do not use it to start a separate topic. If the next response is still vague, acknowledge it and keep responding to the subject the consultant leads rather than repeating the question again.`
       );
     }
   }
@@ -1245,7 +1247,7 @@ export function buildConversationStateLines(state: ConversationState): string[] 
       ? ` It came in at ${formatAmount(quotedAmount)}, a difference of ${formatAmount(quotedAmount - statedAmount)}, and they said they would absorb that themselves, so you are at your number.`
       : ` It came in at ${formatAmount(quotedAmount)}, which is inside the number you gave them.`;
     lines.push(
-      `- You told the consultant your number ("${statement}", which is ${formatAmount(statedAmount)}), and they have now come back with it: "${quote}".${gapNote} THAT NEED IS MET. Acknowledge it plainly and move forward. Do not argue about it, do not haggle over the remainder, and never say or suggest that they missed your number or did not listen, because they did exactly what you asked. If something still bothers you, it has to be a genuinely DIFFERENT concern, not this one.`
+      `- You told the consultant your number ("${statement}", which is ${formatAmount(statedAmount)}), and they have now come back with it: "${quote}".${gapNote} THAT NEED IS MET. Acknowledge it plainly when that is responsive to the current message. Do not argue about it, do not haggle over the remainder, and never say or suggest that they missed your number or did not listen, because they did exactly what you asked. Keep any other concern internal unless the consultant's current message creates a genuine relevant opening.`
     );
   }
 
@@ -1292,7 +1294,7 @@ export function buildFinalAnsweredQuestionGate(state: ConversationState): string
     );
     if (isTowingCapabilityQuestion(question)) {
       lines.push(
-        "  - TOWING-CAPABILITY BOUNDARY: towing capacity/rating/range, the towing package, towing features/options/configurations/specifications, trailer or hauling performance, and stability/control while towing are ONE closed practical subject here. They are not separate follow-ups. Do NOT ask, for example, \"What comes with the towing package?\", \"What towing features or specs does it have?\", \"How does it perform with a load?\", or \"What helps with stability when towing?\" Acknowledge the stated range and move to a genuinely unrelated need instead.",
+        "  - TOWING-CAPABILITY BOUNDARY: towing capacity/rating/range, the towing package, towing features/options/configurations/specifications, trailer or hauling performance, and stability/control while towing are ONE closed practical subject here. They are not separate follow-ups. Do NOT ask, for example, \"What comes with the towing package?\", \"What towing features or specs does it have?\", \"How does it perform with a load?\", or \"What helps with stability when towing?\" Acknowledge the stated range and continue responding only to what the consultant leads next.",
       );
     }
   }

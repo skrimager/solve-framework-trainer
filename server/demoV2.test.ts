@@ -288,10 +288,11 @@ describe("demo v2 seeded scenarios", () => {
     }
   });
 
-  test("every persona volunteers exactly one problem the trainee can lean into or skip", () => {
+  test("every persona reserves discovery signals for a relevant current-message opening", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
       const core = personaVariantSeed[slug].core;
-      assert.match(core, /The one thing you DO volunteer early, unprompted:/, slug);
+      assert.doesNotMatch(core, /The one thing you DO volunteer early, unprompted:/, slug);
+      assert.match(core, /current message genuinely opens|opening is the one exception/i, slug);
     }
   });
 
