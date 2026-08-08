@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import OpenAI, { toFile } from "openai";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { TranscriptMessage, RubricScores, LeadershipRubricScores, ScoreCache, InsertScoreCache } from "@shared/schema";
 import { createSentenceStreamer } from "./sentences";
 import {
@@ -18,7 +19,17 @@ import {
   VULGAR_STRIKE_TWO_REPLY,
 } from "./vulgarBait";
 
-const client = new OpenAI();
+// The OpenAI SDK's default Node transport does not automatically honor
+// HTTPS_PROXY. In normal hosted production this is unset and the SDK retains its
+// standard transport; in credential-proxy environments this explicit dispatcher
+// is what lets the approved proxy inject the real authorization rather than
+// sending a placeholder OPENAI_API_KEY upstream.
+const openAiProxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
+const openAiProxyDispatcher = openAiProxyUrl ? new ProxyAgent(openAiProxyUrl) : undefined;
+const openAiFetch = openAiProxyDispatcher
+  ? ((url: any, init: any = {}) => undiciFetch(url, { ...init, dispatcher: openAiProxyDispatcher }) as any)
+  : undefined;
+const client = new OpenAI(openAiFetch ? { fetch: openAiFetch } : {});
 
 // Whisper transcription for Real Conversation Scoring Phase 2 (audio upload).
 // Reuses the SAME shared OpenAI client/credentials as every other call in this
@@ -391,6 +402,23 @@ DIRECT QUESTIONS HAVE ONE REQUIRED TURN SHAPE: (1) give the consultant relevant 
 
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
 
+// The product is a discovery-training tool, not a script-reading test. Personas
+// need durable internal motives so a consultant can uncover something meaningful,
+// but the model must not mistake those internal facts for a slogan to append to
+// every answer. This applies to the fixed persona core AND the per-session
+// motivation selected from its structured variant pool.
+export const HIDDEN_MOTIVATION_DISCOVERY_RULES = `Hidden motivations are INTERNAL STATE, not a script (this is a core purpose of the training):
+
+This conversation exists so the consultant can discover what actually matters to you. Your persona's underlying motivations, priorities, fears, and the selected session motivation are real facts about you that guide how you react, but they are NOT a sentence, a closing pivot, or a demand you need to repeat on every turn. A consultant should have to draw them out through good discovery questions.
+
+DO NOT ANNOUNCE OR SIGNAL THE SAME CORE MOTIVATION ON EVERY TURN. After you have opened with a price request, a safety concern, a reliability worry, or any other stated request, answer the next question on its own terms. Do not mechanically tack your opening demand, a price pivot, or another version of the same hidden concern onto unrelated answers. Especially do not end several nearby turns with different versions of the same question or slogan. If you have already raised a concern, leave space for the consultant to explore it before you bring it up again.
+
+REVEAL IN LAYERS, NOT AS A LOOP. It is natural to volunteer one small hint occasionally, to explain more when a consultant asks a relevant follow-up, or to surface a concern when it directly affects the choice being discussed. It is not natural to recite all motivations, or the same motivation, in response to every question. The motivation may quietly shape your answer without being named. A good discovery question earns a more specific layer; a different direct question earns an answer to that different topic.
+
+TOPIC FIDELITY COMES FIRST. When the consultant asks about a named topic, answer that named topic from your own perspective. If they ask about safety, talk about the safety you need; if they ask about comfort, talk about comfort; if they ask new versus used, state your preference and why; if they ask budget, address budget. Do not substitute price, reliability, cargo room, fuel economy, or any other favorite concern for the subject they actually asked about. Your private motivation can add context only after it has helped answer the topic, never in place of the answer.
+
+The goal is to behave like a real person who can be understood through thoughtful discovery, not a character who makes the consultant hear the answer before they have earned it.`;
+
 // The final stable rule block is deliberately role-specific and comes after every
 // difficulty, realism, reasonableness, and responsiveness instruction. Its job is
 // to prevent a common language-model role swap: completing a plausible seller
@@ -425,15 +453,17 @@ export function buildCustomerReplyStablePrefix(
   // REASONABLE_CUSTOMER_RULES comes after the difficulty behavior so it is the
   // final word on any instruction above that could be read as "never accept an
   // answer". CUSTOMER_RESPONSIVENESS_RULES then resolves any instruction that
-  // could be read as permission to dodge a question, and CUSTOMER_ROLE_BOUNDARY_RULES
-  // is last so it overrides every earlier tendency to imitate the consultant or
-  // seller. These rules bound different axes (what the customer pushes back
-  // about, whether it answers, and who is speaking), so none weakens the others.
+  // could be read as permission to dodge a question. HIDDEN_MOTIVATION_DISCOVERY_RULES
+  // makes the persona's priorities durable internal state rather than a repeated
+  // spoken script, and CUSTOMER_ROLE_BOUNDARY_RULES is last so it overrides every
+  // earlier tendency to imitate the consultant or seller. These rules bound
+  // different axes (what the customer pushes back about, whether it answers,
+  // when it reveals motivation, and who is speaking), so none weakens the others.
   // Composing them here (rather than at each call site) is what makes every
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is

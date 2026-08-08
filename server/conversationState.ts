@@ -965,6 +965,9 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   lines.push(
     `- THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY: ${quoted} Answering THAT is your job this turn. Your reply must contain a real, relevant answer to what they actually asked, in your own words. Do not reply with an unrelated concern, a non-answer, or a change of subject, and do not bounce the question back at them by asking them something instead. You can still be guarded about how much you give them, and you may add a thought or a question of your own AFTER you have answered, but never instead of answering.`,
   );
+  lines.push(
+    `- FINAL DIRECT-ANSWER CHECK: answer the named subject before anything else. If they ask about safety, explicitly address safety; if they ask about comfort, explicitly address comfort; if they ask new versus used, state which you prefer; if they ask budget, address budget. Do not replace that subject with your recurring opening request, price, reliability, or another motivation. A private motivation may add context only AFTER it has answered the question.`,
+  );
 
   if (question.narrowing) {
     const vague = question.vagueAnswer

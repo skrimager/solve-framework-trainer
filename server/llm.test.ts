@@ -7,6 +7,7 @@ import {
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
   CUSTOMER_ROLE_BOUNDARY_RULES,
+  HIDDEN_MOTIVATION_DISCOVERY_RULES,
   computeScoreCacheHash,
   scoreTranscript,
   getCustomerReply,
@@ -2042,6 +2043,48 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
     assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
     assert.match(advanced, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
     assert.match(escalationAddon(2), /tougher objection/i);
+  });
+});
+
+// The trainer is only useful when the persona's real priorities must be
+// discovered. These assertions deliberately check the shared prompt, rather than
+// a one-off Vince fixture, because the same internal-state discipline must govern
+// every vertical and every selected persona variation.
+describe("HIDDEN_MOTIVATION_DISCOVERY_RULES - discovery over scripted pivots", () => {
+  test("is present in every shared customer prompt before the role boundary", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, [], "beginner");
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prompt.includes(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+    assert.ok(prefix.includes(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+    assert.ok(
+      prefix.indexOf(HIDDEN_MOTIVATION_DISCOVERY_RULES) < prefix.indexOf(CUSTOMER_ROLE_BOUNDARY_RULES),
+      "hidden-motivation guidance must be active before the final customer-role boundary",
+    );
+  });
+
+  test("makes motivations internal state instead of a repeated spoken script", () => {
+    const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
+    assert.match(rules, /INTERNAL STATE, not a script/i);
+    assert.match(rules, /consultant can discover what actually matters/i);
+    assert.match(rules, /DO NOT ANNOUNCE OR SIGNAL THE SAME CORE MOTIVATION ON EVERY TURN/i);
+    assert.match(rules, /do not end several nearby turns with different versions of the same question or slogan/i);
+    assert.match(rules, /REVEAL IN LAYERS, NOT AS A LOOP/i);
+  });
+
+  test("requires the named topic to be answered instead of substituting a favored concern", () => {
+    const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
+    assert.match(rules, /TOPIC FIDELITY COMES FIRST/i);
+    assert.match(rules, /If they ask about safety, talk about the safety you need/i);
+    assert.match(rules, /Do not substitute price, reliability, cargo room, fuel economy/i);
+
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [msg("consultant", "Safety matters to you. What specifically do you need to feel safe?")],
+      "beginner",
+    );
+    assert.match(prompt, /FINAL DIRECT-ANSWER CHECK/i);
+    assert.match(prompt, /If they ask about safety, explicitly address safety/i);
+    assert.match(prompt, /Do not replace that subject with your recurring opening request, price, reliability/i);
   });
 });
 
