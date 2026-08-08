@@ -383,7 +383,25 @@ ADVANCING NEVER MEANS RE-RAISING A CLOSED OR PARKED TOPIC. Every turn has to tak
 
 YOU MAY STILL ASK YOUR OWN QUESTIONS, AFTER YOU ANSWER. A question of your own is realistic when it is genuinely warranted, and the rules above already give you one out-of-scope question and one round of "what else do you have". None of that changes. What changes is the order: answer first, then ask. Never ask instead of answering.
 
+DIRECT QUESTIONS HAVE ONE REQUIRED TURN SHAPE: (1) give the consultant relevant information from your own customer perspective; then (2) stop. Only after that answer may you add ONE short, natural customer question, and only when it is genuinely necessary to move your own decision forward. A question mark is never a substitute for step 1. If you can answer the consultant without a question, end on a period.
+
+"REACT, THEN ADVANCE" DOES NOT MEAN HANDING DISCOVERY BACK TO THE CONSULTANT. To advance after a direct question, move YOUR OWN disclosure forward: add the next concrete need, preference, experience, constraint, or reaction that has not been said yet. Do not treat "raise a different concern" or a "pointed follow-up question" as permission to dodge the question just asked, interrogate the consultant, or make them repeat information. Answer first; advancing is customer-side progress, not deflection.
+
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
+
+// The final stable rule block is deliberately role-specific and comes after every
+// difficulty, realism, reasonableness, and responsiveness instruction. Its job is
+// to prevent a common language-model role swap: completing a plausible seller
+// response to a customer question instead of speaking as the customer.
+export const CUSTOMER_ROLE_BOUNDARY_RULES = `Customer role boundary (NON-NEGOTIABLE; this is the final word on who is speaking):
+
+YOU ARE THE CUSTOMER OR OTHER END USER, NOT THE CONSULTANT. Speak only from the customer's first-person point of view: your own experience, preference, need, fact, concern, reaction, decision, or an occasional customer-side question. The consultant is the seller, advisor, manager, or representative; they lead discovery and speak for their business.
+
+NEVER SPEAK AS OR FOR THE CONSULTANT, DEALERSHIP, BUSINESS, INVENTORY, OR ANY OTHER SELLER. Do not claim what "we" have, sell, offer, can show, stock, finance, guarantee, service, approve, or recommend. Do not ask the consultant discovery questions as though you are qualifying them. A line such as "yeah, of course we have that, we're a car dealer" or "what are you looking for, new or used?" is forbidden because it is dealer speech, not customer speech.
+
+WHEN ASKED ABOUT A PRODUCT, FEATURE, OR OPTION, ANSWER WITH WHAT IT MEANS TO YOU AS THE CUSTOMER. For example, answer a safety-and-comfort question with the safety features, ride, visibility, space, or confidence YOU need and why; do not answer as though you own the lot or know its inventory. If you need to ask something after answering, ask only a genuine customer question about your own decision.
+
+Before every line, silently check: "Would this make sense if I were the person shopping for, receiving, or affected by this service?" If not, do not say it. Stay in your customer role even when the consultant's wording is awkward or resembles a question a salesperson might ask.`;
 
 // The stable, session-invariant prefix of a customer-reply prompt: the persona,
 // the difficulty calibration, and the realism rules. These do NOT change from
@@ -404,15 +422,16 @@ export function buildCustomerReplyStablePrefix(
   const behaviorBlock = addon ? `${behavior}\n\n${addon}` : behavior;
   // REASONABLE_CUSTOMER_RULES comes after the difficulty behavior so it is the
   // final word on any instruction above that could be read as "never accept an
-  // answer", and CUSTOMER_RESPONSIVENESS_RULES comes after that so it is the
-  // final word on any instruction that could be read as "never engage with the
-  // question". The two bound different axes (what you push back about vs.
-  // whether you answer), so neither weakens the other.
+  // answer". CUSTOMER_RESPONSIVENESS_RULES then resolves any instruction that
+  // could be read as permission to dodge a question, and CUSTOMER_ROLE_BOUNDARY_RULES
+  // is last so it overrides every earlier tendency to imitate the consultant or
+  // seller. These rules bound different axes (what the customer pushes back
+  // about, whether it answers, and who is speaking), so none weakens the others.
   // Composing them here (rather than at each call site) is what makes every
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
@@ -441,6 +460,9 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // transcript buries and what a static rule cannot say.
   lines.push(...buildDirectQuestionLines(deriveDirectQuestion(transcript)));
   if (alreadySaid.length > 0) {
+    lines.push(
+      "- RUNNING CUSTOMER MEMORY CONTRACT — these are facts, needs, preferences, experiences, and decisions you have ALREADY said and disclosed. Treat them as binding conversation memory: honor and use every relevant fact when answering the current direct question; do not ignore or contradict them. Build on them with the next useful customer-side detail instead of restating, quoting, or lightly rewording them."
+    );
     lines.push(
       "- Lines you have ALREADY said in this conversation. Do not say any of these again, and do not reword any of them into another version of the same point:"
     );
@@ -485,6 +507,22 @@ export function buildCustomerReplyPrompt(
   return `${stablePrefix}\n\n${variantBlock}${volatile}`;
 }
 
+export interface CustomerReplyTestRequest {
+  input: string;
+  model: string;
+  promptCacheKey: string;
+}
+
+// A deliberately narrow seam for deterministic multi-turn tests. Production
+// remains on the OpenAI Responses API; tests can exercise getCustomerReply's real
+// prompt construction and turn handling without an API key or network call.
+export type CustomerReplyTestResponder = (request: CustomerReplyTestRequest) => Promise<string> | string;
+let customerReplyTestResponder: CustomerReplyTestResponder | null = null;
+
+export function setCustomerReplyTestResponder(responder: CustomerReplyTestResponder | null): void {
+  customerReplyTestResponder = responder;
+}
+
 // Generates the simulated customer's next reply in a discovery-training role-play.
 export async function getCustomerReply(
   customerPersona: string,
@@ -494,11 +532,16 @@ export async function getCustomerReply(
   variantSection: string = ""
 ): Promise<string> {
   const input = buildCustomerReplyPrompt(customerPersona, transcript, difficulty, escalationTier, variantSection);
+  const promptCacheKey = cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier));
+
+  if (customerReplyTestResponder) {
+    return (await customerReplyTestResponder({ input, model: CHAT_MODEL, promptCacheKey })).trim();
+  }
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
     input,
-    prompt_cache_key: cacheKeyForPrefix(buildCustomerReplyStablePrefix(customerPersona, difficulty, escalationTier)),
+    prompt_cache_key: promptCacheKey,
   });
 
   logCachedTokens("customer-reply", response.usage);
