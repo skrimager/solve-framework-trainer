@@ -11,6 +11,9 @@
 //   Rule 2  Has the rep already redirected this topic away twice? -> stop asking.
 //   Rule 3  Which concrete numbers/answers has the rep already given? -> never
 //           ask for them again.
+//   Rule Q  Which factual questions has the customer asked and received a
+//           specific answer to? -> accept that answer rather than asking the
+//           same question again in slightly different words.
 //   Rule 4  Has the rep established who decides and pays? -> honor it, and never
 //           spring a brand-new absent decision maker as a blocker.
 //   Rule 5  Has the customer already had its one "what else do you have" round?
@@ -164,7 +167,7 @@ export const PROPOSAL_MARKERS: RegExp[] = [
 
 // A number, price, date, or other concrete figure the rep has handed over. Once
 // given, the customer knows it and can never ask for it again from scratch.
-const QUOTED_FACT_PATTERN = /(\$\s?[\d,]+(?:\.\d{2})?|\b\d[\d,]*(?:\.\d+)?\s*(?:percent|%|miles|mpg|months?|weeks?|days?|years?|bedrooms?|baths?|square feet|sq ?ft)\b)/i;
+const QUOTED_FACT_PATTERN = /(\$\s?[\d,]+(?:\.\d{2})?|\b\d[\d,]*(?:\.\d+)?\s*(?:percent\b|%|miles\b|mpg\b|months?\b|weeks?\b|days?\b|years?\b|hours?\b|pounds?\b|lbs\b|tons?\b|bedrooms?\b|baths?\b|square feet\b|sq ?ft\b))/i;
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
@@ -410,6 +413,9 @@ export interface ConversationState {
   acceptedSolutionLine: string | null;
   // Concrete figures the rep has already provided.
   quotedFacts: string[];
+  // Factual questions the customer asked that the consultant answered
+  // specifically, or answered vaguely enough to permit one clarification.
+  answeredCustomerQuestions: AnsweredCustomerQuestionState[];
   // A number the customer named that the rep has since met, if any.
   metNeed: MetNeedState | null;
 }
@@ -585,12 +591,20 @@ const SOFT_ASK_MARKERS: RegExp[] = [
 const SUBJECT_CAPTURE_PATTERNS: RegExp[] = [
   /\b(?:tell me|talk|hear|know|curious|wondering|asking)\b[^?.!]{0,24}\babout\s+([^?.!,;]{2,60})/i,
   /\bwhat(?:'s| is| are)\s+(?:the|your|its|their)\s+([^?.!,;]{2,60})/i,
+  // "What towing capacity does it have?" / "What interest rate is this?"
+  // are common factual asks that do not include "the" after what.
+  /\bwhat\s+([^?.!,;]{2,60})/i,
   /\bhow(?:'s| is| are)\s+(?:the|its|their)\s+([^?.!,;]{2,60})/i,
   /\bwhat about\s+([^?.!,;]{2,60})/i,
   /\bhow about\s+([^?.!,;]{2,60})/i,
   /\bwhat kind of\s+([^?.!,;]{2,60})/i,
+  // "How much can it tow?" has its subject after "it", rather than directly
+  // after "how much".
+  /\bhow (?:much|many)\s+(?:can|does|do|would|will)\s+(?:it|this|that|they|we)\s+([^?.!,;]{2,60})/i,
   /\bhow (?:much|many)\s+([^?.!,;]{2,60})/i,
   /\bdoes it (?:have|come with|get)\s+([^?.!,;]{2,60})/i,
+  /\b(?:can|could|will|would) (?:it|this|that|they|we)\s+([^?.!,;]{2,60})/i,
+  /\bis (?:it|this|that|the)\s+([^?.!,;]{2,60})/i,
 ];
 
 // Where a captured phrase stops being the subject and starts being the rest of
@@ -616,6 +630,10 @@ const SUBJECT_STOPWORDS = new Set([
 // a stemmer. "ss" endings are left alone so "business" does not become "busines".
 function normalizeKeyword(word: string): string {
   const w = word.toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Enough stemming to recognize "tow" / "towing" as the same factual
+  // subject. This is intentionally small and only used for matching a
+  // customer's own rephrased question or the consultant's answer.
+  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
   if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
   return w;
 }
@@ -674,7 +692,7 @@ function isSequencingRedirect(text: string): boolean {
 }
 
 function mentionsKeyword(text: string, keywords: string[]): boolean {
-  return keywords.some((k) => new RegExp(`\\b${k}s?\\b`, "i").test(text));
+  return keywords.some((k) => new RegExp(`\\b${k}(?:s|ing|ed)?\\b`, "i").test(text));
 }
 
 // Counts, per subject the customer raised, how many times the rep proposed
@@ -796,6 +814,155 @@ function deriveQuotedFacts(transcript: TranscriptMessage[]): string[] {
   return transcript
     .filter((m) => m.role === "consultant" && QUOTED_FACT_PATTERN.test(m.content))
     .map((m) => m.content.trim());
+}
+
+// ---------------------------------------------------------------------------
+// Rule Q: a factual question that has already received a real answer.
+//
+// Quoted facts above remember figures the consultant said, but they do not
+// establish what customer question that figure answered. That gap is what lets a
+// customer hear "12,000 to 14,000 pounds" and nevertheless ask another version
+// of "what can it tow?" on the next turn. This mirror-image state keeps the
+// customer's own factual ask attached to the consultant's immediate response.
+//
+// Detection stays deliberately conservative. It only closes a question when the
+// response contains an explicit factual shape (a number/range, a clear yes/no,
+// or a named feature) and either names the question's subject or is a direct
+// yes/no reply. A vague or evasive reply leaves room for exactly one
+// clarification; it is never treated as a specific answer.
+// ---------------------------------------------------------------------------
+
+export interface AnsweredCustomerQuestionState {
+  // The customer's own words for the factual subject, so this works across every
+  // vertical rather than through a vocabulary of vehicle-only topics.
+  label: string;
+  keywords: string[];
+  question: string;
+  answer: string;
+  // "answered" means the consultant supplied a concrete fact. "vague" means
+  // the answer was non-specific or evasive and the customer may clarify once.
+  status: "answered" | "vague";
+  // Once the customer has used its one clarification after a vague answer, the
+  // topic closes even if the follow-up response remained vague.
+  clarificationUsed: boolean;
+}
+
+const FACTUAL_QUESTION_MARKERS: RegExp[] = [
+  /\?/,
+  /\b(?:what|which|how|can|could|does|do|did|is|are|will|would|has|have)\b/i,
+];
+
+const SPECIFIC_FACT_MARKERS: RegExp[] = [
+  QUOTED_FACT_PATTERN,
+  // A spoken range may have the unit only after the second figure, e.g.
+  // "12,000 to 14,000 pounds." The quoted-fact pattern still sees the latter
+  // figure, but naming the full range here makes the intended evidence clear.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:to|-)\s*\d[\d,]*(?:\.\d+)?\s*(?:percent|%|miles|mpg|months?|weeks?|days?|hours?|pounds?|lbs|tons?|years?)\b/i,
+  /^(?:yes|no)\b/i,
+  /\b(?:yes|no),?\s+(?:it|we|that|they)\b/i,
+  /\b(?:it|we|that|they)\s+(?:does|do|is|are|has|have|can|cannot|can'?t|doesn'?t|don'?t)\b/i,
+  // A factual feature answer must actually name a feature after the verb. This
+  // avoids counting "it has what you need" as a real answer.
+  /\b(?:comes? with|includes?|is equipped with|has)\s+(?:the |a |an |standard |factory )?[a-z0-9][a-z0-9 -]{2,}\b/i,
+];
+
+const VAGUE_FACT_REPLY_MARKERS: RegExp[] = [
+  /\b(?:not sure|don'?t know|do not know|not certain|hard to say)\b/i,
+  /\b(?:need|have) to (?:check|confirm|verify|look up|find out|get)\b/i,
+  /\b(?:let me|i can) (?:check|confirm|verify|look up|find out|get)\b/i,
+  /\b(?:cannot|can'?t|unable to) (?:check|confirm|verify|say|tell|give)\b/i,
+  /\b(?:it|that) (?:depends|varies|should be|might be|could be|probably)\b/i,
+  /\b(?:generally|usually|typically|more or less|somewhere around)\b/i,
+];
+
+function subjectsOverlap(left: AskedSubject, right: AskedSubject): boolean {
+  return left.keywords.some((keyword) => right.keywords.includes(keyword));
+}
+
+function isFactualCustomerQuestion(text: string): AskedSubject | null {
+  if (!matchesAny(text, FACTUAL_QUESTION_MARKERS)) return null;
+  return extractAskedSubject(text);
+}
+
+function isSpecificFactualAnswer(answer: string, subject: AskedSubject): boolean {
+  const hasSpecificFact = matchesAny(answer, SPECIFIC_FACT_MARKERS);
+  if (!hasSpecificFact) return false;
+
+  const directBinaryReply =
+    /^(?:yes|no)\b/i.test(answer.trim()) ||
+    /\b(?:it|we|that|they)\s+(?:does|do|is|are|has|have|can|cannot|can'?t|doesn'?t|don'?t)\b/i.test(answer);
+  return directBinaryReply || mentionsKeyword(answer, subject.keywords);
+}
+
+function isVagueFactualAnswer(answer: string, subject: AskedSubject): boolean {
+  // A question-only discovery pivot is handled by the existing sequencing and
+  // direct-question rules. It is not a vague factual answer that invites a
+  // clarification loop.
+  if (isSequencingRedirect(answer)) return false;
+  if (answer.includes("?") && !matchesAny(answer, SPECIFIC_FACT_MARKERS)) return false;
+  return matchesAny(answer, VAGUE_FACT_REPLY_MARKERS) || mentionsKeyword(answer, subject.keywords);
+}
+
+function deriveAnsweredCustomerQuestions(transcript: TranscriptMessage[]): AnsweredCustomerQuestionState[] {
+  const tracked: AnsweredCustomerQuestionState[] = [];
+  let pending: { entry: AnsweredCustomerQuestionState; subject: AskedSubject } | null = null;
+
+  for (const message of transcript) {
+    const text = message.content.trim();
+    if (!text) continue;
+
+    if (message.role === "customer") {
+      const subject = isFactualCustomerQuestion(text);
+      if (!subject) {
+        pending = null;
+        continue;
+      }
+
+      const existing = tracked.find((entry) => subjectsOverlap(entry, subject));
+      if (existing) {
+        if (existing.status === "vague") {
+          existing.clarificationUsed = true;
+          pending = { entry: existing, subject };
+        } else {
+          // This is precisely the loop we are preventing. The topic was already
+          // concretely answered, so preserve that binding fact even if the
+          // consultant's redundant reply merely says "like I said" and omits
+          // the subject word.
+          pending = null;
+        }
+      } else {
+        const entry: AnsweredCustomerQuestionState = {
+          label: subject.label,
+          keywords: subject.keywords,
+          question: text,
+          answer: "",
+          status: "vague",
+          clarificationUsed: false,
+        };
+        tracked.push(entry);
+        pending = { entry, subject };
+      }
+      continue;
+    }
+
+    if (!pending) continue;
+    const { entry, subject } = pending;
+    if (isSpecificFactualAnswer(text, subject)) {
+      entry.answer = text;
+      entry.status = "answered";
+    } else if (isVagueFactualAnswer(text, subject)) {
+      entry.answer = text;
+      entry.status = "vague";
+    } else {
+      // The consultant neither answered the factual question nor gave the kind
+      // of vague/dodging response this rule governs. Leave it to the existing
+      // redirect/direct-question mechanisms rather than asserting a fact.
+      tracked.splice(tracked.indexOf(entry), 1);
+    }
+    pending = null;
+  }
+
+  return tracked.filter((entry) => entry.answer.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1169,7 @@ export function deriveConversationState(transcript: TranscriptMessage[]): Conver
     alternativesRoundSpent: isAlternativesRoundSpent(transcript),
     acceptedSolutionLine: deriveAcceptedSolutionLine(transcript),
     quotedFacts: deriveQuotedFacts(transcript),
+    answeredCustomerQuestions: deriveAnsweredCustomerQuestions(transcript),
     metNeed: deriveMetNeed(transcript),
   };
 }
@@ -1053,6 +1221,22 @@ export function buildConversationStateLines(state: ConversationState): string[] 
     lines.push(
       `- You have ALREADY said the proposed solution fits you ("${state.acceptedSolutionLine}"). That means this conversation is allowed to end, and your job now is to let it. Do not invent a new requirement, a new objection, or a new demand in order to keep it going. Wrap up the way a real person does: confirm what you understood, raise at most the ONE thing that is genuinely still open for you if there is one (for example that another person still has to see it), and let the consultant close things out.`
     );
+  }
+
+  for (const question of state.answeredCustomerQuestions) {
+    if (question.status === "answered") {
+      lines.push(
+        `- You asked a factual question about ${question.label} ("${question.question}"), and the consultant gave you a specific, on-topic answer: "${question.answer}" That question is ANSWERED AND CLOSED. Accept it with a brief natural reaction if you reply to it (for example, "Okay, that helps" or "Got it"), then move to a genuinely different topic or the next natural beat. Do NOT ask another version of ${question.label}, do not ask for the same fact again with different wording, and do not act as though you did not hear the answer.`
+      );
+    } else if (question.clarificationUsed) {
+      lines.push(
+        `- You asked about ${question.label}, and the consultant's response was vague or non-specific: "${question.answer}" You already used your ONE fair clarification on this factual point. Do not ask it again in any wording. Acknowledge the limitation if it matters, then move on to a different topic or make your decision from what you have. Repeating a vague factual question over and over is not normal conversation.`
+      );
+    } else {
+      lines.push(
+        `- You asked about ${question.label}, but the consultant's response was vague or non-specific: "${question.answer}" You may ask ONE concise, more precise follow-up for the fact you still need. That is the only time you may press on this point. If the next response is still vague, acknowledge it and move on rather than repeating the question again.`
+      );
+    }
   }
 
   if (state.metNeed) {

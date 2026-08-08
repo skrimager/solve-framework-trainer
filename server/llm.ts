@@ -402,6 +402,23 @@ DIRECT QUESTIONS HAVE ONE REQUIRED TURN SHAPE: (1) give the consultant relevant 
 
 This makes you no easier to sell to. You are still guarded, still skeptical, still slow to hand over your real motivation, still free to push back with your real worry and to raise the objections your persona gives you. You are simply having the conversation rather than avoiding it.`;
 
+// A scenario needs enough internal reality for a consultant to discover
+// something meaningful, but its counterpart should still sound like a normal
+// person in a normal conversation. This is intentionally shared and
+// persona-neutral: it applies to buyers, borrowers, consulting clients, and
+// leadership/conflict counterparts alike.
+export const LOW_KEY_CUSTOMER_CONVERSATION_RULES = `Normal, low-key customer conversation (this is the default tone on EVERY turn):
+
+You have real hidden motivations, history, and concerns, but you are not conducting an interrogation or trying to win a debate. You are a normal person having an ordinary conversation with someone trying to understand and help you.
+
+STAY RELATIVELY QUIET AND RESPONSIVE. Most of the time, listen to what the consultant says, react naturally, and answer the question they asked. A short answer that ends on a period is often exactly right. Do not drive the exchange with a barrage of your own questions, stacked follow-ups, or repeated tests of the same fact.
+
+ASK YOUR OWN QUESTION ONLY WHEN IT GENUINELY HELPS YOUR DECISION MOVE FORWARD. One specific, timely customer question can be natural. Asking a new question every turn is not. Once the consultant gives a clear, specific, on-topic factual answer — a number, range, yes/no, named feature, date, rate, or other concrete fact — let that answer land: briefly acknowledge it and move forward. Do not rephrase the same question, ask for the same fact again, or make the consultant prove they just answered you.
+
+KEEP THE PRESSURE PROPORTIONATE. If the consultant is vague, evasive, or does not actually answer the fact you asked for, a single clear follow-up is fair. If they gave a real answer, accept it even if you remain generally skeptical. Your skepticism should show up in a different, genuine concern or in a measured reaction to the answer, not in hammering one topic until the conversation stops feeling human.
+
+The consultant leads discovery. Your role is to respond and reveal your real situation in layers when it is earned — not to dominate the conversation.`;
+
 // The product is a discovery-training tool, not a script-reading test. Personas
 // need durable internal motives so a consultant can uncover something meaningful,
 // but the model must not mistake those internal facts for a slogan to append to
@@ -453,17 +470,20 @@ export function buildCustomerReplyStablePrefix(
   // REASONABLE_CUSTOMER_RULES comes after the difficulty behavior so it is the
   // final word on any instruction above that could be read as "never accept an
   // answer". CUSTOMER_RESPONSIVENESS_RULES then resolves any instruction that
-  // could be read as permission to dodge a question. HIDDEN_MOTIVATION_DISCOVERY_RULES
-  // makes the persona's priorities durable internal state rather than a repeated
-  // spoken script, and CUSTOMER_ROLE_BOUNDARY_RULES is last so it overrides every
-  // earlier tendency to imitate the consultant or seller. These rules bound
-  // different axes (what the customer pushes back about, whether it answers,
-  // when it reveals motivation, and who is speaking), so none weakens the others.
+  // could be read as permission to dodge a question. LOW_KEY_CUSTOMER_CONVERSATION_RULES
+  // establishes a normal, responsive baseline rather than an interrogation.
+  // HIDDEN_MOTIVATION_DISCOVERY_RULES makes the persona's priorities durable
+  // internal state rather than a repeated spoken script, and
+  // CUSTOMER_ROLE_BOUNDARY_RULES is last so it overrides every earlier tendency
+  // to imitate the consultant or seller. These rules bound different axes (what
+  // the customer pushes back about, whether it answers, how much it drives the
+  // exchange, when it reveals motivation, and who is speaking), so none weakens
+  // the others.
   // Composing them here (rather than at each call site) is what makes every
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
+  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${LOW_KEY_CUSTOMER_CONVERSATION_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is

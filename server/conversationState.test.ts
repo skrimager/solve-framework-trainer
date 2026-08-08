@@ -721,6 +721,90 @@ describe("Rule G: a redirected premature question is accepted, not re-pushed", (
   });
 });
 
+describe("Rule Q: answered customer factual questions do not get re-asked", () => {
+  test("records Frank's tow-capacity question and a specific pound range as closed", () => {
+    const transcript = t(
+      "c: What towing capacity does this truck have?",
+      "r: This truck is rated to tow 12,000 to 14,000 pounds depending on configuration.",
+    );
+    const state = deriveConversationState(transcript);
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    const towing = state.answeredCustomerQuestions[0];
+    assert.equal(towing.status, "answered");
+    assert.match(towing.label, /towing capacity/i);
+    assert.match(towing.answer, /12,000 to 14,000 pounds/i);
+
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /ANSWERED AND CLOSED/);
+    assert.match(rendered, /Do NOT ask another version/i);
+    assert.match(rendered, /brief natural reaction/i);
+  });
+
+  test("ties a rephrased tow question to the already answered factual topic", () => {
+    const state = deriveConversationState(
+      t(
+        "c: How much can this truck tow?",
+        "r: It can tow 12,000 to 14,000 pounds depending on configuration.",
+        "c: Okay. What is the tow capacity again?",
+        "r: Like I said, 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(buildConversationStateLines(state).join("\n"), /same fact again with different wording/i);
+  });
+
+  test("works for a different vertical's named fact instead of vehicle vocabulary", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(state.answeredCustomerQuestions[0].label, /fixed interest rate/i);
+    assert.match(buildConversationStateLines(state).join("\n"), /ANSWERED AND CLOSED/);
+  });
+
+  test("allows exactly one concise clarification after a genuinely vague answer", () => {
+    const first = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+      ),
+    );
+    assert.equal(first.answeredCustomerQuestions.length, 1);
+    assert.equal(first.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(first.answeredCustomerQuestions[0].clarificationUsed, false);
+    assert.match(buildConversationStateLines(first).join("\n"), /may ask ONE concise, more precise follow-up/i);
+
+    const afterClarification = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+        "c: I need the exact number. How much can it tow?",
+        "r: I still cannot confirm that number right now.",
+      ),
+    );
+    assert.equal(afterClarification.answeredCustomerQuestions.length, 1);
+    assert.equal(afterClarification.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(afterClarification.answeredCustomerQuestions[0].clarificationUsed, true);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /already used your ONE fair clarification/i);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /Do not ask it again/i);
+  });
+
+  test("does not mistake a discovery pivot for a vague factual answer", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: Let's first figure out what you are hauling. What are you towing, and how often?",
+      ),
+    );
+    assert.deepEqual(state.answeredCustomerQuestions, []);
+  });
+});
+
 describe("Rule G: a topic the rep sequences for later is answered, not re-asked", () => {
   // The exact turn the bug produced: the customer replied "That sounds good, but
   // can you tell me more about the safety rating?" instead of answering.

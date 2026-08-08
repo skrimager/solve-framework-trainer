@@ -8,6 +8,7 @@ import {
   CONVERSATION_REALISM_RULES,
   CUSTOMER_ROLE_BOUNDARY_RULES,
   HIDDEN_MOTIVATION_DISCOVERY_RULES,
+  LOW_KEY_CUSTOMER_CONVERSATION_RULES,
   computeScoreCacheHash,
   scoreTranscript,
   getCustomerReply,
@@ -1982,6 +1983,71 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - reaches every customer prompt", () => 
       "the responsiveness layer is the third and last layer of the stack",
     );
     assert.ok(prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES));
+  });
+});
+
+describe("LOW_KEY_CUSTOMER_CONVERSATION_RULES - normal customer baseline", () => {
+  test("is embedded in every shared customer prompt and remains in the stable prefix", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, 2);
+      assert.ok(prompt.includes(LOW_KEY_CUSTOMER_CONVERSATION_RULES), `${difficulty} must inherit the low-key rules`);
+      assert.ok(
+        prompt.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES) < prompt.indexOf("Conversation so far:"),
+        `${difficulty} must receive the rule in the cacheable shared prefix`,
+      );
+    }
+  });
+
+  test("explicitly favors a quiet, responsive customer who accepts specific factual answers", () => {
+    const rules = LOW_KEY_CUSTOMER_CONVERSATION_RULES;
+    assert.match(rules, /STAY RELATIVELY QUIET AND RESPONSIVE/);
+    assert.match(rules, /barrage of your own questions/i);
+    assert.match(rules, /clear, specific, on-topic factual answer/i);
+    assert.match(rules, /Do not rephrase the same question/i);
+    assert.match(rules, /single clear follow-up is fair/i);
+    assert.match(rules, /The consultant leads discovery/i);
+  });
+
+  test("composes after responsiveness and before hidden-motivation guidance", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.indexOf(CUSTOMER_RESPONSIVENESS_RULES) < prefix.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES));
+    assert.ok(prefix.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES) < prefix.indexOf(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+  });
+});
+
+describe("buildCustomerReplyPrompt - answered factual-question memory", () => {
+  test("puts a customer question and its specific consultant answer into the volatile state tail", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What towing capacity does this truck have?"),
+        msg(
+          "consultant",
+          "This truck is rated to tow 12,000 to 14,000 pounds depending on its configuration.",
+        ),
+      ],
+      "advanced",
+    );
+    assert.match(prompt, /ANSWERED AND CLOSED/);
+    assert.match(prompt, /brief natural reaction/i);
+    assert.match(prompt, /same fact again with different wording/i);
+    assert.ok(
+      prompt.indexOf("Conversation so far:") < prompt.indexOf("ANSWERED AND CLOSED"),
+      "the derived factual-answer memory must be after the transcript in the volatile tail",
+    );
+  });
+
+  test("preserves one concise clarification when the consultant is genuinely vague", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What towing capacity does this truck have?"),
+        msg("consultant", "It should be able to handle a trailer, but I would need to check the exact rating."),
+      ],
+      "advanced",
+    );
+    assert.match(prompt, /may ask ONE concise, more precise follow-up/i);
+    assert.doesNotMatch(prompt, /ANSWERED AND CLOSED/);
   });
 });
 
