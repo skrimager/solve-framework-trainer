@@ -816,10 +816,11 @@ export type OfficeSignup = typeof officeSignups.$inferSelect;
 // temperature 0, so the same transcript can score differently on repeat runs.
 // We guarantee determinism by construction: a sha256 hash over everything that
 // affects the score (transcript role+content in order, difficulty, track,
-// transactionType) keys a stored result. Identical input -> identical stored
-// output, with no API call on a hit. `rubric` is JSON text (same convention as
-// sessions.rubricScores). `transcript`/`transactionType` are kept for
-// debuggability; they are not read on lookup (the hash is the key).
+// transactionType, and the versioned scoring prompt/grounding rules) keys a
+// stored result. Identical input -> identical stored output, with no API call on
+// a hit. `rubric` is JSON text (same convention as sessions.rubricScores).
+// `transcript`/`transactionType` are kept for debuggability; they are not read
+// on lookup (the hash is the key).
 export const scoreCache = pgTable("score_cache", {
   id: serial("id").primaryKey(),
   contentHash: text("content_hash").notNull().unique(), // sha256 over normalized transcript + params
