@@ -7,11 +7,14 @@ import {
   SEQUENCING_STOP_THRESHOLD,
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
+  buildFinalAnsweredQuestionGate,
   buildDirectQuestionLines,
   deriveConversationState,
   deriveDirectQuestion,
+  extractAskedSubject,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
+  repeatsClosedAnsweredQuestion,
 } from "./conversationState";
 
 // Terse transcript builder: "c: ..." is the customer, "r: ..." is the rep.
@@ -718,6 +721,149 @@ describe("Rule G: a redirected premature question is accepted, not re-pushed", (
 
   test("an ordinary question carries no redirect line at all", () => {
     assert.doesNotMatch(questionLines("r: What brings you in today?"), /Accept that redirect/);
+  });
+});
+
+describe("Rule Q: answered customer factual questions do not get re-asked", () => {
+  test("records Frank's tow-capacity question and a specific pound range as closed", () => {
+    const transcript = t(
+      "c: What towing capacity does this truck have?",
+      "r: This truck is rated to tow 12,000 to 14,000 pounds depending on configuration.",
+    );
+    const state = deriveConversationState(transcript);
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    const towing = state.answeredCustomerQuestions[0];
+    assert.equal(towing.status, "answered");
+    assert.match(towing.label, /towing capacity/i);
+    assert.match(towing.answer, /12,000 to 14,000 pounds/i);
+
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /ANSWERED AND CLOSED/);
+    assert.match(rendered, /Do NOT ask another version/i);
+    assert.match(rendered, /brief natural reaction/i);
+  });
+
+  test("ties a rephrased tow question to the already answered factual topic", () => {
+    const state = deriveConversationState(
+      t(
+        "c: How much can this truck tow?",
+        "r: It can tow 12,000 to 14,000 pounds depending on configuration.",
+        "c: Okay. What is the tow capacity again?",
+        "r: Like I said, 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(buildConversationStateLines(state).join("\n"), /same fact again with different wording/i);
+  });
+
+  test("keeps every towing-package/capacity surface form inside one final closed boundary", () => {
+    const initial = "What specific towing package and towing capacity does this truck have?";
+    const rephrase = "Can you tell me about the features that come with the towing package?";
+    const subject = extractAskedSubject(initial);
+    const rephrasedSubject = extractAskedSubject(rephrase);
+    assert.deepEqual(subject?.keywords, ["specific", "tow", "package", "capacity"]);
+    assert.deepEqual(rephrasedSubject?.keywords, ["feature"]);
+
+    const state = deriveConversationState(
+      t(initial.startsWith("c:") ? initial : `c: ${initial}`, "r: This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.match(gate, /TOWING-CAPABILITY BOUNDARY/);
+    assert.match(gate, /towing features\/options\/configurations\/specifications/i);
+    assert.match(gate, /What comes with the towing package/i);
+    assert.match(gate, /How does it perform with a load/i);
+  });
+
+  test("keeps the stronger towing boundary out of non-auto factual questions", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.doesNotMatch(gate, /TOWING-CAPABILITY BOUNDARY/);
+  });
+
+  test("recognizes rephrased towing capability questions without mistaking a separate fuel question for one", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What specific towing package and towing capacity does this truck have?",
+        "r: This truck can tow 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What features come with the towing package?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "How does it handle long distances when towing heavy loads?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(
+        state,
+        "What I really need to know next is how its payload capacity holds up under heavy use. What’s the maximum weight it can handle in the bed?",
+      ),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What fuel economy can I expect when not towing?"),
+      false,
+    );
+  });
+
+  test("works for a different vertical's named fact instead of vehicle vocabulary", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(state.answeredCustomerQuestions[0].label, /fixed interest rate/i);
+    assert.match(buildConversationStateLines(state).join("\n"), /ANSWERED AND CLOSED/);
+  });
+
+  test("allows exactly one concise clarification after a genuinely vague answer", () => {
+    const first = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+      ),
+    );
+    assert.equal(first.answeredCustomerQuestions.length, 1);
+    assert.equal(first.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(first.answeredCustomerQuestions[0].clarificationUsed, false);
+    assert.match(buildConversationStateLines(first).join("\n"), /may ask ONE concise, more precise follow-up/i);
+
+    const afterClarification = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+        "c: I need the exact number. How much can it tow?",
+        "r: I still cannot confirm that number right now.",
+      ),
+    );
+    assert.equal(afterClarification.answeredCustomerQuestions.length, 1);
+    assert.equal(afterClarification.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(afterClarification.answeredCustomerQuestions[0].clarificationUsed, true);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /already used your ONE fair clarification/i);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /Do not ask it again/i);
+  });
+
+  test("does not mistake a discovery pivot for a vague factual answer", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: Let's first figure out what you are hauling. What are you towing, and how often?",
+      ),
+    );
+    assert.deepEqual(state.answeredCustomerQuestions, []);
   });
 });
 
