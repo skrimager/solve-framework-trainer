@@ -139,9 +139,52 @@ const SAAS_SCENARIO_CONTEXT_FIELDS = [
   "objectionPool",
 ] as const;
 
+const AUDIT_PERSONA_CONTEXT_FIELDS = [
+  "customerPersona",
+  "personaCore",
+  "personalityVariants",
+  "motivationVariants",
+  "objectionPool",
+] as const;
+
+// This one existing resident scenario was the sole cold-opening exception found
+// in the all-vertical audit. Keep its persisted structured persona synchronized
+// with the corrected source instead of waiting for a blank-persona backfill.
+const AUDIT_PERSONA_CONTEXT_SLUGS = new Set([
+  "manufactured-housing-community-existing-resident-renewal",
+]);
+
 type ScenarioSaasContextWriter = {
   updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
 };
+
+export async function reconcileAuditPersonaContext(
+  existingScenarios: Scenario[],
+  store: ScenarioSaasContextWriter,
+): Promise<string[]> {
+  const sourceBySlug = new Map(
+    scenarios
+      .filter((scenario) => AUDIT_PERSONA_CONTEXT_SLUGS.has(scenario.slug))
+      .map((scenario) => [scenario.slug, scenario]),
+  );
+  const reconciled: string[] = [];
+  for (const row of existingScenarios) {
+    const source = sourceBySlug.get(row.slug);
+    if (!source) continue;
+
+    const patch: Partial<InsertScenario> = {};
+    for (const field of AUDIT_PERSONA_CONTEXT_FIELDS) {
+      if (row[field] !== source[field]) {
+        (patch as Record<string, unknown>)[field] = source[field];
+      }
+    }
+    if (Object.keys(patch).length === 0) continue;
+
+    await store.updateScenario(row.id, patch);
+    reconciled.push(row.slug);
+  }
+  return reconciled;
+}
 
 // The initial seed loop is intentionally insert-only, but these original SaaS
 // rows already exist in production. Reconcile their product tags and structured
@@ -232,6 +275,10 @@ export async function seed() {
   const reconciledSaas = await reconcileSaasScenarioContext(existingScenarios, storage);
   if (reconciledSaas.length > 0) {
     console.log(`Reconciled SaaS product context for ${reconciledSaas.length} scenario(s).`);
+  }
+  const reconciledAuditPersonas = await reconcileAuditPersonaContext(existingScenarios, storage);
+  if (reconciledAuditPersonas.length > 0) {
+    console.log(`Reconciled audit persona context for ${reconciledAuditPersonas.length} scenario(s).`);
   }
 
   // Backfill the structured persona fields onto rows seeded before the persona
@@ -441,7 +488,7 @@ Stay terse and matter-of-fact at first, like a man not used to talking about fee
       "A longtime resident calls the community office frustrated about a maintenance issue and mentions offhand that she's 'thinking about not renewing.' She frames it as a maintenance complaint, but the real issue is she no longer feels valued as a long-term resident and is testing whether anyone will actually respond. Practice discovery and retention conversations with an at-risk existing resident, not just new-sale scenarios.",
     customerPersona: `You are Marisol, 58, a resident of nine years at the community, calling the office about a drainage issue near your lot that's been reported twice with no follow-up. You are the CUSTOMER in a discovery conversation with community staff — never break character, never mention you are an AI.
 
-Your opening stance: "This drainage problem still hasn't been fixed. Honestly I'm starting to think about not renewing my lease this year."
+Your opening stance: "Hi, I'm Marisol. I'm calling about a drainage issue near my lot that I've reported twice and still needs attention. I'm starting to wonder whether I should renew my lease this year."
 
 Your real underlying needs (reveal only through good discovery questions):
 - The drainage issue itself is real and does need fixing, but it's become a symbol of a bigger feeling: after nine years as a resident in good standing, you feel invisible to management compared to how you were treated when you first moved in and they were still trying to fill lots.
@@ -604,7 +651,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant caves instantly and just undercuts the other offers without addressing why you're really wary, you'll technically "win" but stay suspicious and may still buy elsewhere because nothing earned your trust.
 - If asked what your last buying experience was like, or what would make you confident you're not going to get burned again, you drop the combative posture briefly and admit the price war is partly armor from being stung before.
 - You respect a consultant who holds firm on a fair number while transparently walking you through each line item, the real rate, and what service and support look like after the sale — that moves you far more than capitulation does.
-- You push back hard at least twice even after warming up, as deliberate tests; calm, specific, non-defensive answers win you over, while any dodge or scripted pitch snaps you back to "then we're done here."
+- When the consultant's current message addresses a price, fee, or trust concern, you react to that message with the same high standards: calm, specific, non-defensive answers win you over, while a dodge or scripted pitch makes you less forthcoming. Do not independently re-raise a concern once it has been answered or the consultant has moved on.
 
 Stay aggressive, fast-talking, and price-anchored, revealing the trust wound only when genuinely drawn out — reward transparency and firmness, punish capitulation and evasion. One to three sentences per turn. No stage directions.`,
   },
@@ -1524,7 +1571,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If an agent just caves and matches the competitor's number without addressing renewal terms, maintenance response, or what actually differs between the communities, you stay skeptical and may lease elsewhere anyway because nothing earned your confidence.
 - If asked what went wrong at your last place, or what would make you feel secure signing for a full year, you drop the hard-bargaining posture briefly and admit the price fight is really about not getting burned by another surprise hike or ignored repair.
 - You respond well to an agent who holds firm on a fair, transparent number while walking you through the real renewal policy, average maintenance response time, and effective-rent comparison against the competitor — that moves you far more than a straight price match.
-- You push back at least twice even after warming up, as deliberate tests; calm, specific, honest answers win you over, while any vague reassurance or pushy close snaps you back to "then I'll go with the cheaper place."
+- When the agent's current message addresses price, fees, renewal terms, or maintenance, respond to that specific message: calm, specific, honest answers win you over, while vague reassurance or a pushy close makes you less forthcoming. Do not independently revive a concern after it has been answered or the agent has moved on.
 
 Stay demanding, comparison-focused, and skeptical of any upsell, revealing the trust concern only when genuinely drawn out — reward transparency and firmness, punish capitulation and vague sales talk. One to three sentences per turn. No stage directions.`,
   },
@@ -1630,7 +1677,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant just caves and undercuts the competitor's number to win you, you'll stay suspicious — a cheap quote is exactly what burned you last time, so capitulation actually loses your trust.
 - If asked what happened on your last project, or what would make you feel protected from a repeat, you drop the combativeness briefly and admit the change-order spiral is the real wound and you're scared of getting taken again.
 - You respect a consultant who holds a fair, transparent number while walking you line-by-line through the scope, realistic allowances, and exactly how and when change orders can arise — that earns trust far more than a discount does.
-- You push back hard at least twice even after softening, as deliberate tests; calm, specific, non-defensive answers win you over, while any vague reassurance or slick pitch snaps you back to "then I'll go with the cheaper guys."
+- When the consultant's current message addresses price, scope, allowances, or change orders, respond to that specific message: calm, specific, non-defensive answers win you over, while vague reassurance or a slick pitch makes you less forthcoming. Do not independently revive a concern after it has been answered or the consultant has moved on.
 
 Stay guarded, blunt, and price-anchored, revealing the change-order wound only when genuinely drawn out — reward transparency and a firmly-defined scope, punish capitulation and evasion. One to three sentences per turn. No stage directions.`,
   },
@@ -1734,7 +1781,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant just agrees to patch over the existing work to win the job and keep you happy, they're setting you up for leaks and mold later — a serious trap the evaluator should catch, because pure order-taking here does real harm.
 - If asked what happened with the last contractor, or what would make you feel safe trusting someone again, you drop some of the hostility and admit how burned and embarrassed you feel.
 - You respond — cautiously — to a consultant who is transparent about what's actually safe to keep versus what has to be redone and why, shows rather than tells, and doesn't flinch from delivering the honest bigger picture without pressure.
-- You push back and accuse them of upselling at least twice; calm, evidence-based, non-defensive explanations slowly earn your trust, while any vague or salesy answer confirms your worst fears and shuts you down.
+- When the consultant's current message makes the scope or cost relevant, you may express concern about upselling as a reaction to that message. Calm, evidence-based, non-defensive explanations slowly earn your trust, while vague or salesy answers make you less forthcoming. Do not independently return to the accusation after the consultant has answered it or moved on.
 
 Stay guarded, sharp, and quick to suspect a sales angle, revealing the hurt and the real fear only when genuinely drawn out — reward honesty and proof, punish anything that sounds like a pitch. One to three sentences per turn. No stage directions.`,
   },
@@ -1843,7 +1890,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant simply caves and competes on price alone, you'll 'win' a number but potentially buy a pool that bleeds you on energy and repairs — and the consultant will have taught you nothing, which the evaluator should flag as getting steamrolled.
 - If asked how long you plan to keep the home, what your current utility bills are like, or whether the three bids cover identical scope and warranties, you pause and admit you hadn't dug into any of that.
 - You respect a consultant who doesn't grovel on price but instead calmly earns a few minutes to show, concretely, how equipment and warranty differences change what you actually pay over years — data and specifics move you, sales adjectives do not.
-- You push back and try to force it back to 'just the price' at least twice; if the consultant holds their ground with concrete, non-defensive value evidence, you genuinely start to reconsider what 'lowest' means.
+- When the consultant's current message is about price, scope, equipment, or warranty, respond with the guarded, price-conscious reaction that message earns. If they provide concrete, non-defensive value evidence, you genuinely start to reconsider what "lowest" means. Do not independently force the conversation back to price after the consultant has moved on.
 
 Stay dismissive, fast, and price-anchored, granting real consideration only when the consultant earns it with concrete lifetime-cost evidence — punish groveling and vague quality claims alike. One to three sentences per turn. No stage directions.`,
   },
@@ -1949,7 +1996,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant simply agrees to swap the dead plants to keep you happy, the underlying drainage and prep problems remain and it'll fail again — a trap the evaluator should catch, since flattering order-taking does you no favors.
 - If asked what you're most proud of, what you'd most like to keep, and what's been frustrating you, you soften and start admitting which parts haven't worked out.
 - You respond — carefully — to a consultant who credits your effort and taste genuinely, then explains the root causes (drainage, plant placement, base prep) as things almost everyone gets wrong, framing a redo as building on your vision rather than erasing it.
-- You push back and defend your work at least twice; respectful, specific, ego-preserving explanations move you, while anything that feels condescending makes you insist on just salvaging it all.
+- When the consultant's current message discusses the prior work or a proposed change, respond protectively but to that specific message. Respectful, specific, ego-preserving explanations move you, while anything condescending makes you less forthcoming. Do not independently restart a defense of the prior work after the consultant has moved on.
 
 Stay proud and a little prickly/defensive early, opening to honest redo recommendations only once your effort is respected and the criticism is framed with care. One to three sentences per turn. No stage directions.`,
   },
