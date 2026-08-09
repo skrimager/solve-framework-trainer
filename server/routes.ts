@@ -33,6 +33,7 @@ import {
   buildPersonaVariantSection,
   scenarioPersonaVariants,
   personaCoreFor,
+  personaOpeningCoreFor,
   sessionVariantSection,
 } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
@@ -366,7 +367,7 @@ export function registerScenarioAndSessionRoutes(app: Express): void {
         const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
         personaVariant = JSON.stringify(selected);
         const variantSection = buildPersonaVariantSection(selected);
-        const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
+        const openingText = await getCustomerOpening(personaOpeningCoreFor(scenario), scenario.track, variantSection);
         if (openingText) {
           const openingMsg = transcriptMessageSchema.parse({
             role: "customer",
@@ -1842,7 +1843,7 @@ async function createScenarioSession(
   const personaVariant = JSON.stringify(selected);
   try {
     const openingText = await getCustomerOpening(
-      personaCoreFor(scenario),
+      personaOpeningCoreFor(scenario),
       scenario.track,
       buildPersonaVariantSection(selected)
     );

@@ -113,6 +113,19 @@ export const insertUserSchema = createInsertSchema(users).pick({
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
+// Internal product categories for SaaS discovery scenarios. These values are
+// intentionally never rendered as labels in the trainee UI: they give the
+// opening-line prompt enough context for the prospect's own first words to
+// establish the category naturally.
+export const SAAS_PRODUCT_TAGS = [
+  "crm",
+  "website_builder",
+  "ai_sales_automation",
+  "ai_roleplay_platform",
+  "email_drip_automation",
+] as const;
+export type SaasProductTag = (typeof SAAS_PRODUCT_TAGS)[number];
+
 // A discovery-training scenario (e.g. Manufactured Housing customer persona)
 export const scenarios = pgTable("scenarios", {
   id: serial("id").primaryKey(),
@@ -128,6 +141,9 @@ export const scenarios = pgTable("scenarios", {
   // 'manufactured_community' | 'manufactured_dealer' | 're_listing_agent' | 're_buyer_agent';
   // null for every non-real-estate / non-manufactured-housing scenario.
   transactionType: text("transaction_type"),
+  // Internal-only SaaS product-category tag. Null for every non-SaaS scenario;
+  // it is fed into opening-line generation and is never rendered as a UI label.
+  product: text("product"),
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // LEGACY freeform system prompt. Retained for rollback; no longer used to build prompts once personaCore is populated (see server/persona.ts).
   // Structured persona fields (replace the single freeform customerPersona for
