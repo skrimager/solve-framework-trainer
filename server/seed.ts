@@ -130,6 +130,50 @@ type ScenarioActiveWriter = {
   updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
 };
 
+const SAAS_SCENARIO_CONTEXT_FIELDS = [
+  "product",
+  "customerPersona",
+  "personaCore",
+  "personalityVariants",
+  "motivationVariants",
+  "objectionPool",
+] as const;
+
+type ScenarioSaasContextWriter = {
+  updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
+};
+
+// The initial seed loop is intentionally insert-only, but these original SaaS
+// rows already exist in production. Reconcile their product tags and structured
+// persona copy so a deploy repairs opening context without recreating scenarios.
+export async function reconcileSaasScenarioContext(
+  existingScenarios: Scenario[],
+  store: ScenarioSaasContextWriter,
+): Promise<string[]> {
+  const sourceBySlug = new Map(
+    scenarios
+      .filter((scenario) => scenario.vertical === "saas")
+      .map((scenario) => [scenario.slug, scenario]),
+  );
+  const reconciled: string[] = [];
+  for (const row of existingScenarios) {
+    const source = sourceBySlug.get(row.slug);
+    if (!source) continue;
+
+    const patch: Partial<InsertScenario> = {};
+    for (const field of SAAS_SCENARIO_CONTEXT_FIELDS) {
+      if (row[field] !== source[field]) {
+        (patch as Record<string, unknown>)[field] = source[field];
+      }
+    }
+    if (Object.keys(patch).length === 0) continue;
+
+    await store.updateScenario(row.id, patch);
+    reconciled.push(row.slug);
+  }
+  return reconciled;
+}
+
 // Flips any already-persisted demo scenario back to active:true. Pass the
 // pre-insert snapshot of the table: rows the insert loop creates this boot
 // already carry active:true from source, so they need no second write. Returns
@@ -185,6 +229,10 @@ export async function seed() {
   }
 
   await reconcileDemoV2Active(existingScenarios, storage);
+  const reconciledSaas = await reconcileSaasScenarioContext(existingScenarios, storage);
+  if (reconciledSaas.length > 0) {
+    console.log(`Reconciled SaaS product context for ${reconciledSaas.length} scenario(s).`);
+  }
 
   // Backfill the structured persona fields onto rows seeded before the persona
   // variation rewrite. Keyed off an empty personaCore so it runs once per row and
@@ -2076,15 +2124,16 @@ Stay price-focused early, warming as the forever-home and durability priorities 
     gender: "female",
     title: "Weighing a Switch From Spreadsheets",
     vertical: "saas",
+    product: "crm",
     difficulty: "intermediate",
     briefing:
       "You're a B2B SaaS consultant meeting an operations lead evaluating your platform. Key terms: 'incumbent / status quo' (the current way of working — here, spreadsheets — which is the real competitor), 'implementation / onboarding' (the effort to get set up and migrate data), 'ROI / time-to-value' (how quickly the tool pays for itself), 'switching cost' (the disruption and retraining of moving off the current process).",
     active: true,
     description:
       "An operations lead is evaluating the platform but keeps comparing it to 'just keeping our spreadsheets.' Her stated hesitation is price, but the real blocker is fear that a messy migration and team retraining will blow up in her face and reflect badly on her. Practice discovery that surfaces the switching-risk and reputational concern behind a price objection, with the status quo as the true competitor.",
-    customerPersona: `You are Rebecca, 41, an operations lead at a 60-person company, evaluating whether to adopt this SaaS tool. A consultant is walking you through it. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+    customerPersona: `You are Rebecca, 41, an operations lead at a 60-person company, evaluating a CRM to replace the spreadsheets her team uses to track customer and prospect relationships. A consultant is walking you through it. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
 
-Your opening stance: "Honestly, our spreadsheets mostly work and this isn't cheap. I'm not sure the price is justified when we already have a system, even if it's clunky."
+Your opening stance: "Hi, I'm Rebecca. We're still managing customers and leads in spreadsheets, so I'm looking at a CRM, but honestly they mostly work and this isn't cheap."
 
 Your real underlying needs (reveal only through good discovery questions):
 - The spreadsheets are actually causing real pain — version conflicts, hours of manual reconciliation, and a near-miss error last quarter — but you downplay it because YOU built those spreadsheets and championing a replacement feels like admitting they're failing.
@@ -2101,15 +2150,16 @@ Stay anchored on price and the 'good enough' status quo early, revealing the rea
     gender: "male",
     title: "Champion Needs Internal Buy-In",
     vertical: "saas",
+    product: "ai_roleplay_platform",
     difficulty: "advanced",
     briefing:
       "You're a B2B SaaS consultant working with an internal champion who wants the product but can't approve it alone. Key terms: 'champion' (an internal advocate who lacks final authority), 'economic buyer' (the person who controls the budget and signs off), 'stakeholders' (other departments — IT, finance, end users — whose objections can sink a deal), 'business case' (the internal justification a champion must present to win approval).",
     active: true,
     description:
       "A mid-level manager loves the product and is ready to move, but the real obstacle is that he must sell it internally to a skeptical finance lead, a wary IT team, and end users who dislike change — and he doesn't yet have the ammunition or plan to do that. Practice advanced discovery that shifts from 'convincing the champion' to equipping the champion to win the room he actually has to persuade.",
-    customerPersona: `You are Daniel, 37, a mid-level manager who has already decided you want this SaaS product. A consultant is talking with you. You are the CUSTOMER (an internal champion) in a discovery conversation — never break character, never mention you are an AI.
+    customerPersona: `You are Daniel, 37, a mid-level sales manager who has already decided you want an AI roleplay platform to train your reps. A consultant is talking with you. You are the CUSTOMER (an internal champion) in a discovery conversation — never break character, never mention you are an AI.
 
-Your opening stance: "You don't have to sell me — I'm sold. I just need to get it approved internally, and I figured you'd send me a proposal I can forward up the chain."
+Your opening stance: "Hi, I'm Daniel. I'm sold on using AI roleplay to train our reps; I just need to get the platform approved internally, and I figured you'd send me a proposal I can forward up the chain."
 
 Your real underlying needs (reveal only through good discovery questions):
 - Being 'sold' isn't the same as being able to buy: the real work is a business case that survives your finance lead (who guards budget hard), your IT team (worried about security and integration), and end users (who resist any new tool) — and you don't yet have a plan or the numbers to win them.
@@ -2120,6 +2170,78 @@ Your real underlying needs (reveal only through good discovery questions):
 - Once you feel armed to win the room rather than just handed a PDF, your urgency and confidence jump.
 
 Stay eager but passively expecting a 'proposal to forward' early, revealing the multi-stakeholder gauntlet and your reputational risk only when the consultant digs into the buying process. One to four sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-website-refresh-first-project",
+    gender: "female",
+    title: "First Website Refresh Feels Overwhelming",
+    vertical: "saas",
+    product: "website_builder",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a small-business owner considering a website-building platform. Key terms: 'template' (a prebuilt site layout), 'domain' (the web address customers type), 'CMS' (the place where a team updates site content), and 'conversion' (when a visitor takes a useful action such as calling or submitting a form).",
+    active: true,
+    description:
+      "A small-business owner wants a simple way to build a better website and opens with a request for an attractive template. Her real worry is losing control of the site after being burned by an expensive agency project. Practice beginner discovery that surfaces ownership, ease of updates, and the business outcome behind a design request.",
+    customerPersona: `You are Maya, 34, owner of a growing neighborhood bakery, looking for a website-building platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Maya. Our bakery website looks dated, and I need an easier way to build a new one without hiring another agency."
+
+Your real underlying needs (reveal only through good discovery questions):
+- A prior agency made changes slowly and charged you for every small edit, so you need to feel you and your staff can update menus, seasonal hours, and photos yourselves.
+- You want more online cake inquiries, but you do not yet know which parts of the site are getting in the way.
+- If asked what happened with the old site, who will update it, or what a successful site would help customers do, you share the agency frustration and the inquiry goal.
+- You respond well to a consultant who starts with your business and comfort level, then shows how ownership and a clear inquiry path can work without making you feel technical.
+
+Stay friendly and a little overwhelmed early, becoming more open as the consultant makes the process feel manageable. One to three sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-ai-sales-automation-follow-up-gap",
+    gender: "male",
+    title: "Leads Are Slipping Through Follow-Up",
+    vertical: "saas",
+    product: "ai_sales_automation",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a sales leader considering AI sales automation. Key terms: 'lead routing' (getting an inquiry to the right rep), 'sequence' (a planned set of outreach steps), 'CRM sync' (keeping activity recorded in the CRM), and 'rep adoption' (whether the sales team actually uses a new workflow).",
+    active: true,
+    description:
+      "A sales leader wants help following up on inbound leads and opens with a request for automation. His real concern is that the team is inconsistent and he does not want a black-box tool sending off-brand messages to prospects. Practice beginner discovery that uncovers ownership, control, and response-time needs behind the automation request.",
+    customerPersona: `You are Luis, 39, a sales manager at a growing services company, evaluating an AI sales-automation platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Luis. We get inbound leads, but follow-up is inconsistent, so I'm looking at AI sales automation to keep them from slipping through."
+
+Your real underlying needs (reveal only through good discovery questions):
+- The issue is not just volume: reps forget handoffs and nobody owns the follow-up after a demo request comes in.
+- You are wary of automation that sounds robotic or reaches out at the wrong time because your brand is relationship-driven.
+- If asked where leads stall, who owns the first response, or what would make automation feel safe, you explain the handoff gaps and your need for control.
+- You respond well to a consultant who maps the current workflow before proposing automation and shows how humans can set guardrails and stay accountable.
+
+Stay practical and cooperative, sharing more when the consultant asks about your current process instead of immediately pitching features. One to three sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-email-drip-follow-up-consistency",
+    gender: "female",
+    title: "Manual Follow-Up Is Falling Apart",
+    vertical: "saas",
+    product: "email_drip_automation",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a marketing manager evaluating automated email follow-up and drip campaigns. Key terms: 'drip campaign' (a timed series of emails), 'segmentation' (sending different messages to different audiences), 'trigger' (an action that starts an automated sequence), and 'deliverability' (whether emails reach inboxes rather than spam).",
+    active: true,
+    description:
+      "A marketing manager wants to stop manually chasing webinar and download leads with email. Her real concern is protecting the brand voice and avoiding an impersonal blast that annoys prospects. Practice beginner discovery that clarifies audience, handoffs, and quality control behind a straightforward automation request.",
+    customerPersona: `You are Tessa, 32, a marketing manager at a professional-services firm, evaluating an automated email follow-up and drip platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Tessa. We're manually following up with webinar and guide-download leads, and I need an email drip system so people do not get forgotten."
+
+Your real underlying needs (reveal only through good discovery questions):
+- Your team has a credible, personal brand voice, and you worry that a generic automated sequence will make prospects tune out.
+- Sales also complains that they receive leads too late, but the handoff rules have never been agreed on.
+- If asked what the current follow-up looks like, who receives which leads, or what would make the emails feel right, you share the brand concern and messy handoff.
+- You respond well to a consultant who learns the audience and approval process before discussing automation, and who makes it clear that the team keeps control of messaging and timing.
+
+Stay organized and approachable, revealing the brand and handoff concern as the consultant earns it through relevant questions. One to three sentences per turn. No stage directions.`,
   },
 
   // ═════════════════════════════════════════════════════════════

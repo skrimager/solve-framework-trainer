@@ -55,7 +55,7 @@ import {
 } from "./llm";
 import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import { deriveStalledStep } from "./realConversations";
-import { personaCoreFor, sessionVariantSection } from "./persona";
+import { personaCoreFor, personaOpeningCoreFor, sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import { historyForTurn, runReplyStream } from "./turnStream";
 import { transcriptMessageSchema, type DemoSession, type DemoSignup, type RubricScores, type Scenario, type TranscriptMessage } from "@shared/schema";
@@ -276,7 +276,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
     try {
       const variantSection = sessionVariantSection(scenario, { id: session.id, personaVariant: null });
-      const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
+      const openingText = await getCustomerOpening(personaOpeningCoreFor(scenario), scenario.track, variantSection);
       if (openingText) {
         const openingMsg = transcriptMessageSchema.parse({
           role: "customer",

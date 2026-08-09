@@ -1,4 +1,4 @@
-import type { Scenario, Session } from "@shared/schema";
+import type { Scenario, Session, SaasProductTag } from "@shared/schema";
 
 // Per-session persona variation. Each scenario carries a FIXED core (identity,
 // situation, opening stance, and the designed ideal-outcome behavior that must
@@ -156,6 +156,28 @@ export function personaCoreFor(scenario: Scenario): string {
   return scenario.personaCore && scenario.personaCore.trim().length > 0
     ? scenario.personaCore
     : scenario.customerPersona;
+}
+
+const SAAS_PRODUCT_OPENING_CONTEXT: Record<SaasProductTag, string> = {
+  crm: "a CRM for managing customer and prospect relationships",
+  website_builder: "a website-building platform",
+  ai_sales_automation: "an AI sales-automation platform",
+  ai_roleplay_platform: "an AI roleplay platform for training sales reps",
+  email_drip_automation: "an automated email follow-up and drip platform",
+};
+
+function isSaasProductTag(value: string | null | undefined): value is SaasProductTag {
+  return Object.prototype.hasOwnProperty.call(SAAS_PRODUCT_OPENING_CONTEXT, value ?? "");
+}
+
+// Adds the internal SaaS category to the OPENING prompt only. The label itself
+// must not be spoken; the customer simply mentions the category naturally in
+// their opening stance so the trainee can orient themselves before discovery.
+export function personaOpeningCoreFor(scenario: Scenario): string {
+  const core = personaCoreFor(scenario);
+  if (scenario.vertical !== "saas" || !isSaasProductTag(scenario.product)) return core;
+
+  return `${core}\n\nInternal opening context: this prospect is evaluating ${SAAS_PRODUCT_OPENING_CONTEXT[scenario.product]}. In the opening line, naturally establish that category in the prospect's own words without naming a tag, dumping features, or revealing any hidden need.`;
 }
 
 function isSelectedPersonaVariant(value: unknown): value is SelectedPersonaVariant {
