@@ -26,8 +26,10 @@ export interface PersonaVariantSeed {
   objections: string[];
 }
 
-// One objection drawn for a session, tagged with roughly where in the
-// conversation it should surface.
+// One concern drawn for a session. The persisted position remains for backwards
+// compatibility with existing session variants, but it is no longer a cue to
+// surface the concern on a scheduled turn: the consultant's current message
+// must create the relevant opening.
 export type ObjectionPosition = "early" | "midway" | "later";
 export interface SelectedObjection {
   text: string;
@@ -100,12 +102,6 @@ export function selectPersonaVariant(
   return { personality, motivation, objections };
 }
 
-const POSITION_HINT: Record<ObjectionPosition, string> = {
-  early: "early in the conversation",
-  midway: "once the conversation is underway",
-  later: "later, after some rapport has built",
-};
-
 // Renders the per-session rendition into the prompt block that follows the fixed
 // core. Kept separate and deterministic so it can be reconstructed identically
 // every turn and unit-tested without the network. Returns "" when nothing was
@@ -123,10 +119,10 @@ export function buildPersonaVariantSection(selected: SelectedPersonaVariant): st
   }
   if (selected.objections.length > 0) {
     lines.push(
-      "- Concerns that are on your mind this time. These are notes about what is bothering you, not lines to recite: raise each one at most ONCE, in your own words at that moment, at roughly the point noted, and ONLY if the consultant has not already put it to rest. Never repeat one you have already raised. Do not list them all at once, and do not invent extra ones:"
+      "- Concerns that are on your mind this time. These are private notes about what is bothering you, not lines to recite and not a schedule. Do not bring one up merely because a turn number or its stored position says it is due. Surface a concern at most ONCE, in your own words, ONLY when the consultant's current message creates a genuine relevant opening and they have not already put it to rest. Never repeat one you have already raised, do not list them all at once, and do not invent extra ones:"
     );
     for (const obj of selected.objections) {
-      lines.push(`  - ${obj.text} (bring this up ${POSITION_HINT[obj.position]})`);
+      lines.push(`  - ${obj.text} (private concern; use only through a relevant current-message opening)`);
     }
   }
   if (lines.length === 0) return "";

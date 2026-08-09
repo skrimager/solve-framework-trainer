@@ -10,6 +10,7 @@ import {
   CUSTOMER_ROLE_BOUNDARY_RULES,
   HIDDEN_MOTIVATION_DISCOVERY_RULES,
   LOW_KEY_CUSTOMER_CONVERSATION_RULES,
+  REACTIVE_ONLY_CUSTOMER_RULES,
   computeScoreCacheHash,
   SCORE_CACHE_VERSION,
   scoreTranscript,
@@ -41,7 +42,7 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
     const rules = CONVERSATION_REALISM_RULES.toLowerCase();
     // Must forbid repeating/rewording a concern already voiced.
     assert.ok(rules.includes("already"));
-    assert.ok(rules.includes("reworded") || rules.includes("rephrased"));
+    assert.ok(rules.includes("lightly reword"));
   });
 
   test("instructs the persona to give NEW information when asked to clarify (issue 3c)", () => {
@@ -54,8 +55,8 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
 
   test("instructs the persona to acknowledge and move on once a concern is addressed (issue 3d)", () => {
     const rules = CONVERSATION_REALISM_RULES.toLowerCase();
-    assert.ok(rules.includes("move on") || rules.includes("moving forward") || rules.includes("forward"));
-    assert.ok(rules.includes("acknowledge"));
+    assert.ok(rules.includes("closed unless the consultant reopens it"));
+    assert.ok(rules.includes("accept that sequencing"));
   });
 
   test("still includes the persona, difficulty behavior, and conversation history", () => {
@@ -82,62 +83,100 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
   });
 });
 
-describe("CONVERSATION_REALISM_RULES - state awareness and forward motion", () => {
+describe("CONVERSATION_REALISM_RULES - state awareness and reactive continuity", () => {
   const rules = CONVERSATION_REALISM_RULES.toLowerCase();
 
   test("forbids repeating a line verbatim or lightly reworded, with no unmet-want loophole", () => {
-    assert.ok(rules.includes("never repeat yourself"));
-    assert.ok(rules.includes("lightly reworded"));
+    assert.ok(rules.includes("never repeat or reopen"));
+    assert.ok(rules.includes("lightly reword"));
     // The old rules allowed re-raising a concern whenever the consultant's last
     // reply "failed to address it", which the model used as license to re-issue
     // the opening demand verbatim. That escape hatch must be gone.
     assert.ok(!rules.includes("unless the consultant's most recent reply"));
   });
 
-  test("requires reacting to the consultant's last move before anything else", () => {
-    assert.ok(rules.includes("react, then advance"));
+  test("requires reacting to the consultant's last move without creating an agenda", () => {
     assert.ok(rules.includes("most recent message"));
-    assert.ok(rules.includes("only make sense if the consultant's last message had not happened"));
+    assert.ok(rules.includes("would only make sense if the consultant's last message had not happened"));
+    assert.ok(rules.includes("independently bring back"));
   });
 
-  test("requires every turn to advance the conversation somewhere new", () => {
-    assert.ok(rules.includes("has not been yet"));
-    assert.ok(rules.includes("never leave the conversation exactly where you found it"));
+  test("does not retain the old imperative to advance somewhere new", () => {
+    assert.ok(!rules.includes("react, then advance"));
+    assert.ok(!rules.includes("take the conversation somewhere it has not been yet"));
+    assert.ok(!rules.includes("never leave the conversation exactly where you found it"));
   });
 
   test("covers the state the customer must not contradict", () => {
-    // A promise to fetch something is pending, not a fresh reason to re-demand it.
-    assert.ok(rules.includes("go get you a number"));
-    assert.ok(rules.includes("how long that usually takes"));
     // A number already given cannot be asked for again.
     assert.ok(rules.includes("already been given to you"));
     assert.ok(rules.includes("do not ask for it again"));
     // A question asked must be acknowledged.
     assert.ok(rules.includes("never behave as though no question was asked"));
     // An alternative or budget question must be answered on its own terms.
-    assert.ok(rules.includes("respond to that specific thing"));
+    assert.ok(rules.includes("respond to that specific move"));
   });
 
-  test("reinterprets persona 'stay firm' instructions as being about the want, not the wording", () => {
-    // Nearly every scenario core ends with a failure branch telling the customer
-    // to stay fixed on / keep asking about their opening demand. Those phrases
-    // must be neutralized here or they keep producing verbatim loops.
-    assert.ok(rules.includes("stay firm"));
-    assert.ok(rules.includes("stay fixed on"));
-    assert.ok(rules.includes("keep asking"));
-    assert.ok(rules.includes("keep steering back"));
-    assert.ok(rules.includes("it never means reusing the same sentence"));
+  test("treats repeated or parked topics as closed unless the current message opens them", () => {
+    assert.ok(rules.includes("parked topic stays parked"));
+    assert.ok(rules.includes("current message itself makes it genuinely relevant"));
+    assert.ok(rules.includes("backstop"));
   });
 
-  test("preserves the tough-customer behaviors that make the drill worth doing", () => {
-    assert.ok(rules.includes("being difficult is good"));
-    assert.ok(rules.includes("escalating impatience in new words"));
-    assert.ok(rules.includes("is that real or is that a stall?"));
-    // Threatening to leave and accepting an honest referral are both wins to keep.
-    assert.ok(rules.includes("about to leave"));
-    assert.ok(rules.includes("refers you elsewhere"));
-    // Reward a consultant who is doing everything right.
-    assert.ok(rules.includes("do not stonewall someone who is doing everything right"));
+  test("preserves toughness as guarded answering rather than combativeness", () => {
+    assert.ok(rules.includes("being tough means guarded, not combative"));
+    assert.ok(rules.includes("short or careful answers"));
+    assert.ok(rules.includes("slow warming"));
+    assert.ok(rules.includes("manufacturing a new objection"));
+  });
+});
+
+describe("REACTIVE_ONLY_CUSTOMER_RULES - primary customer-turn architecture", () => {
+  test("is present in every shared customer prompt and is last in the stable prefix", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, 2);
+      assert.ok(prompt.includes(REACTIVE_ONLY_CUSTOMER_RULES), `${difficulty} must inherit reactive-only rules`);
+      assert.ok(
+        prompt.indexOf(REACTIVE_ONLY_CUSTOMER_RULES) < prompt.indexOf("Conversation so far:"),
+        `${difficulty} must receive reactive-only rules in the stable prefix`,
+      );
+    }
+
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.endsWith(REACTIVE_ONLY_CUSTOMER_RULES));
+    assert.ok(prefix.indexOf(CUSTOMER_ROLE_BOUNDARY_RULES) < prefix.indexOf(REACTIVE_ONLY_CUSTOMER_RULES));
+  });
+
+  test("allows only the opening exception and requires every later turn to react", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /THE OPENING IS THE ONE EXCEPTION/);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /only respond to the consultant's immediately preceding message/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /If the consultant asked a question, answer that question/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /If the consultant made a statement, react naturally/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /Then stop/i);
+  });
+
+  test("permits hidden motivations only through a genuine current opening", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /current message creates a genuine, relevant opening/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /never a scheduled reveal or an independent callback/i);
+    assert.match(HIDDEN_MOTIVATION_DISCOVERY_RULES, /SURFACE A HIDDEN FACT ONLY THROUGH A REAL CURRENT OPENING/);
+  });
+
+  test("forbids self-initiated callbacks and explicitly overrides legacy advancing language", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /NO INDEPENDENT CALLBACKS/);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /do not bring it back later on your own/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /react then advance, take the conversation somewhere it has not been/i);
+
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced");
+    assert.ok(!prefix.includes("REACT, THEN ADVANCE"));
+    assert.ok(!prefix.includes("Take the conversation somewhere it has not been yet"));
+    assert.ok(!prefix.includes("Never leave the conversation exactly where you found it"));
+  });
+
+  test("defines advanced difficulty as reluctant, guarded, and slow-warming rather than combative", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /short guarded answers/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /slow warming/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /not what you force back into the conversation/i);
+    assert.match(buildCustomerReplyStablePrefix(PERSONA, "advanced"), /Make the consultant work for information/i);
   });
 });
 
@@ -1183,8 +1222,8 @@ import {
 describe("CONVERSATION_REALISM_RULES - universal behavior rules (Rules 2, 4-7)", () => {
   const rules = CONVERSATION_REALISM_RULES;
 
-  test("Rule 2: a properly redirected topic must be dropped after the second redirect", () => {
-    assert.match(rules, /STOP ASKING IT/i);
+  test("Rule 2: a properly redirected topic is closed unless the consultant reopens it", () => {
+    assert.match(rules, /ONCE A QUESTION IS ANSWERED OR PROPERLY REDIRECTED, IT IS CLOSED/i);
     assert.match(rules, /redirect/i);
   });
 
@@ -1193,16 +1232,17 @@ describe("CONVERSATION_REALISM_RULES - universal behavior rules (Rules 2, 4-7)",
     assert.match(rules, /absent/i);
   });
 
-  test("Rule 5: other options may be asked for at most once", () => {
-    assert.match(rules, /OTHER OPTIONS AT MOST ONCE/i);
+  test("Rule 5: alternatives already discussed are not independently re-opened", () => {
+    assert.match(rules, /If the consultant offered an alternative/i);
+    assert.match(rules, /rather than your original demand/i);
   });
 
   test("Rule 6: the conversation must be allowed to end", () => {
     assert.match(rules, /LET THE CONVERSATION BE ABLE TO END/i);
   });
 
-  test("Rule 7: difficulty has to evolve rather than repeat", () => {
-    assert.match(rules, /EVOLVES/i);
+  test("Rule 7: difficulty is expressed through guarded answers rather than repeat demands", () => {
+    assert.match(rules, /BEING TOUGH MEANS GUARDED, NOT COMBATIVE/i);
   });
 
   test("Rule 1 (PR #86) is not regressed by the additions", () => {
@@ -1675,13 +1715,17 @@ describe("REASONABLE_CUSTOMER_RULES - reaches every customer prompt", () => {
     assert.ok(prompt.indexOf(REASONABLE_CUSTOMER_RULES) < prompt.indexOf("Conversation so far:"));
   });
 
-  test("it comes AFTER the difficulty behavior and the realism rules, so it is the final word", () => {
+  test("it comes after difficulty and realism while remaining subordinate to the final reactive-only rule", () => {
     const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
     assert.ok(
       prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES),
-      "the reasonableness bound must be read last to override 'do not make it easy'",
+      "the reasonableness bound must follow the baseline difficulty and realism guidance",
     );
-    assert.match(REASONABLE_CUSTOMER_RULES, /take precedence over any instruction above/i);
+    assert.ok(
+      prefix.indexOf(REASONABLE_CUSTOMER_RULES) < prefix.indexOf(REACTIVE_ONLY_CUSTOMER_RULES),
+      "the reactive-only rule must be the ultimate customer-turn constraint",
+    );
+    assert.match(REASONABLE_CUSTOMER_RULES, /never authorize an independent topic change/i);
   });
 });
 
@@ -1712,15 +1756,14 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
     assert.match(rules, /no downtime, no breakdowns, no repairs, no delays, no missed deadlines, no recurrence/i);
   });
 
-  test("Rule B closes after at most one more pass, matching Rule A/C's close-out pattern", () => {
-    // Rules A and C already have an explicit "answered, so stop asking"
-    // mechanic ("never re-ask it in different words", "that specific is
-    // FINISHED"). Rule B was missing the equivalent, which is why a customer
-    // could keep re-demanding a guarantee in new words forever. This asserts
-    // the same shape now exists on Rule B specifically.
-    assert.match(rules, /you get exactly ONE more pass/);
+  test("Rule B closes immediately after a response, except for a current-message opening", () => {
+    // The primary architecture removes the former "one more pass" permission:
+    // after a proper response, the customer cannot independently restart the
+    // guarantee topic. A later related question can still earn a relevant answer.
+    assert.match(rules, /Do not independently push on it again/);
+    assert.match(rules, /If the consultant later asks a new, genuinely related question/);
     assert.match(rules, /the topic is CLOSED PERMANENTLY: never ask for that guarantee again in any wording/);
-    assert.match(rules, /refusing to accept an honest answer, and it is forbidden/);
+    assert.match(rules, /refusing to have the conversation in front of you, and it is forbidden/);
   });
 
   test("Rule C: an invited specific must be answerable, and is finished once answered", () => {
@@ -1749,27 +1792,22 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
     // guarded and route pressure into the persona's real worry, which is HARDER
     // to answer than a technicality, not easier.
     assert.match(rules, /Being hard to satisfy is realistic and wanted/);
-    assert.match(rules, /Stay guarded, stay skeptical, make the consultant earn it/);
-    assert.match(rules, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
-    assert.match(rules, /stronger pressure, not weaker/);
+    assert.match(rules, /Stay guarded and skeptical, and make the consultant earn fuller information/);
+    assert.match(rules, /WHEN A CURRENT QUESTION OPENS THE DOOR, ANSWER WITH YOUR REAL WORRY, NOT A RIDDLE/);
+    assert.match(rules, /only name the real worry if it helps answer the consultant's current question/);
   });
 
-  test("guardrail: the difficulty and escalation instructions themselves are untouched", () => {
-    // The fix is additive. If it had been implemented by softening these, a hard
-    // customer would have stopped being hard.
+  test("guardrail: difficulty and escalation preserve guarded disclosure without a separate agenda", () => {
     const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 0);
-    assert.match(advanced, /Push back hard on price and value/);
-    assert.match(advanced, /Do not make it easy/);
-    assert.match(escalationAddon(2), /tougher objection/i);
+    assert.match(advanced, /skeptical and less immediately cooperative/);
+    assert.match(advanced, /Use short, guarded, non-committal answers/);
+    assert.match(escalationAddon(2), /stay guarded a bit longer/i);
   });
 
-  test("tier 2 escalation cannot be satisfied by re-raising a Rule-B-closed guarantee demand", () => {
-    // Tier 2 escalation ("surface a tougher objection") had no exception for
-    // topics REASONABLE_CUSTOMER_RULES already resolved, so escalation could
-    // read as license to re-raise a guarantee demand in a new wording to
-    // satisfy "tougher". This asserts the explicit carve-out exists.
-    assert.match(escalationAddon(2), /must still be a NEW one/);
-    assert.match(escalationAddon(2), /never a Rule-B-governed guarantee demand you have already had answered and closed out/);
+  test("tier 2 escalation makes current answers more guarded without creating a new objection", () => {
+    assert.match(escalationAddon(2), /require clearer rapport/i);
+    assert.match(escalationAddon(2), /answer in a more skeptical, concise way/i);
+    assert.doesNotMatch(escalationAddon(2), /new objection/i);
   });
 });
 
@@ -2064,10 +2102,10 @@ describe("LOW_KEY_CUSTOMER_CONVERSATION_RULES - normal customer baseline", () =>
   test("explicitly favors a quiet, responsive customer who accepts specific factual answers", () => {
     const rules = LOW_KEY_CUSTOMER_CONVERSATION_RULES;
     assert.match(rules, /STAY RELATIVELY QUIET AND RESPONSIVE/);
-    assert.match(rules, /barrage of your own questions/i);
+    assert.match(rules, /own questions, stacked follow-ups, or repeated tests/i);
     assert.match(rules, /clear, specific, on-topic factual answer/i);
     assert.match(rules, /Do not rephrase the same question/i);
-    assert.match(rules, /single clear follow-up is fair/i);
+    assert.match(rules, /short clarification directly about that message can be natural/i);
     assert.match(rules, /The consultant leads discovery/i);
   });
 
@@ -2126,7 +2164,7 @@ describe("buildCustomerReplyPrompt - answered factual-question memory", () => {
       ],
       "advanced",
     );
-    assert.match(prompt, /may ask ONE concise, more precise follow-up/i);
+    assert.match(prompt, /may make ONE concise clarification directly about it/i);
     assert.doesNotMatch(prompt, /ANSWERED AND CLOSED/);
   });
 });
@@ -2134,9 +2172,9 @@ describe("buildCustomerReplyPrompt - answered factual-question memory", () => {
 describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   const rules = CUSTOMER_RESPONSIVENESS_RULES;
 
-  test("core rule: the rep drives discovery and answering is the default job", () => {
-    assert.match(rules, /THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER/);
-    assert.match(rules, /never a licence to talk past the question/);
+  test("core rule: the rep drives and the customer responds", () => {
+    assert.match(rules, /THE CONSULTANT DRIVES THE CONVERSATION; YOUR JOB IS TO RESPOND/);
+    assert.match(rules, /never a licence to talk past the question or to introduce a different subject/);
   });
 
   test("Rule 1: a direct question gets a relevant answer, not an unrelated concern", () => {
@@ -2150,45 +2188,40 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   test("Rule 2: general, then narrowed, then COMMITTED", () => {
     assert.match(rules, /WHEN THEY NARROW, YOU COMMIT/);
     assert.match(rules, /Never general, narrowed, then general again/);
-    assert.match(rules, /It's the transmission mostly/);
-    assert.match(rules, /I just want to make sure none of those things happen/);
+    assert.match(rules, /General, then narrowed, then committed/);
+    assert.match(rules, /Never general, narrowed, then general again/);
   });
 
   test("Rule 3: a premature question is redirected once and the customer returns to answering", () => {
     assert.match(rules, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
     assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics/);
-    assert.match(rules, /Do not keep pushing the parked topic/);
+    assert.match(rules, /Do not keep a parked topic alive as unfinished business/);
   });
 
   test("Rule 3: the department topics are a worked example, not the whole list", () => {
-    // The closed four-topic list is what let the safety-ratings loop through, so
-    // the rule has to state the general principle alongside the examples.
-    assert.match(rules, /Those are the clearest cases, not the whole list/);
-    assert.match(rules, /a consultant sequencing discovery is doing the job correctly, not dodging you/);
+    assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics, features, or specs/i);
+    assert.match(rules, /Do not keep a parked topic alive as unfinished business/i);
   });
 
   test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
     assert.match(rules, /WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION/);
-    assert.match(rules, /Probably a hybrid, I do a lot of highway miles/);
-    assert.match(rules, /Do not answer a question with a question/);
+    assert.match(rules, /Do not answer a question with another question/);
   });
 
-  test("guardrail: difficulty is preserved and PR #88's own outs are explicitly kept", () => {
+  test("guardrail: difficulty is preserved without a customer-side follow-up agenda", () => {
     assert.match(rules, /This makes you no easier to sell to/);
-    assert.match(rules, /still guarded, still skeptical, still slow to hand over your real motivation/);
-    // PR #88's Rule A out-of-scope question and the one alternatives round survive.
-    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
-    assert.match(rules, /None of that changes/);
-    assert.match(rules, /answer first, then ask/);
+    assert.match(rules, /still guarded, skeptical, and slow to hand over your real motivation/);
+    assert.match(rules, /make the consultant work through better questions and better listening/i);
+    assert.match(rules, /not through a fight for control of the topic/i);
   });
 
-  test("guardrail: the difficulty, escalation, and reasonableness text is untouched", () => {
+  test("guardrail: the difficulty and escalation text makes disclosure harder without adding combativeness", () => {
     const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
-    assert.match(advanced, /Push back hard on price and value/);
-    assert.match(advanced, /Do not make it easy/);
+    assert.match(advanced, /Use short, guarded, non-committal answers/i);
+    assert.match(advanced, /never by independently reviving an old concern/i);
     assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
-    assert.match(advanced, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
-    assert.match(escalationAddon(2), /tougher objection/i);
+    assert.match(advanced, /WHEN A CURRENT QUESTION OPENS THE DOOR/i);
+    assert.match(escalationAddon(2), /stay guarded a bit longer/i);
   });
 });
 
@@ -2211,9 +2244,9 @@ describe("HIDDEN_MOTIVATION_DISCOVERY_RULES - discovery over scripted pivots", (
   test("makes motivations internal state instead of a repeated spoken script", () => {
     const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
     assert.match(rules, /INTERNAL STATE, not a script/i);
-    assert.match(rules, /consultant can discover what actually matters/i);
+    assert.match(rules, /A consultant should have to draw them out through good discovery questions/i);
     assert.match(rules, /DO NOT ANNOUNCE OR SIGNAL THE SAME CORE MOTIVATION ON EVERY TURN/i);
-    assert.match(rules, /do not end several nearby turns with different versions of the same question or slogan/i);
+    assert.match(rules, /Do not tack an opening demand, a price pivot, or another version of the same hidden concern onto unrelated answers/i);
     assert.match(rules, /REVEAL IN LAYERS, NOT AS A LOOP/i);
   });
 
@@ -2221,7 +2254,7 @@ describe("HIDDEN_MOTIVATION_DISCOVERY_RULES - discovery over scripted pivots", (
     const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
     assert.match(rules, /TOPIC FIDELITY COMES FIRST/i);
     assert.match(rules, /If they ask about safety, talk about the safety you need/i);
-    assert.match(rules, /Do not substitute price, reliability, cargo room, fuel economy/i);
+    assert.match(rules, /private motivation can add context only after it has helped answer the topic, never in place of the answer/i);
 
     const prompt = buildCustomerReplyPrompt(
       PERSONA,
@@ -2230,7 +2263,7 @@ describe("HIDDEN_MOTIVATION_DISCOVERY_RULES - discovery over scripted pivots", (
     );
     assert.match(prompt, /FINAL DIRECT-ANSWER CHECK/i);
     assert.match(prompt, /If they ask about safety, explicitly address safety/i);
-    assert.match(prompt, /Do not replace that subject with your recurring opening request, price, reliability/i);
+    assert.match(prompt, /Do not replace that subject with your recurring opening request/i);
   });
 });
 
@@ -2298,7 +2331,7 @@ describe("worked example (spec): the reliability narrowing", () => {
 
   test("the BAD reply is the exact shape both layers name and forbid", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_NARROWING, "advanced", 2);
-    assert.match(prompt, /I just want to make sure none of those things happen/, "the static rules name it");
+    assert.match(prompt, /Never general, narrowed, then general again/, "the static rules name the forbidden shape");
     assert.match(prompt, /I just don't want any of those to happen/, "the per-turn line names its shape too");
     assert.ok(
       BAD.startsWith("I just want to make sure none of those"),
@@ -2337,12 +2370,11 @@ describe("worked example (spec): the premature warranty question", () => {
     assert.match(prompt, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
   });
 
-  test("PR #87's one-more-ask allowance is preserved, it is just not this turn's move", () => {
-    // Composition check: the deflection rule still says the topic may come back
-    // once, so the fix narrows the customer's move on THIS turn without closing a
-    // topic the rep has only redirected a single time.
+  test("the primary rule forbids an independent callback even after the first redirect", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_REDIRECT, "advanced", 2);
-    assert.match(prompt, /You may raise it at most ONE more time/);
+    assert.match(prompt, /reactive-only rule means you should not raise it again on your own/i);
+    assert.match(prompt, /NO INDEPENDENT CALLBACKS/);
+    assert.doesNotMatch(prompt, /You may raise it at most ONE more time/);
     assert.doesNotMatch(prompt, /That topic is CLOSED/);
   });
 
@@ -2610,7 +2642,7 @@ describe("getCustomerReply - closed factual-question repair", () => {
     const prompts: string[] = [];
     const replies = [
       "What features come with the towing package?",
-      "Okay, that helps. I would like to see the maintenance history next.",
+      "Okay, that helps.",
     ];
     setCustomerReplyTestResponder(({ input }) => {
       prompts.push(input);
@@ -2627,7 +2659,7 @@ describe("getCustomerReply - closed factual-question repair", () => {
           turn("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
         ],
       );
-      assert.equal(result.text, "Okay, that helps. I would like to see the maintenance history next.");
+      assert.equal(result.text, "Okay, that helps.");
       assert.equal(prompts.length, 2);
       assert.match(prompts[1], /VALIDATION FAILED/);
       assert.match(prompts[1], /REJECTED DRAFT/);
@@ -2639,7 +2671,7 @@ describe("getCustomerReply - closed factual-question repair", () => {
   test("uses that same validated path before streaming a closed factual topic", async () => {
     const replies = [
       "What features come with the towing package?",
-      "Okay, that helps. I would like to see the maintenance history next.",
+      "Okay, that helps.",
     ];
     const spoken: string[] = [];
     setCustomerReplyTestResponder(() => {
@@ -2660,8 +2692,8 @@ describe("getCustomerReply - closed factual-question repair", () => {
         "",
         (sentence) => spoken.push(sentence),
       );
-      assert.equal(result.text, "Okay, that helps. I would like to see the maintenance history next.");
-      assert.deepEqual(spoken, ["Okay, that helps.", "I would like to see the maintenance history next."]);
+      assert.equal(result.text, "Okay, that helps.");
+      assert.deepEqual(spoken, ["Okay, that helps."]);
     } finally {
       setCustomerReplyTestResponder(null);
     }

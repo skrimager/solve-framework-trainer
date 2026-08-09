@@ -34,7 +34,7 @@ function stateLines(...lines: string[]): string {
 }
 
 describe("Rule 2: deflected topics stop being asked", () => {
-  test("one redirect leaves the topic open for exactly one more ask", () => {
+  test("one redirect remains tracked only as a safety-net while reactive-only rules forbid a callback", () => {
     const state = deriveConversationState(
       t(
         "c: What does the warranty cover on this one?",
@@ -45,7 +45,9 @@ describe("Rule 2: deflected topics stop being asked", () => {
     assert.ok(warranty, "expected the warranty redirect to be detected");
     assert.equal(warranty!.redirectCount, 1);
     assert.equal(warranty!.closed, false);
-    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
   });
 
   test("a second redirect closes the topic permanently", () => {
@@ -103,14 +105,16 @@ describe("Rule S: a topic the rep sequences for later stops being re-asked", () 
     "r: I appreciate you wanting to know about the safety features, but let's make sure we find the right vehicle for you first. The safety features on this one don't matter if it's not the right vehicle. What's most important to you in your next vehicle?",
   ];
 
-  test("a sequencing redirect plus a discovery question opens the topic for one more ask", () => {
+  test("a sequencing redirect plus discovery is tracked as a safety-net without authorizing a callback", () => {
     const state = deriveConversationState(t(...SAFETY));
     assert.equal(state.sequencedTopics.length, 1);
     const safety = state.sequencedTopics[0];
     assert.match(safety.label, /safety rating/i);
     assert.equal(safety.redirectCount, 1);
     assert.equal(safety.closed, false);
-    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
   });
 
   test("a second sequencing redirect closes the topic permanently", () => {
@@ -173,7 +177,9 @@ describe("Rule S: a topic the rep sequences for later stops being re-asked", () 
     assert.equal(state.sequencedTopics.length, 1);
     assert.match(state.sequencedTopics[0].label, /safety features/i);
     assert.equal(state.sequencedTopics[0].redirectCount, 1);
-    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
   });
 
   test("the literal transcript is caught by relevance conditioning, with no ordering word present", () => {
@@ -636,7 +642,8 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     assert.match(rendered, /do not bounce the question back/);
     // Guardrail: answering is required, guardedness is not surrendered.
     assert.match(rendered, /still be guarded about how much you give them/);
-    assert.match(rendered, /AFTER you have answered/);
+    assert.match(rendered, /stop after the relevant answer/i);
+    assert.match(rendered, /separate customer agenda/i);
   });
 });
 
@@ -839,7 +846,7 @@ describe("Rule Q: answered customer factual questions do not get re-asked", () =
     assert.equal(first.answeredCustomerQuestions.length, 1);
     assert.equal(first.answeredCustomerQuestions[0].status, "vague");
     assert.equal(first.answeredCustomerQuestions[0].clarificationUsed, false);
-    assert.match(buildConversationStateLines(first).join("\n"), /may ask ONE concise, more precise follow-up/i);
+    assert.match(buildConversationStateLines(first).join("\n"), /may make ONE concise clarification directly about it/i);
 
     const afterClarification = deriveConversationState(
       t(

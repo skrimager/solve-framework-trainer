@@ -203,3 +203,55 @@ describe("scoring independence", () => {
     }
   });
 });
+
+describe("persona variants - reactive-only customer behavior", () => {
+  test("treats selected concerns as private context, not a timed customer agenda", () => {
+    const section = buildPersonaVariantSection({
+      personality: "",
+      motivation: "",
+      objections: [{ text: "I am worried about surprise maintenance costs.", position: "later" }],
+    });
+
+    assert.match(section, /private notes.*not a schedule/i);
+    assert.match(section, /Do not bring one up merely because a turn number or its stored position says it is due/i);
+    assert.match(section, /ONLY when the consultant's current message creates a genuine relevant opening/i);
+    assert.match(section, /private concern; use only through a relevant current-message opening/i);
+    assert.doesNotMatch(section, /bring this up later/i);
+    assert.doesNotMatch(section, /roughly the point noted/i);
+  });
+
+  test("does not schedule early, unprompted disclosures after the opening", () => {
+    for (const [slug, seed] of Object.entries(personaVariantSeed)) {
+      assert.doesNotMatch(
+        seed.core,
+        /The one thing you DO volunteer early, unprompted|somewhere in your first couple of turns/i,
+        `${slug} must not instruct a post-opening scheduled disclosure`,
+      );
+    }
+  });
+
+  test("removes persona-specific repeat, push, and deliberate-test requirements", () => {
+    for (const [slug, seed] of Object.entries(personaVariantSeed)) {
+      assert.doesNotMatch(
+        seed.core,
+        /push back (?:hard )?at least|push back and .*at least|keep asking whether|keep steering back|try to force it back|as deliberate tests/i,
+        `${slug} must express difficulty through guarded responses rather than repeated pushing`,
+      );
+    }
+  });
+
+  test("the public-demo discovery signals are tied to the consultant's current opening", () => {
+    const expectedReactiveSignals: Record<string, RegExp> = {
+      "demo-v2-re-1": /current message genuinely opens the topic of your current home, daily mobility, or why you are considering a move/i,
+      "demo-v2-re-2": /current message genuinely opens the topic of your home search, household, or timeline/i,
+      "demo-v2-re-3": /current message genuinely opens the topic of budget, monthly payment, or financial comfort/i,
+      "demo-v2-auto-1": /current message genuinely opens the topic of your current vehicle, repair history, or why you are shopping/i,
+      "demo-v2-auto-2": /current message genuinely opens the topic of how you use a vehicle, your driving, or your family/i,
+      "demo-v2-auto-3": /opening is the one exception for your initial want/i,
+    };
+
+    for (const [slug, rule] of Object.entries(expectedReactiveSignals)) {
+      assert.match(personaVariantSeed[slug].core, rule, `${slug} must use a current-message opening`);
+    }
+  });
+});
