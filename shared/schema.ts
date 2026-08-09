@@ -160,6 +160,7 @@ export const scenarios = pgTable("scenarios", {
   difficulty: text("difficulty").notNull(), // 'beginner' | 'intermediate' | 'advanced'
   briefing: text("briefing").notNull().default(""), // consultant-facing setup: the setting + any technical terms shown before the role-play starts
   active: boolean("active").notNull().default(true),
+  version: integer("version").notNull().default(1),
 });
 
 export const insertScenarioSchema = createInsertSchema(scenarios).omit({
@@ -185,6 +186,10 @@ export const sessions = pgTable("sessions", {
   score: integer("score"), // 0-100 overall, set on completion
   rubricScores: text("rubric_scores"), // JSON: per-dimension scores, set on completion
   feedback: text("feedback"), // narrative feedback, set on completion
+  // Versions are stamped at completion. They intentionally remain null for
+  // sessions completed before version tracking existed.
+  scenarioVersion: integer("scenario_version"),
+  rubricVersion: integer("rubric_version"),
   createdAt: text("created_at").notNull(),
   completedAt: text("completed_at"),
   savedAt: text("saved_at"), // set when the consultant chooses "Save for Later" on an incomplete session

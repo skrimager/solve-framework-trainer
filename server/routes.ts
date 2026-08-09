@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike, RUBRIC_VERSION } from "./llm";
 import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
   computeAwardableLevels,
@@ -1234,6 +1234,8 @@ export async function registerRoutes(
         rubricScores: JSON.stringify(rubric),
         feedback,
         completedAt,
+        scenarioVersion: scenario?.version ?? null,
+        rubricVersion: RUBRIC_VERSION,
         // Record practice time consumed (createdAt to now) so it counts toward
         // the user's monthly fair-use total.
         durationSeconds: computeDurationSeconds(session.createdAt, completedAt),

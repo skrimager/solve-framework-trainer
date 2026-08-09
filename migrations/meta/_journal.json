@@ -246,6 +246,13 @@
       "when": 1783106669500,
       "tag": "0034_saas_product_context",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1783106670000,
+      "tag": "0035_scenario_rubric_versioning",
+      "breakpoints": true
     }
   ]
 }
