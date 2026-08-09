@@ -1288,6 +1288,10 @@ export function computeScoreCacheHash(
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
+// Increment manually whenever the five-dimension rubric or its weighting/scoring
+// logic changes in scoreTranscript. This is intentionally not auto-detected.
+export const RUBRIC_VERSION = 1;
+
 // Scores a completed session. Branches on the scenario's `track`: consulting
 // sessions use the discovery rubric (RubricScores); leadership sessions use the
 // conflict-management rubric (LeadershipRubricScores). Both are stored the same
