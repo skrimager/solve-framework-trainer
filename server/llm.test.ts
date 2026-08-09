@@ -1,5 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import {
   buildCustomerReplyPrompt,
@@ -10,6 +11,7 @@ import {
   HIDDEN_MOTIVATION_DISCOVERY_RULES,
   LOW_KEY_CUSTOMER_CONVERSATION_RULES,
   computeScoreCacheHash,
+  SCORE_CACHE_VERSION,
   scoreTranscript,
   getCustomerReply,
   setCustomerReplyTestResponder,
@@ -1143,6 +1145,24 @@ describe("computeScoreCacheHash - stability and sensitivity", () => {
     assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "leadership", null));
     assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "consulting", "resale_buyer"));
   });
+
+  test("the scoring-rule version invalidates the pre-version cache key", () => {
+    const legacyNormalized = {
+      transcript: transcript.map((m) => ({ role: m.role, content: m.content })),
+      difficulty: "intermediate",
+      track: "consulting",
+      transactionType: null,
+    };
+    const legacyHash = createHash("sha256").update(JSON.stringify(legacyNormalized)).digest("hex");
+    const currentHash = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+
+    assert.equal(SCORE_CACHE_VERSION, "2026-08-08.warranty-follow-up-grounding.v1");
+    assert.notEqual(
+      currentHash,
+      legacyHash,
+      "a score generated before this rubric/grounding version must be a cache miss",
+    );
+  });
 });
 
 // ===========================================================================
@@ -1304,6 +1324,13 @@ describe("the shared scoring-accuracy blocks (Rules 8-10)", () => {
     assert.match(TRANSCRIPT_FIDELITY_RULES, /Never state that the consultant failed to do something they demonstrably did/);
   });
 
+  test("Rule 10 also forbids an equivalent you-could-have-asked critique without checking all consultant turns", () => {
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /you could have asked X/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /you missed an opportunity to ask X/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /does not appear anywhere in the CONSULTANT-labeled turns/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /materially equivalent phrasing/i);
+  });
+
   test("Rule 8: an accepted solution is a success and no close may be required", () => {
     assert.match(ACCEPTED_SOLUTION_RULES, /client_agreed/);
     assert.match(ACCEPTED_SOLUTION_RULES, /paperwork/i);
@@ -1376,7 +1403,7 @@ describe("TIMING_FEEDBACK_RULES - transcript-grounded timing claims (Rule 11)", 
 
 });
 
-describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", () => {
+describe("scoreTranscript - deterministic transcript grounding reaches the model", () => {
   function capture() {
     let seen = "";
     let key = "";
@@ -1426,6 +1453,42 @@ describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", (
       cap.input(),
       /if it was raised early, credit that and say nothing about when it happened/,
     );
+  });
+
+  test("the Rene-style warranty repro explicitly blocks an equivalent never-asked critique", async () => {
+    const cap = capture();
+    const warrantyFollowUp = [
+      turn("consultant", "I hear that you need a dependable SUV and a dealer you can trust long-term."),
+      turn(
+        "customer",
+        "After my last service experience, warranties and maintenance value matter as much as the price.",
+      ),
+      turn(
+        "consultant",
+        "What specific warranty coverages are you looking for, so I can flag that for the finance team?",
+      ),
+      turn(
+        "customer",
+        "I want protection for expensive repairs and to know what maintenance support is available.",
+      ),
+      turn(
+        "consultant",
+        "The finance office can walk us through the exact service-plan options after we identify the right SUV.",
+      ),
+    ];
+
+    await scoreTranscript(warrantyFollowUp, "intermediate", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+
+    assert.match(cap.input(), /SPECIFIC FOLLOW-UP ASKED/);
+    assert.match(
+      cap.input(),
+      /The CONSULTANT DID ask a specific warranty\/service-plan\/maintenance follow-up question at turn 3 of 5/,
+    );
+    assert.match(cap.input(), /What specific warranty coverages are you looking for/);
+    assert.match(cap.input(), /do not coach them to ask an equivalent question as though it were absent/);
   });
 
   test("the pre-check follows the transcript and stays out of the cacheable prefix", async () => {

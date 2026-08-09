@@ -51,9 +51,20 @@ const TOPIC_LABEL: Record<DeflectableTopic, string> = {
 
 // Lexical markers for each topic. Matched case-insensitively against whole words
 // so "finance" does not fire on "financially independent" style near-misses any
-// more than necessary.
+// more than necessary. Warranty deliberately includes the maintenance/service-
+// plan family: in an auto-sales conversation those are adjacent ownership-
+// protection questions, and a proper handoff or follow-up on one must not be
+// treated as though the others were unrelated subjects.
 export const TOPIC_PATTERNS: Record<DeflectableTopic, RegExp[]> = {
-  warranty: [/\bwarrant(?:y|ies)\b/i, /\bservice contract\b/i, /\bextended coverage\b/i, /\bservice plan\b/i],
+  warranty: [
+    /\bwarrant(?:y|ies)\b/i,
+    /\bservice contracts?\b/i,
+    /\bextended coverage\b/i,
+    /\bservice plans?\b/i,
+    /\bmaintenance(?: plans?| packages?)?\b/i,
+    /\bservice packages?\b/i,
+    /\bprotection plans?\b/i,
+  ],
   financing: [/\bfinanc(?:e|ing|ed)\b/i, /\bapr\b/i, /\binterest rate\b/i, /\bcredit (?:score|check|approval)\b/i, /\blender\b/i, /\bpre-?approv/i],
   loanTerms: [/\bloan\b/i, /\bterm length\b/i, /\bmonth (?:term|loan)\b/i, /\b\d{2}\s*month(?:s)?\b/i, /\bamortiz/i, /\bpayoff\b/i],
   paymentSpecifics: [/\bmonthly payment\b/i, /\bdown payment\b/i, /\bdeposit\b/i, /\bpayment plan\b/i, /\btrade-?in value\b/i],

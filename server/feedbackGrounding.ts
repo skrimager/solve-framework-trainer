@@ -44,13 +44,15 @@ export function numberedTurns(transcript: TranscriptMessage[]): NumberedTurn[] {
     }));
 }
 
-// Topics the rubric gives timing advice about. Only money-shaped discovery is
-// here, because that is the only topic either prompt currently coaches on timing
-// ("budget/financing"), and an unused topic would be a claim nothing verifies.
-export type TimingTopic = "budgetAndFinancing";
+// Topics the rubric makes sensitive claims about. Budget/financing has a timing
+// rule; warranty/service-plan/maintenance has an omission rule. They share the
+// same transcript-derived pipeline so either kind of claim is checked against
+// the consultant's actual words before reaching the scoring model.
+export type TimingTopic = "budgetAndFinancing" | "warrantyServiceMaintenance";
 
 const TIMING_TOPIC_LABEL: Record<TimingTopic, string> = {
   budgetAndFinancing: "budget, financing, or a trade-in",
+  warrantyServiceMaintenance: "warranty, service-plan, maintenance, or protection coverage",
 };
 
 // Reuses the financing and payment-mechanics markers the customer-state module
@@ -73,7 +75,24 @@ const TIMING_TOPIC_PATTERNS: Record<TimingTopic, RegExp[]> = {
     /\bout the door\b/i,
     /\bwhat (?:number|range) (?:works|were you)\b/i,
   ],
+  // Keep this bound directly to conversationState's warranty family. A
+  // consultant who asks what a customer needs from a maintenance plan or
+  // protection package has asked a warranty/service-coverage follow-up, even
+  // when neither person uses the word "warranty".
+  warrantyServiceMaintenance: [...TOPIC_PATTERNS.warranty],
 };
+
+// A question about the warranty-family topic is the relevant discovery move.
+// We deliberately accept both conventional punctuation and common spoken
+// question forms because voice transcripts often omit "?", and recognize
+// invitations such as "tell me what coverage matters" as follow-up questions.
+const FOLLOW_UP_QUESTION_MARKERS: RegExp[] = [
+  /\?/,
+  /^(?:what|which|how|when|where|why|who)\b/i,
+  /^(?:do|does|did|is|are|was|were|can|could|would|will|should)\s+(?:you|we|i|the|this|that|a|an|your)\b/i,
+  /^(?:tell|walk) me (?:about|through|what)\b/i,
+  /^let me know\b/i,
+];
 
 // Customer lines in which the customer names what they are actually after. The
 // first of these is the earliest real moment a timing suggestion can be attached
@@ -130,6 +149,13 @@ export interface TimingTopicCoverage {
   triggerQuote: string | null;
 }
 
+function isWarrantyFamilyFollowUpQuestion(text: string): boolean {
+  return (
+    matchesAny(text, TIMING_TOPIC_PATTERNS.warrantyServiceMaintenance) &&
+    matchesAny(text, FOLLOW_UP_QUESTION_MARKERS)
+  );
+}
+
 // Reads, for each timing-coachable topic, whether the consultant raised it, when,
 // whether that was early, and which real customer moment a suggestion about it
 // would attach to. Returns an empty array for an empty transcript, which is the
@@ -148,7 +174,11 @@ export function deriveTimingCoverage(transcript: TranscriptMessage[]): TimingTop
 
   return (Object.keys(TIMING_TOPIC_PATTERNS) as TimingTopic[]).map((topic) => {
     const raised = turns.find(
-      (t) => t.role === "consultant" && matchesAny(t.text, TIMING_TOPIC_PATTERNS[topic]),
+      (t) =>
+        t.role === "consultant" &&
+        (topic === "warrantyServiceMaintenance"
+          ? isWarrantyFamilyFollowUpQuestion(t.text)
+          : matchesAny(t.text, TIMING_TOPIC_PATTERNS[topic])),
     );
     const raisedEarly =
       raised !== undefined &&
@@ -181,7 +211,19 @@ export function buildTimingGroundingBlock(
   const coverage = deriveTimingCoverage(transcript);
   if (coverage.length === 0) return "";
 
-  const lines = coverage.map((c) => {
+  const lines = coverage.flatMap((c) => {
+    if (c.topic === "warrantyServiceMaintenance") {
+      if (c.raisedTurn !== null) {
+        return [
+          `- ${c.label}: SPECIFIC FOLLOW-UP ASKED. The ${speaker} DID ask a specific warranty/service-plan/maintenance follow-up question at turn ${c.raisedTurn} of ${c.totalTurns}: "${c.raisedQuote}". Do not claim that they never asked what coverage, service plan, maintenance, or protection the customer wanted; do not coach them to ask an equivalent question as though it were absent. If there is a real depth or timing issue, describe that precise issue instead.`,
+        ];
+      }
+      // A negative warranty line would put an unrelated omission in front of
+      // every score. This safeguard has one job: make a false "never asked"
+      // claim impossible when the consultant did ask the question.
+      return [];
+    }
+
     // Only offered as the moment to attach to when it genuinely precedes what is
     // being coached, so the block can never point "earlier" at a later turn.
     const trigger =
@@ -190,12 +232,18 @@ export function buildTimingGroundingBlock(
         : "";
 
     if (c.raisedTurn !== null && c.raisedEarly) {
-      return `- ${c.label}: ALREADY COVERED, and covered early. The ${speaker} raised it themselves at turn ${c.raisedTurn} of ${c.totalTurns}: "${c.raisedQuote}". Do not write that this was missing, do not write that it should have come up earlier or sooner, and do not hedge the same claim. If you mention it at all, credit them for raising it when they did.`;
+      return [
+        `- ${c.label}: ALREADY COVERED, and covered early. The ${speaker} raised it themselves at turn ${c.raisedTurn} of ${c.totalTurns}: "${c.raisedQuote}". Do not write that this was missing, do not write that it should have come up earlier or sooner, and do not hedge the same claim. If you mention it at all, credit them for raising it when they did.`,
+      ];
     }
     if (c.raisedTurn !== null) {
-      return `- ${c.label}: COVERED, but not until turn ${c.raisedTurn} of ${c.totalTurns}: "${c.raisedQuote}".${c.firstProposalTurn !== null ? ` A recommendation was already on the table by turn ${c.firstProposalTurn}.` : ""} Never write that it was missing, because it is there. Timing coaching IS available here, and if you give it you must name when it actually happened and attach the suggestion to a real earlier moment the customer created.${trigger}`;
+      return [
+        `- ${c.label}: COVERED, but not until turn ${c.raisedTurn} of ${c.totalTurns}: "${c.raisedQuote}".${c.firstProposalTurn !== null ? ` A recommendation was already on the table by turn ${c.firstProposalTurn}.` : ""} Never write that it was missing, because it is there. Timing coaching IS available here, and if you give it you must name when it actually happened and attach the suggestion to a real earlier moment the customer created.${trigger}`,
+      ];
     }
-    return `- ${c.label}: NOT FOUND on any ${speaker} turn in this transcript. Timing or omission coaching is available here, and if you give it you must attach it to a real moment the customer created rather than to "earlier in the conversation".${trigger}`;
+    return [
+      `- ${c.label}: NOT FOUND on any ${speaker} turn in this transcript. Timing or omission coaching is available here, and if you give it you must attach it to a real moment the customer created rather than to "earlier in the conversation".${trigger}`,
+    ];
   });
 
   return [

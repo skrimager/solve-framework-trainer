@@ -778,6 +778,7 @@ Misattributing a line is the single worst error you can make here. It is worse t
 export const TRANSCRIPT_FIDELITY_RULES = `TRANSCRIPT FIDELITY (grade what is actually there):
 - Score the transcript in front of you, all of it, from the first turn to the last. Do not stop reading partway and grade an impression of the opening. If the transcript is long, work through it to the end before scoring; the later turns are usually where the recommendation and the outcome are.
 - Never state that the consultant failed to do something they demonstrably did. Before writing that they "never asked about" or "didn't cover" something, search the CONSULTANT-labeled turns for it. If it is there, they did it, and the feedback must reflect that. Coaching them to do something they already did tells them you did not read their conversation.
+- Apply that same verification before ANY suggestion shaped as "you could have asked X," "you should have asked X," "you missed an opportunity to ask X," or an equivalent. First confirm that X does not appear anywhere in the CONSULTANT-labeled turns in this transcript. If the consultant did ask it in any materially equivalent phrasing, do not include an absence critique; only coach a real, precise issue such as depth, timing, or what they did after asking.
 - If they covered something partially, late, or clumsily, say precisely that instead. "You asked about safety, but only after you had already narrowed to one vehicle" is accurate and useful. "You never asked about safety" is neither.
 - Ground every claim, positive or negative, in a specific turn. If you cannot point to the turn, do not make the claim.`;
 
@@ -1333,12 +1334,18 @@ export interface ScoreCacheStore {
   createScoreCacheEntry(entry: InsertScoreCache): Promise<ScoreCache>;
 }
 
+// Bump whenever a scoring prompt, rubric, deterministic grounding mechanism, or
+// scoring model behavior that can affect output changes. This is part of the
+// content hash so an already-stored score cannot survive a scoring-rule update.
+export const SCORE_CACHE_VERSION = "2026-08-08.warranty-follow-up-grounding.v1";
+
 // Stable sha256 over EVERYTHING that affects the scoring result: each turn's
-// role + exact text in order, plus difficulty, track, and transactionType. The
-// serialized structure is built with a fixed key order here (not relying on the
-// insertion order of objects handed in by arbitrary callers), so byte-identical
-// inputs always hash identically and any trivial difference (one changed word,
-// a different track/difficulty/transactionType) yields a different hash.
+// role + exact text in order, difficulty, track, transactionType, and the
+// versioned scoring rules. The serialized structure is built with a fixed key
+// order here (not relying on the insertion order of objects handed in by
+// arbitrary callers), so byte-identical inputs always hash identically and any
+// trivial difference (one changed word, a different track/difficulty/
+// transactionType/scoring version) yields a different hash.
 export function computeScoreCacheHash(
   transcript: TranscriptMessage[],
   difficulty: string,
@@ -1350,6 +1357,7 @@ export function computeScoreCacheHash(
     difficulty,
     track,
     transactionType: transactionType ?? null,
+    scoreCacheVersion: SCORE_CACHE_VERSION,
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }

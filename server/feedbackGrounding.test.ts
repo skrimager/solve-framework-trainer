@@ -143,6 +143,52 @@ describe("deriveTimingCoverage - the reported financing repro", () => {
   });
 });
 
+describe("deriveTimingCoverage - warranty/service-plan/maintenance follow-up", () => {
+  const WARRANTY_FOLLOW_UP_REPRO = t(
+    "r: What brings you in today?",
+    "c: I need an SUV I can trust long-term, and warranties and maintenance value matter a lot after a bad service experience.",
+    "r: What specific warranty coverages are you looking for, so I can flag that for the finance team?",
+    "c: I want to understand protection for expensive repairs and routine upkeep.",
+    "r: The finance office will walk you through the exact options once we find the right SUV.",
+  );
+
+  test("records the exact reported warranty-coverage question as asked by the consultant", () => {
+    const coverage = deriveTimingCoverage(WARRANTY_FOLLOW_UP_REPRO).find(
+      (item) => item.topic === "warrantyServiceMaintenance",
+    );
+
+    assert.ok(coverage, "the warranty/service-plan/maintenance topic must be present");
+    assert.equal(coverage.raisedTurn, 3);
+    assert.match(coverage.raisedQuote!, /What specific warranty coverages are you looking for/i);
+  });
+
+  test("binds warranty, service-plan, maintenance, service-package, and protection-plan phrasing", () => {
+    for (const line of [
+      "r: What warranty coverage is most important to you?",
+      "r: Which service plan features would give you confidence?",
+      "r: What maintenance plan protection are you looking for?",
+      "r: Tell me what service package coverage would matter most to you.",
+      "r: Would a protection plan for unexpected repairs matter to you?",
+    ]) {
+      const coverage = deriveTimingCoverage(t("c: Long-term ownership value matters to me.", line)).find(
+        (item) => item.topic === "warrantyServiceMaintenance",
+      );
+      assert.equal(coverage?.raisedTurn, 2, `expected a warranty-family follow-up for: ${line}`);
+    }
+  });
+
+  test("does not mistake a department redirect without a follow-up question for coverage discovery", () => {
+    const coverage = deriveTimingCoverage(
+      t(
+        "c: I am worried about maintenance and warranty costs.",
+        "r: Our finance office handles the maintenance plans and warranty options.",
+      ),
+    ).find((item) => item.topic === "warrantyServiceMaintenance");
+
+    assert.equal(coverage?.raisedTurn, null);
+  });
+});
+
 describe("buildTimingGroundingBlock", () => {
   test("the repro block forbids the exact wrong claim the trainee received", () => {
     const block = buildTimingGroundingBlock(COMFORT_THEN_BUDGET, "TRAINEE");
@@ -183,6 +229,22 @@ describe("buildTimingGroundingBlock", () => {
   test("the trainee's turns are named with the label the surrounding prompt uses", () => {
     assert.match(buildTimingGroundingBlock(COMFORT_THEN_BUDGET), /The CONSULTANT raised it/);
     assert.match(buildTimingGroundingBlock(COMFORT_THEN_BUDGET, "TRAINEE"), /The TRAINEE raised it/);
+  });
+
+  test("the warranty repro deterministically forbids a false never-asked coaching claim", () => {
+    const block = buildTimingGroundingBlock(
+      t(
+        "r: What brings you in today?",
+        "c: Warranties and maintenance value are important to me.",
+        "r: What specific warranty coverages are you looking for, so I can flag that for the finance team?",
+      ),
+    );
+
+    assert.match(block, /warranty, service-plan, maintenance, or protection coverage: SPECIFIC FOLLOW-UP ASKED/);
+    assert.match(block, /DID ask a specific warranty\/service-plan\/maintenance follow-up question at turn 3/);
+    assert.match(block, /What specific warranty coverages are you looking for/);
+    assert.match(block, /Do not claim that they never asked what coverage/);
+    assert.match(block, /do not coach them to ask an equivalent question as though it were absent/);
   });
 
   test("an empty transcript produces no block, leaving those prompts unchanged", () => {
