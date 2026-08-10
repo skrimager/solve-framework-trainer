@@ -144,6 +144,8 @@ export const scenarios = pgTable("scenarios", {
   // Internal-only SaaS product-category tag. Null for every non-SaaS scenario;
   // it is fed into opening-line generation and is never rendered as a UI label.
   product: text("product"),
+  // Internal-only Stall & Excuse Handling classifier. Null for every existing scenario; used only to rotate the dedicated practice module without repeating a stall pattern.
+  stallType: text("stall_type"),
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // LEGACY freeform system prompt. Retained for rollback; no longer used to build prompts once personaCore is populated (see server/persona.ts).
   // Structured persona fields (replace the single freeform customerPersona for

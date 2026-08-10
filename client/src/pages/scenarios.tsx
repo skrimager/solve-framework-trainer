@@ -11,7 +11,7 @@ import type { Level } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
 import { PracticeStatsPanel } from "@/components/practice-stats-panel";
 import { getAvatarUrl } from "@/lib/avatars";
-import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles, FlaskConical, MessageSquare } from "lucide-react";
+import { PlayCircle, Award, Handshake, ShieldAlert, Check, Clock, Lock, Sparkles, FlaskConical, MessageSquare, MessageCircleQuestion } from "lucide-react";
 import type { Scenario, Session } from "@shared/schema";
 import { isInternalTestScenario } from "@shared/internalTestScenarios";
 import { REQUIRED_QUALIFYING, QUALIFYING_SCORE } from "@/lib/progression";
@@ -56,6 +56,7 @@ const LEVEL_LABELS: Record<Level, string> = {
 const DIFFICULTY_ORDER: Level[] = ["beginner", "intermediate", "advanced"];
 
 type Track = "consulting" | "leadership";
+type PracticeModule = Track | "stall";
 
 const TRACK_LABELS: Record<Track, string> = {
   consulting: "Consulting",
@@ -72,6 +73,9 @@ const TRACK_ICONS: Record<Track, typeof Handshake> = {
   consulting: Handshake,
   leadership: ShieldAlert,
 };
+
+const STALL_MODULE_TITLE = "Stall & Excuse Handling";
+const STALL_MODULE_DESCRIPTION = "Recognize when a customer is stalling instead of objecting, and diagnose what got missed instead of arguing back.";
 
 // Named credential earned per track at the "advanced" ceiling. Distinct name
 // per track (same 3-level structure and auto-advance mechanism underneath).
@@ -105,10 +109,11 @@ const VERTICAL_LABELS: Record<string, string> = {
 
 const verticalLabel = (vertical: string) => VERTICAL_LABELS[vertical] ?? vertical;
 
-function initialTrack(): Track {
+function initialPracticeModule(): PracticeModule {
   if (typeof window === "undefined") return "consulting";
-  const t = new URLSearchParams(window.location.search).get("track");
-  return t === "leadership" ? "leadership" : "consulting";
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("module") === "stall") return "stall";
+  return params.get("track") === "leadership" ? "leadership" : "consulting";
 }
 
 export default function Scenarios() {
@@ -116,18 +121,25 @@ export default function Scenarios() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
 
-  // Which top-level track the picker is filtered to. Persisted in the URL
-  // (?track=) so it survives refresh/sharing without needing a schema change —
-  // the track a session belongs to is derived from its scenario, not the user.
-  const [track, setTrackState] = useState<Track>(initialTrack);
-  const setTrack = (t: Track) => {
-    setTrackState(t);
+  // The selected practice module is persisted in the URL. "stall" is a picker
+  // module only, not a new scenario track: its rows remain in the consulting
+  // track and use the existing consulting rubric.
+  const [module, setModuleState] = useState<PracticeModule>(initialPracticeModule);
+  const setModule = (next: PracticeModule) => {
+    setModuleState(next);
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
-      url.searchParams.set("track", t);
+      if (next === "stall") {
+        url.searchParams.set("module", "stall");
+        url.searchParams.delete("track");
+      } else {
+        url.searchParams.set("track", next);
+        url.searchParams.delete("module");
+      }
       window.history.replaceState({}, "", url);
     }
   };
+  const selectedTrack: Track | null = module === "stall" ? null : module;
 
   // Identify the requester so the listing can be user-scoped (same convention as
   // the roster/dashboard queries). For every real consultant the response is
@@ -195,11 +207,17 @@ export default function Scenarios() {
   const scenarioTrack = (s: Scenario): Track => (s.track === "leadership" ? "leadership" : "consulting");
   const verticalGroups = new Map<string, Scenario[]>();
   for (const s of scenarios ?? []) {
-    if (scenarioTrack(s) !== track) continue;
+    if (!selectedTrack || scenarioTrack(s) !== selectedTrack || s.stallType) continue;
     const list = verticalGroups.get(s.vertical) ?? [];
     list.push(s);
     verticalGroups.set(s.vertical, list);
   }
+  // Stall scenarios have their own module rather than appearing in the ordinary
+  // consulting vertical pools. Deliberately do not filter by the user's level:
+  // all four diagnostic patterns are immediately available for practice.
+  const stallScenarios = (scenarios ?? [])
+    .filter((s) => !!s.stallType)
+    .sort((a, b) => a.title.localeCompare(b.title));
   // Sort scenarios within each vertical alphabetically by title, and the
   // verticals themselves alphabetically (A→Z) by their human-readable display
   // name — no manual pinning of any vertical.
@@ -214,13 +232,18 @@ export default function Scenarios() {
   // account, so its presence in the response IS the permission check and the
   // client never learns which username is internal.
   const internalTestScenarios = (scenarios ?? []).filter(
-    (s) => isInternalTestScenario(s.slug) && scenarioTrack(s) === track,
+    (s) => !!selectedTrack && isInternalTestScenario(s.slug) && scenarioTrack(s) === selectedTrack,
   );
 
   // The level shown/highlighted is the one for the selected track — the two are
-  // tracked independently per user.
-  const activeLevel = user ? (track === "leadership" ? user.leadershipLevel : user.currentLevel) : undefined;
-  const certified = user ? (track === "leadership" ? user.leadershipCertified : user.consultingCertified) : false;
+  // tracked independently per user. The stall module intentionally has no level
+  // gate or progression state of its own.
+  const activeLevel = user && selectedTrack
+    ? (selectedTrack === "leadership" ? user.leadershipLevel : user.currentLevel)
+    : undefined;
+  const certified = user && selectedTrack
+    ? (selectedTrack === "leadership" ? user.leadershipCertified : user.consultingCertified)
+    : false;
 
   // Advancement is no longer instant off one great session: a user needs
   // REQUIRED_QUALIFYING sessions that EACH individually score QUALIFYING_SCORE+
@@ -230,7 +253,7 @@ export default function Scenarios() {
     if (s.status !== "completed" || s.score == null || s.score < QUALIFYING_SCORE) return false;
     const sc = (scenarios ?? []).find((x) => x.id === s.scenarioId);
     if (!sc) return false;
-    return scenarioTrack(sc) === track && sc.difficulty === activeLevel;
+    return !!selectedTrack && scenarioTrack(sc) === selectedTrack && sc.difficulty === activeLevel;
   }).length;
   const examEligible = activeLevel === "advanced" && qualifyingCount >= REQUIRED_QUALIFYING;
 
@@ -291,33 +314,33 @@ export default function Scenarios() {
             </p>
           </div>
         )}
-        {/* Track picker — two distinct, separately-selectable cards (not a
-            toggle). Each is its own square with its own icon, name, and
-            description so Consulting and Leadership read as separate
-            options rather than two states of one control. */}
+        {/* Three distinct, separately-selectable practice modules. The stall
+            module is intentionally a module, not a third persisted track. */}
         <div
-          className="grid gap-3 sm:grid-cols-2"
+          className="grid gap-3 sm:grid-cols-3"
           role="tablist"
-          aria-label="Training track"
+          aria-label="Practice module"
           data-testid="track-picker"
         >
-          {(["consulting", "leadership"] as Track[]).map((t) => {
-            const selected = track === t;
-            const Icon = TRACK_ICONS[t];
+          {(["consulting", "leadership", "stall"] as PracticeModule[]).map((option) => {
+            const selected = module === option;
+            const Icon = option === "stall" ? MessageCircleQuestion : TRACK_ICONS[option];
+            const title = option === "stall" ? STALL_MODULE_TITLE : TRACK_LABELS[option];
+            const description = option === "stall" ? STALL_MODULE_DESCRIPTION : TRACK_DESCRIPTIONS[option];
             return (
               <button
-                key={t}
+                key={option}
                 type="button"
                 role="tab"
                 aria-selected={selected}
-                onClick={() => setTrack(t)}
+                onClick={() => setModule(option)}
                 className="relative flex flex-col items-start gap-2 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
                 style={
                   selected
                     ? { borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.08)" }
                     : { borderColor: "var(--border)" }
                 }
-                data-testid={`track-option-${t}`}
+                data-testid={`track-option-${option}`}
               >
                 {selected && (
                   <span
@@ -330,14 +353,14 @@ export default function Scenarios() {
                 )}
                 <Icon className="w-6 h-6" style={{ color: "#E06D00" }} aria-hidden="true" />
                 <span className="text-base font-semibold" style={selected ? { color: "#E06D00" } : undefined}>
-                  {TRACK_LABELS[t]}
+                  {title}
                 </span>
-                <span className="text-xs text-muted-foreground">{TRACK_DESCRIPTIONS[t]}</span>
+                <span className="text-xs text-muted-foreground">{description}</span>
               </button>
             );
           })}
         </div>
-        {user && (
+        {user && module !== "stall" && selectedTrack && (
           <div
             className="flex items-center gap-3 rounded-lg border-2 px-4 py-3"
             style={{ borderColor: "#E06D00", backgroundColor: "rgba(224,109,0,0.06)" }}
@@ -345,7 +368,7 @@ export default function Scenarios() {
           >
             <Award className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} aria-hidden="true" />
             <div className="flex-1">
-              <p className="text-xs text-muted-foreground">Your current level, {TRACK_LABELS[track]}</p>
+              <p className="text-xs text-muted-foreground">Your current level, {TRACK_LABELS[selectedTrack]}</p>
               <p className="text-sm font-semibold" style={{ color: "#E06D00" }} data-testid="text-current-level">
                 {(activeLevel && LEVEL_LABELS[activeLevel]) ?? activeLevel}
               </p>
@@ -364,14 +387,14 @@ export default function Scenarios() {
               )}
               {activeLevel === "advanced" && !certified && examEligible && (
                 <p className="text-xs font-medium" style={{ color: "#E06D00" }} data-testid="text-exam-eligible">
-                  Eligible for the {TRACK_CREDENTIAL[track]} exam
+                  Eligible for the {TRACK_CREDENTIAL[selectedTrack]} exam
                 </p>
               )}
               {/* The credential is shown ONLY once actually certified — reaching
                   Advanced is no longer sufficient (that only unlocks the exam). */}
               {certified && (
                 <p className="text-xs font-semibold" style={{ color: "#E06D00" }} data-testid="text-credential">
-                  ✓ {TRACK_CREDENTIAL[track]} · SOLVE Academy™
+                  ✓ {TRACK_CREDENTIAL[selectedTrack]} · SOLVE Academy™
                 </p>
               )}
             </div>
@@ -390,9 +413,11 @@ export default function Scenarios() {
           </div>
         )}
         <p className="text-sm text-muted-foreground max-w-prose" data-testid="text-scenarios-intro">
-          {track === "leadership"
-            ? "Pick a conversation and start it cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
-            : "Pick a conversation and start it cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
+          {module === "stall"
+            ? "Pick a stall pattern and start it cold. Your goal is to diagnose what is actually behind the excuse instead of arguing with the surface line."
+            : module === "leadership"
+              ? "Pick a conversation and start it cold, no preview. Your goal is to de-escalate, understand the real issue behind the complaint, and reach a resolution nobody gets blamed for."
+              : "Pick a conversation and start it cold, no preview. Your goal isn't to close fast, it's to uncover the real need behind whatever the customer opens with."}
         </p>
         {savedSessions.length > 0 && (
           <div className="space-y-2" data-testid="container-saved-sessions">
@@ -427,7 +452,7 @@ export default function Scenarios() {
           {/* Beginner-only entry point to Real Conversation Scoring, sized and
               weighted like a scenario card so it sits naturally in the grid.
               Reachable from any level via the persistent top-nav button. */}
-          {activeLevel === "beginner" && (
+          {module !== "stall" && activeLevel === "beginner" && (
             <Card
               className="border-2 shadow-[0_0_20px_rgba(224,109,0,0.25)]"
               style={{ borderColor: "#E06D00" }}
@@ -467,6 +492,7 @@ export default function Scenarios() {
               gate and the $4.99 paywall entirely, so this is truly
               unlimited for a logged-in member with an active seat. */}
           {user?.seatActive && (
+            module !== "stall" && (
             <Card
               className="border-2 shadow-[0_0_20px_rgba(224,109,0,0.25)]"
               style={{ borderColor: "#E06D00" }}
@@ -495,6 +521,7 @@ export default function Scenarios() {
                 </Button>
               </CardContent>
             </Card>
+            )
           )}
           {/* Internal test scenarios. Only ever present in the response for the
               internal account, so this renders for nobody else. Deliberately
@@ -503,7 +530,7 @@ export default function Scenarios() {
               in an accidental screenshot. Starting it is a direct call rather
               than a random draw, which is the whole point: a pilot needs the
               same persona every run, not whatever the picker lands on. */}
-          {internalTestScenarios.map((s) => (
+          {module !== "stall" && internalTestScenarios.map((s) => (
             <Card
               key={s.id}
               className="border border-dashed"
@@ -536,7 +563,38 @@ export default function Scenarios() {
               </CardContent>
             </Card>
           ))}
-          {orderedVerticals.map((vertical) => {
+          {module === "stall" && stallScenarios.map((scenario) => (
+            <Card key={scenario.id} data-testid={`card-stall-scenario-${scenario.slug}`}>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-lg">{scenario.title}</CardTitle>
+                    <CardDescription className="pt-1">{verticalLabel(scenario.vertical)}</CardDescription>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => startSession.mutate(scenario.id)}
+                    disabled={startSession.isPending || capBlocked}
+                    className="shrink-0 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={`Start ${LEVEL_LABELS[scenario.difficulty as Level] ?? scenario.difficulty} stall practice: ${scenario.title}`}
+                    data-testid={`badge-difficulty-stall-${scenario.slug}`}
+                  >
+                    <Badge variant="secondary">{LEVEL_LABELS[scenario.difficulty as Level] ?? scenario.difficulty}</Badge>
+                  </button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Button
+                  onClick={() => startSession.mutate(scenario.id)}
+                  disabled={startSession.isPending || capBlocked}
+                  data-testid={`button-start-stall-${scenario.slug}`}
+                >
+                  {capBlocked ? "Monthly limit reached" : startSession.isPending ? "Starting..." : "Start stall practice"}
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
+          {module !== "stall" && orderedVerticals.map((vertical) => {
             const pool = verticalGroups.get(vertical) ?? [];
             const presentDifficulties = new Set(pool.map((s) => s.difficulty));
             const difficulties = DIFFICULTY_ORDER.filter((d) => presentDifficulties.has(d));
@@ -590,7 +648,7 @@ export default function Scenarios() {
                       ? "Monthly limit reached"
                       : startSession.isPending
                         ? "Starting..."
-                        : track === "leadership"
+                        : selectedTrack === "leadership"
                           ? "Start conflict conversation"
                           : "Start discovery session"}
                   </Button>
@@ -599,9 +657,14 @@ export default function Scenarios() {
             );
           })}
         </div>
-        {!isLoading && orderedVerticals.length === 0 && (
+        {!isLoading && module !== "stall" && orderedVerticals.length === 0 && (
           <p className="text-sm text-muted-foreground" data-testid="text-no-scenarios">
             No conversations available in this track yet.
+          </p>
+        )}
+        {!isLoading && module === "stall" && stallScenarios.length === 0 && (
+          <p className="text-sm text-muted-foreground" data-testid="text-no-stall-scenarios">
+            No stall practices available yet.
           </p>
         )}
       </div>

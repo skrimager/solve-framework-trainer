@@ -19,13 +19,17 @@ function scenarioFromSeed(seed: (typeof scenarios)[number]): Scenario {
 }
 
 function openingStance(core: string): string {
-  return core.match(/Your opening stance: "([^"]+)"/)?.[1] ?? "";
+  return core.match(/Your opening stance(?:, delivered as the very first thing you say in this conversation)?: "([^"]+)"/)?.[1] ?? "";
 }
 
 function assertColdAndReactivePersona(slug: string, core: string): void {
   const opening = openingStance(core);
   assert.ok(opening, `${slug} has an opening stance`);
-  assert.doesNotMatch(opening, MID_CONVERSATION_OPENING, `${slug} must not assume an earlier rep conversation`);
+  // Stall practice intentionally starts after an earlier conversation, so its
+  // fixed opening may directly reference what the consultant already said.
+  if (!slug.startsWith("stall-")) {
+    assert.doesNotMatch(opening, MID_CONVERSATION_OPENING, `${slug} must not assume an earlier rep conversation`);
+  }
   assert.doesNotMatch(core, SCHEDULED_DISCLOSURE, `${slug} must not schedule a later disclosure`);
   assert.doesNotMatch(core, LOOPING_DIRECTIVE, `${slug} must not direct a looping callback`);
 }
@@ -33,7 +37,7 @@ function assertColdAndReactivePersona(slug: string, core: string): void {
 describe("all-vertical scenario consistency audit guards", () => {
   test("covers the full public portfolio across all 19 verticals with structured personas", () => {
     const publicScenarios = scenarios.filter((scenario) => !isInternalTestScenario(scenario.slug));
-    assert.equal(publicScenarios.length, 95);
+    assert.equal(publicScenarios.length, 99);
     assert.equal(new Set(publicScenarios.map((scenario) => scenario.vertical)).size, 19);
 
     for (const scenario of publicScenarios) {
