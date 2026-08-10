@@ -253,6 +253,13 @@
       "when": 1783106670000,
       "tag": "0035_scenario_rubric_versioning",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1783106670500,
+      "tag": "0036_stall_excuse_handling",
+      "breakpoints": true
     }
   ]
 }

@@ -2769,6 +2769,56 @@ Your real situation (reveal gradually, guarding your ego):
 
 Stay proud, territorial, and defensive early, opening only to respectful, ego-safe, non-siding mediation. One to four sentences per turn. No stage directions, never break character.`,
   },
+
+  // ─────────────── STALL & EXCUSE HANDLING ───────────────
+  {
+    slug: "stall-auto-think-it-over-1",
+    gender: "female",
+    title: 'Stall Practice: "Let Me Think About It" After a Great Test Drive',
+    vertical: "auto_sales",
+    track: "consulting",
+    difficulty: "beginner",
+    stallType: "think_it_over",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters after a strong test drive; the customer stalls with 'let me think about it.' Tests direct, transparent diagnostic questioning rather than a rebuttal.",
+    customerPersona: personaVariantSeed["stall-auto-think-it-over-1"].core,
+  },
+  {
+    slug: "stall-home-improvement-spouse-1",
+    gender: "female",
+    title: 'Stall Practice: "Let Me Talk to My Husband" (Even Though He Already Signed Off)',
+    vertical: "home_improvement",
+    track: "consulting",
+    difficulty: "intermediate",
+    stallType: "unconsulted_stakeholder",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters mid-conversation; the customer already disclosed her husband pre-approved the project budget, but then still stalls with 'let me talk to my husband.' Tests whether the rep catches and respectfully surfaces the contradiction, and whether they run the full validate to gather context to distinguish deliberation from avoidance to branching hypothetical to let her name it to confirm to engineer to close pattern rather than just pointing out the contradiction and stopping there.",
+    customerPersona: personaVariantSeed["stall-home-improvement-spouse-1"].core,
+  },
+  {
+    slug: "stall-solar-email-quote-1",
+    gender: "male",
+    title: 'Stall Practice: "Just Send Me a Quote"',
+    vertical: "solar",
+    track: "consulting",
+    difficulty: "beginner",
+    stallType: "email_me_a_quote",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters after presenting a solar proposal; the customer asks for it by email instead of deciding now. Tests whether the rep investigates what's driving the request (comparison vs. anxiety) before just sending something or, on the other hand, refusing the request.",
+    customerPersona: personaVariantSeed["stall-solar-email-quote-1"].core,
+  },
+  {
+    slug: "stall-roofing-red-herring-1",
+    gender: "male",
+    title: "Stall Practice: The Customer Stalls Even Though Nothing Was Missed",
+    vertical: "roofing",
+    track: "consulting",
+    difficulty: "advanced",
+    stallType: "red_herring",
+    active: true,
+    description: "Stall & Excuse Handling scenario, advanced. Discovery was genuinely complete. The customer stalls out of habit/nerves anyway. Tests whether the rep holds their ground with a confident, curious check-in rather than backpedaling into discounts or inventing a new pitch.",
+    customerPersona: personaVariantSeed["stall-roofing-red-herring-1"].core,
+  },
 ];
 
 // The internal test scenario: a fixed, realistic stage for piloting pipeline
