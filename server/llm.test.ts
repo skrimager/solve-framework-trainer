@@ -1204,7 +1204,11 @@ describe("scoreTranscript - structured stallEvidence", () => {
       rewardedBehaviorsObserved: ["using silence", "letting the customer reach their own conclusion"],
     });
     assert.ok(prompt.includes("THIS IS A STALL & EXCUSE HANDLING SESSION"));
-    assert.ok(prompt.includes(STALL_EVIDENCE_QUESTION_TYPES.join('", "')));
+    for (const questionType of STALL_EVIDENCE_QUESTION_TYPES) {
+      assert.ok(prompt.includes(`"${questionType}"`));
+    }
+    assert.match(prompt, /"analogy" \(a familiar situation used to uncover decision-making behavior/);
+    assert.match(prompt, /Include "analogy" whenever the consultant uses a familiar hypothetical or comparison/);
     assert.ok(prompt.includes(STALL_EVIDENCE_RED_FLAGS.join('", "')));
     assert.ok(prompt.includes(STALL_EVIDENCE_REWARDED_BEHAVIORS.join('", "')));
     assert.equal(cache.size(), 0, "stall evidence must not be lost to the legacy score cache");
@@ -2022,6 +2026,8 @@ describe("STALL_DIAGNOSIS_RULES - scoring stalls and objections as diagnostic mo
     assert.match(STALL_DIAGNOSIS_RULES, /Never answer an assumption/);
     assert.match(STALL_DIAGNOSIS_RULES, /What are you comparing us against/);
     assert.match(STALL_DIAGNOSIS_RULES, /Validate before investigating/);
+    assert.match(STALL_DIAGNOSIS_RULES, /origin, evidence, decision-process, stakeholder, or analogy questions/);
+    assert.match(STALL_DIAGNOSIS_RULES, /An analogy question uses a familiar situation to uncover decision-making behavior/);
     assert.match(STALL_DIAGNOSIS_RULES, /lets the customer name the specific concern/);
     assert.match(STALL_DIAGNOSIS_RULES, /us versus the decision/);
   });
