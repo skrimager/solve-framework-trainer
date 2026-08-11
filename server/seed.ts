@@ -1447,6 +1447,195 @@ Stay conversational, natural, and realistic — like a real person, not a script
     customerPersona: personaVariantSeed["demo-v2-re-3"].core,
   },
 
+  // Fifteen single-scenario public-demo industries. Their persona prose lives in
+  // personaVariantSeed, so both the legacy and structured persona fields share
+  // one exact source. SaaS and pest control reuse existing production rows and
+  // are deliberately listed only in server/demoV2.ts.
+  {
+    slug: "demo-v2-apartment-rental-1",
+    gender: "female",
+    title: "Demo: Just Wants Something Cheap and Close to Work",
+    vertical: "apartment_rental",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a leasing consultant. A caller says she just wants the cheapest one-bedroom you have that's close to downtown. Practice a warm discovery conversation: find out why location and price are the only things she's mentioned before you start listing units.",
+    description: "Public demo scenario. A caller opens on price and proximity alone. The real driver is a recent breakup that forced a sudden move and a tight one-month timeline she hasn't mentioned, so what she needs is confidence she can actually get in fast and start over quietly, not just the lowest rent. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-apartment-rental-1"].core,
+  },
+
+  {
+    slug: "demo-v2-employee-grievance-1",
+    gender: "male",
+    title: "Demo: Annoyed About a Last-Minute Schedule Change",
+    vertical: "employee_grievance",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manager meeting with an employee who's upset about a schedule change. Practice a warm discovery conversation: find out what's really behind the frustration before responding to the schedule complaint on the surface.",
+    description: "Public demo scenario. An employee opens annoyed about a last-minute shift swap. The real driver is a missed childcare pickup that put them in a bad spot with their kid's school, which they're embarrassed to bring up unprompted. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-employee-grievance-1"].core,
+  },
+
+  {
+    slug: "demo-v2-financial-advisor-1",
+    gender: "male",
+    title: "Demo: Just Wants to Know Where to Put Some Savings",
+    vertical: "financial_advisor",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a financial advisor meeting a new client. He says he just wants to know where to put some savings. Practice a warm discovery conversation: find out what the money is actually for before recommending anything.",
+    description: "Public demo scenario. A client opens with a generic request to invest some savings. The real driver is a plan to help his daughter with a house down payment in about two years, which changes the entire risk and timeline picture, and he hasn't mentioned it because he doesn't think it's relevant to \"where should I put my money.\" Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-financial-advisor-1"].core,
+  },
+
+  {
+    slug: "demo-v2-home-improvement-1",
+    gender: "female",
+    title: "Demo: Just Wants New Countertops",
+    vertical: "home_improvement",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a remodeling consultant meeting a homeowner who says she just wants new countertops. Practice a warm discovery conversation: find out what's actually driving the request before quoting materials.",
+    description: "Public demo scenario. A homeowner opens asking only about countertop materials. The real driver is that she's planning to sell within the next year and a realtor told her the kitchen looks dated, so this is really about resale value on a budget, not a forever-kitchen upgrade. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-home-improvement-1"].core,
+  },
+
+  {
+    slug: "demo-v2-hvac-sales-1",
+    gender: "male",
+    title: "Demo: Wants the Cheapest Unit That Will Work",
+    vertical: "hvac_sales",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an HVAC sales consultant meeting a homeowner about a new system. He says he just wants the cheapest unit that'll do the job. Practice a warm discovery conversation: find out what's driving the request before quoting equipment.",
+    description: "Public demo scenario. A homeowner opens asking for the cheapest available system. The real driver is that his upstairs bedrooms run noticeably hotter than the rest of the house and he's been dealing with it for years, assuming that's just how the house is, so this is really about a comfort problem he doesn't know has a fix, not just price. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-hvac-sales-1"].core,
+  },
+
+  {
+    slug: "demo-v2-hvac-service-1",
+    gender: "female",
+    title: "Demo: Just Wants the AC Running Again",
+    vertical: "hvac_service",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an HVAC service technician meeting a homeowner whose AC stopped working. She just wants it running again as fast as possible. Practice a warm discovery conversation: find out the full picture before quoting a quick fix.",
+    description: "Public demo scenario. A homeowner opens wanting the fastest possible fix during a heat wave. The real driver is that she has a newborn at home and is genuinely worried about the heat affecting the baby, which she hasn't said outright because she doesn't want to sound overly anxious. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-hvac-service-1"].core,
+  },
+
+  {
+    slug: "demo-v2-insurance-auto-1",
+    gender: "male",
+    title: "Demo: Just Comparing Prices",
+    vertical: "insurance_auto",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an auto insurance agent talking with a caller who says he's just comparing prices. Practice a warm discovery conversation: find out what's actually prompting the shopping before quoting a rate.",
+    description: "Public demo scenario. A caller opens asking only for a quote to compare against his current policy. The real driver is that he was just in a minor fender-bender that wasn't his fault and is worried his current insurer is going to raise his rate anyway, so he's shopping out of frustration and fear, not routine comparison. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-insurance-auto-1"].core,
+  },
+
+  {
+    slug: "demo-v2-manufactured-housing-1",
+    gender: "male",
+    title: "Demo: Just Wants the Cheapest Home Available",
+    vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manufactured housing sales consultant. A caller says he just wants the cheapest home you have. Practice a warm discovery conversation: find out what's actually driving the budget focus before showing floor plans.",
+    description: "Public demo scenario. A caller opens asking only about the cheapest available home. The real driver is that he's supporting his elderly mother's move and is anxious about handling the cost alone without involving his siblings, who he doesn't get along with financially, so budget pressure is really about independence, not the home itself. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-manufactured-housing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-manufactured-housing-community-1",
+    gender: "female",
+    title: "Demo: Sticker-Shocked by the Lot Rent",
+    vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a community manager meeting a prospective resident who's reacting to the lot rent price. Practice a warm discovery conversation: find out what's actually behind the sticker shock before defending the number.",
+    description: "Public demo scenario. A prospective resident opens reacting negatively to the lot rent. The real driver is that she's comparing it to a much older lease from years ago at a different community and doesn't yet understand what's actually included here, so the real gap is information, not just price. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-manufactured-housing-community-1"].core,
+  },
+
+  {
+    slug: "demo-v2-peer-conflict-1",
+    gender: "female",
+    title: "Demo: Annoyed About a Coworker Not Pulling Their Weight",
+    vertical: "peer_conflict",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manager meeting with an employee who's frustrated with a coworker. Practice a warm discovery conversation: find out what's really going on before responding to the surface complaint.",
+    description: "Public demo scenario. An employee opens complaining that a coworker isn't pulling their weight on a shared project. The real driver is that the employee is worried they'll be blamed if the project is late, and that fear, not just resentment, is driving the complaint. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-peer-conflict-1"].core,
+  },
+
+  {
+    slug: "demo-v2-plumbing-1",
+    gender: "male",
+    title: "Demo: Just Wants the Drain Fixed",
+    vertical: "plumbing",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a plumbing service consultant talking with a homeowner about a slow drain. Practice a warm discovery conversation: find out the real scope before quoting a quick fix.",
+    description: "Public demo scenario. A homeowner opens treating a slow drain as a minor annoyance needing a quick snake job. The real driver is that this is the third time in six months and he's starting to worry it's a bigger pipe issue he can't afford to deal with, which he hasn't said because he's hoping it isn't true. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-plumbing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-pool-landscaping-1",
+    gender: "female",
+    title: "Demo: Just Wants a Small Pool for the Backyard",
+    vertical: "pool_landscaping",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a pool and landscaping consultant meeting a homeowner about a backyard pool. She says she just wants something small. Practice a warm discovery conversation: find out what's actually driving the request before talking size and price.",
+    description: "Public demo scenario. A homeowner opens asking for something small and simple. The real driver is chronic joint pain that's made her doctor recommend low-impact swimming for therapy, which she hasn't mentioned because she doesn't want the conversation to become about her health. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-pool-landscaping-1"].core,
+  },
+
+  {
+    slug: "demo-v2-roofing-1",
+    gender: "male",
+    title: "Demo: Just Wants a Quote to Compare",
+    vertical: "roofing",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a roofing consultant meeting a homeowner who says he just wants a quote to compare against others. Practice a warm discovery conversation: find out what's driving the roof replacement before quoting materials.",
+    description: "Public demo scenario. A homeowner opens asking only for a comparison quote. The real driver is a small ceiling stain he noticed a few weeks ago that he hasn't mentioned to anyone, including his spouse, because he's worried about what it might mean and how much it could cost to fix. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-roofing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-solar-1",
+    gender: "male",
+    title: "Demo: Skeptical This Actually Pays Off",
+    vertical: "solar",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a solar sales consultant meeting a homeowner who's skeptical about payback. Practice a warm discovery conversation: find out what's actually driving the skepticism before pitching numbers.",
+    description: "Public demo scenario. A homeowner opens skeptical that solar ever really pays for itself. The real driver is that a neighbor had a bad experience with a different solar company and he's worried about being locked into a similar situation, not just doubtful about the math. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-solar-1"].core,
+  },
+
+  {
+    slug: "demo-v2-upset-customer-service-1",
+    gender: "female",
+    title: "Demo: Upset About a Late Delivery",
+    vertical: "upset_customer_service",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a customer service rep talking with a customer whose order arrived late. Practice a warm discovery conversation: find out what's really at stake before responding to the surface complaint.",
+    description: "Public demo scenario. A customer opens upset about a late delivery and wants a refund. The real driver is that the item was a birthday gift that arrived after the birthday already happened, which is the actual source of the frustration, not just the lateness itself. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-upset-customer-service-1"].core,
+  },
+
   // ─────────────────────────────────────────────────────────────
   // APARTMENT RENTAL
   // ─────────────────────────────────────────────────────────────

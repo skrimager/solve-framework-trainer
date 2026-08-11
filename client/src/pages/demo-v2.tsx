@@ -261,9 +261,9 @@ function Landing({ onStart, paidReturn }: { onStart: () => void; paidReturn: boo
         One free practice conversation. No credit card.
       </h1>
       <p className="mx-auto max-w-xl text-muted-foreground">
-        Pick Auto or Real Estate, and our AI plays a customer whose real motivation
-        sits underneath what they first ask for. Talk to them like a real call, dig
-        for what they actually need, and get scored on your discovery.
+        Pick your industry, and our AI plays a customer whose real motivation sits
+        underneath what they first ask for. Talk to them like a real call, dig for
+        what they actually need, and get scored on your discovery.
       </p>
 
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
@@ -491,6 +491,43 @@ function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
     );
   }
 
+  const salesServiceOptions = options.filter((option) => option.group === "sales_service");
+  const leadershipOptions = options.filter((option) => option.group === "leadership");
+  const renderOptions = (groupOptions: DemoV2Industry[]) =>
+    groupOptions.map((option) => {
+      const isSelected = selected === option.key;
+      return (
+        <button
+          key={option.key}
+          type="button"
+          role="radio"
+          aria-checked={isSelected}
+          onClick={() => setSelected(option.key)}
+          className="relative flex flex-col items-start gap-1.5 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
+          style={
+            isSelected
+              ? { borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }
+              : { borderColor: "var(--border)" }
+          }
+          data-testid={`demo-v2-industry-option-${option.key}`}
+        >
+          {isSelected && (
+            <span
+              className="absolute top-3 right-3 flex h-5 w-5 items-center justify-center rounded-full"
+              style={{ backgroundColor: ORANGE }}
+              aria-hidden="true"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5 text-white" />
+            </span>
+          )}
+          <span className="text-base font-semibold" style={isSelected ? { color: ORANGE } : undefined}>
+            {option.label}
+          </span>
+          <span className="text-xs text-muted-foreground">{option.blurb}</span>
+        </button>
+      );
+    });
+
   return (
     <div className="space-y-6 text-center">
       <p className="text-sm font-medium text-muted-foreground" data-testid="text-demo-v2-session-counter">
@@ -498,49 +535,28 @@ function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
       </p>
       <h2 className="text-2xl font-semibold">Which industry do you want?</h2>
       <p className="mx-auto max-w-xl text-sm text-muted-foreground">
-        Pick either one. You will meet a customer whose real motivation sits
-        underneath the request they open with.
+        Pick the kind of conversation you want to practice. You will meet a
+        customer whose real motivation sits underneath the request they open with.
       </p>
 
       <div
-        className="grid gap-3 sm:grid-cols-2"
+        className="space-y-6"
         role="radiogroup"
         aria-label="Choose your industry"
         data-testid="demo-v2-industry-picker"
       >
-        {options.map((option) => {
-          const isSelected = selected === option.key;
-          return (
-            <button
-              key={option.key}
-              type="button"
-              role="radio"
-              aria-checked={isSelected}
-              onClick={() => setSelected(option.key)}
-              className="relative flex flex-col items-start gap-1.5 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
-              style={
-                isSelected
-                  ? { borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }
-                  : { borderColor: "var(--border)" }
-              }
-              data-testid={`demo-v2-industry-option-${option.key}`}
-            >
-              {isSelected && (
-                <span
-                  className="absolute top-3 right-3 flex h-5 w-5 items-center justify-center rounded-full"
-                  style={{ backgroundColor: ORANGE }}
-                  aria-hidden="true"
-                >
-                  <CheckCircle2 className="h-3.5 w-3.5 text-white" />
-                </span>
-              )}
-              <span className="text-base font-semibold" style={isSelected ? { color: ORANGE } : undefined}>
-                {option.label}
-              </span>
-              <span className="text-xs text-muted-foreground">{option.blurb}</span>
-            </button>
-          );
-        })}
+        <section data-testid="demo-v2-industry-group-sales-service" aria-labelledby="demo-v2-sales-service-heading">
+          <h3 id="demo-v2-sales-service-heading" className="mb-3 text-left text-sm font-semibold text-muted-foreground">
+            Sales &amp; Service
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-3">{renderOptions(salesServiceOptions)}</div>
+        </section>
+        <section data-testid="demo-v2-industry-group-leadership" aria-labelledby="demo-v2-leadership-heading">
+          <h3 id="demo-v2-leadership-heading" className="mb-3 text-left text-sm font-semibold text-muted-foreground">
+            Leadership Conversations
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-2">{renderOptions(leadershipOptions)}</div>
+        </section>
       </div>
 
       <Button

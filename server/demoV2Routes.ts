@@ -38,7 +38,7 @@ import {
 import { isStripeConfigured } from "./stripe";
 import {
   DEMO_V2_INDUSTRIES,
-  DEMO_V2_SLUGS,
+  DEMO_V2_ALL_SLUGS,
   demoV2Scenario,
   industryForSlug,
   isDemoV2Industry,
@@ -115,13 +115,13 @@ function isDemoSessionEnded(s: { status: string }): boolean {
   return s.status === VULGAR_ENDED_STATUS;
 }
 
-// Loads the six v2 scenario rows and shapes them into picker candidates, in the
+// Loads the v2 scenario rows and shapes them into picker candidates, in the
 // fixed per-industry order declared in demoV2.ts. Missing rows (an unseeded
 // database) are skipped rather than throwing, so one absent scenario degrades to
 // a smaller pool instead of taking the flow down.
 export async function loadDemoV2Pool(): Promise<DemoV2ScenarioOption[]> {
   const pool: DemoV2ScenarioOption[] = [];
-  for (const slug of [...DEMO_V2_SLUGS.auto, ...DEMO_V2_SLUGS.real_estate]) {
+  for (const slug of DEMO_V2_ALL_SLUGS) {
     const scenario = await storage.getScenarioBySlug(slug);
     if (!scenario) continue;
     const industry = industryForSlug(slug);
@@ -174,7 +174,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
       .object({ industry: z.string().trim() })
       .safeParse({ industry: req.body?.industry ?? "" });
     if (!parsed.success || !isDemoV2Industry(parsed.data.industry)) {
-      return res.status(400).json({ message: "Please choose Auto Sales or Real Estate to begin." });
+      return res.status(400).json({ message: "Please choose an industry to begin." });
     }
     const industry = parsed.data.industry;
 

@@ -10,9 +10,29 @@ import type { TranscriptMessage } from "@shared/schema";
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 export type DemoV2Industry = {
-  key: "auto" | "real_estate";
+  key:
+    | "auto"
+    | "real_estate"
+    | "apartment_rental"
+    | "employee_grievance"
+    | "financial_advisor"
+    | "home_improvement"
+    | "hvac_sales"
+    | "hvac_service"
+    | "insurance_auto"
+    | "manufactured_housing"
+    | "manufactured_housing_community"
+    | "peer_conflict"
+    | "pest_control"
+    | "plumbing"
+    | "pool_landscaping"
+    | "roofing"
+    | "saas"
+    | "solar"
+    | "upset_customer_service";
   label: string;
   blurb: string;
+  group: "sales_service" | "leadership";
 };
 
 export type DemoV2Scenario = {
