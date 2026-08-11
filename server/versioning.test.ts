@@ -5,18 +5,30 @@ import express from "express";
 
 import type { Scenario, Session, User } from "@shared/schema";
 import { scenarios as seededScenarios } from "./seed";
-import { computeScoreCacheHash, RUBRIC_VERSION } from "./llm";
+import { RUBRIC_VERSION, type StallEvidence } from "./llm";
 import { registerRoutes } from "./routes";
 import { storage } from "./storage";
 
-// This is an in-memory integration test of the real completion handler. The
-// score cache avoids an OpenAI call while exercising the same route that stamps
-// versions in production.
+// This is an in-memory integration test of the real completion handler. Its
+// test-only scorer seam avoids a model call while exercising the same route
+// that stamps versions and writes completion fields in production.
 describe("scenario and rubric versioning", () => {
   let server: Server;
   let baseUrl: string;
   let scenarioRows: Scenario[];
   let sessionRows: Session[];
+  const fixedRubric = {
+    needsDiscovery: 80,
+    objectionPrevention: 80,
+    trustBuilding: 80,
+    naturalClose: 80,
+    relationshipContinuity: 80,
+  };
+  const fixedStallEvidence: StallEvidence = {
+    questionTypesUsed: ["origin", "evidence"],
+    redFlagsTriggered: [],
+    rewardedBehaviorsObserved: ["using silence"],
+  };
 
   const originals: Record<string, unknown> = {};
   const storageMethods = [
@@ -75,7 +87,14 @@ describe("scenario and rubric versioning", () => {
 
     const app = express();
     app.use(express.json());
-    await registerRoutes(createServer(app), app);
+    await registerRoutes(createServer(app), app, {
+      practiceSessionScorer: async (_transcript, _difficulty, _track, _transactionType, deps) => ({
+        rubric: fixedRubric,
+        feedback: "Mocked completion score",
+        overall: 80,
+        stallEvidence: deps.stallType ? fixedStallEvidence : null,
+      }),
+    });
     await new Promise<void>((resolve) => {
       server = app.listen(0, resolve);
     });
@@ -134,28 +153,6 @@ describe("scenario and rubric versioning", () => {
     (storage as any).listSessionsByUser = async (userId: number) =>
       sessionRows.filter((session) => session.userId === userId);
 
-    const cacheHash = computeScoreCacheHash([], "beginner", "consulting", null);
-    (storage as any).getScoreCacheEntry = async (contentHash: string) =>
-      contentHash === cacheHash
-        ? {
-            id: 1,
-            contentHash,
-            rubric: JSON.stringify({
-              needsDiscovery: 80,
-              objectionPrevention: 80,
-              trustBuilding: 80,
-              naturalClose: 80,
-              relationshipContinuity: 80,
-            }),
-            feedback: "Cached test score",
-            overall: 80,
-            track: "consulting",
-            difficulty: "beginner",
-            transactionType: null,
-            transcript: "[]",
-            createdAt: "2026-08-09T00:00:00.000Z",
-          }
-        : undefined;
   });
 
   after(() => {
@@ -209,6 +206,7 @@ describe("scenario and rubric versioning", () => {
     const completedFirst = await storage.getSession(first.id);
     assert.equal(completedFirst?.scenarioVersion, 1);
     assert.equal(completedFirst?.rubricVersion, RUBRIC_VERSION);
+    assert.equal(completedFirst?.stallEvidence, null);
 
     await storage.updateScenario(scenario.id, { version: 2 });
     const second = await storage.createSession({
@@ -232,5 +230,50 @@ describe("scenario and rubric versioning", () => {
     const refetchedFirst = await storage.getSession(first.id);
     assert.equal(refetchedFirst?.scenarioVersion, 1);
     assert.equal(refetchedFirst?.rubricVersion, RUBRIC_VERSION);
+  });
+
+  test("writes structured stall evidence only for a stall-type session", async () => {
+    const scenario = await storage.createScenario({
+      slug: "stall-evidence-test-scenario",
+      title: "Stall evidence test scenario",
+      vertical: "auto_sales",
+      track: "consulting",
+      stallType: "think_it_over",
+      description: "Test-only scenario",
+      customerPersona: "Test customer",
+      personaCore: "Test customer",
+      personalityVariants: "[]",
+      motivationVariants: "[]",
+      objectionPool: "[]",
+      gender: "female",
+      difficulty: "beginner",
+      briefing: "",
+      active: true,
+      version: 1,
+    } as any);
+    const session = await storage.createSession({
+      userId: user.id,
+      scenarioId: scenario.id,
+      status: "in_progress",
+      personaVariant: null,
+      transcript: "[]",
+      score: null,
+      rubricScores: null,
+      stallEvidence: null,
+      feedback: null,
+      createdAt: "2026-08-09T00:00:00.000Z",
+      completedAt: null,
+    } as any);
+
+    const response = await fetch(`${baseUrl}/api/sessions/${session.id}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+
+    assert.equal(response.status, 200);
+    const completed = await storage.getSession(session.id);
+    assert.deepEqual(JSON.parse(completed?.stallEvidence ?? "null"), fixedStallEvidence);
+    assert.deepEqual(JSON.parse(completed?.rubricScores ?? "{}"), fixedRubric);
   });
 });

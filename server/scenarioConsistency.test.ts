@@ -105,7 +105,8 @@ describe("all-vertical scenario consistency audit guards", () => {
     const routes = readFileSync(fileURLToPath(new URL("./routes.ts", import.meta.url)), "utf8");
     const results = readFileSync(fileURLToPath(new URL("../client/src/pages/results.tsx", import.meta.url)), "utf8");
 
-    assert.match(routes, /scoreTranscript\(transcript, scenario\?\.difficulty, track, scenario\?\.transactionType\)/);
+    assert.match(routes, /scoreTranscript\(transcript, scenario\?\.difficulty, track, scenario\?\.transactionType, \{/);
+    assert.match(routes, /stallType: scenario\?\.stallType \?\? null/);
     assert.match(routes, /rubricScores: JSON\.stringify\(rubric\)/);
     assert.match(routes, /feedback,/);
     assert.match(results, /session\.score/);
