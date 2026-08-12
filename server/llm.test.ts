@@ -1396,6 +1396,15 @@ describe("buildTurnStateBlock - carries the derived conversation state (Rules 2-
     assert.match(block, /ALREADY said the proposed solution fits/);
   });
 
+  test("computed price arithmetic is carried into every customer-reply turn", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I have a written competing offer of $30,600 out the door."),
+      turn("consultant", "I can offer you $29,700 out the door today."),
+    ]);
+    assert.match(block, /latest offer of \$29,700 is \$900 below your stated reference price of \$30,600/i);
+    assert.match(block, /computed from the transcript, not estimated/i);
+  });
+
   test("a conversation with none of these situations is byte-identical to the PR #86 behavior", () => {
     const plain = [
       turn("consultant", "What brings you in today?"),
@@ -1680,6 +1689,26 @@ describe("scoreTranscript - deterministic transcript grounding reaches the model
       cache: makeInMemoryCache(),
     });
     assert.ok(!cap.input().includes("TIMING PRE-CHECK"));
+  });
+
+  test("the consulting scorer receives the deterministic offer history", async () => {
+    const cap = capture();
+    await scoreTranscript(
+      [
+        turn("customer", "I have a written competing offer of $30,600 out the door."),
+        turn("consultant", "I can offer you $29,700 out the door."),
+        turn("consultant", "My revised offer is $30,400 out the door."),
+        turn("consultant", "I can accept your counter at $30,200."),
+      ],
+      "beginner",
+      "consulting",
+      null,
+      { responder: cap.responder, cache: makeInMemoryCache() },
+    );
+    assert.match(cap.input(), /PRICE PRE-CHECK/);
+    assert.match(cap.input(), /Consultant offer 1: \$29,700 \(\$900 below the reference/);
+    assert.match(cap.input(), /Consultant offer 2: \$30,400 \(\$200 below the reference/);
+    assert.match(cap.input(), /Consultant offer 3: \$30,200 \(\$400 below the reference/);
   });
 });
 

@@ -9,12 +9,15 @@ import {
   buildConversationStateLines,
   buildFinalAnsweredQuestionGate,
   buildDirectQuestionLines,
+  buildPriceComparisonLines,
   buildRepetitionCalloutLines,
   deriveConversationState,
   deriveDirectQuestion,
   deriveRepetitionCallout,
+  derivePriceState,
   extractAskedSubject,
   hasCustomerAcceptedProposal,
+  parseDollarAmounts,
   parseMoneyAmounts,
   repeatsClosedAnsweredQuestion,
 } from "./conversationState";
@@ -507,6 +510,61 @@ describe("Rule D: a number the rep has met is recognized as met", () => {
       assert.deepEqual(parseMoneyAmounts("2,000 square feet"), []);
       assert.deepEqual(parseMoneyAmounts("no numbers here at all"), []);
     });
+  });
+});
+
+describe("price-state arithmetic for negotiated reference offers", () => {
+  test("extracts explicit dollar figures without mistaking the model for the calculator", () => {
+    assert.deepEqual(parseDollarAmounts("Their written offer is $30,600; I can do $29,700."), [30600, 29700]);
+    assert.deepEqual(parseDollarAmounts("No dollar figure here."), []);
+  });
+
+  test("Renee's real offer history stays below her $30,600 competing reference at every step", () => {
+    const base = [
+      "c: I have a written competing offer of $30,600 out the door for this exact XLE.",
+      "r: I can offer you $29,700 out the door today.",
+    ];
+    const at29700 = derivePriceState(t(...base));
+    assert.equal(at29700.reference?.amount, 30600);
+    assert.deepEqual(at29700.offers.map((offer) => offer.amount), [29700]);
+    assert.deepEqual(
+      at29700.latestComparison && {
+        relation: at29700.latestComparison.relation,
+        difference: at29700.latestComparison.difference,
+      },
+      { relation: "below", difference: 900 },
+    );
+
+    const at30400 = derivePriceState(t(...base, "r: Actually, my revised offer is $30,400 out the door."));
+    assert.deepEqual(at30400.offers.map((offer) => offer.amount), [29700, 30400]);
+    assert.equal(at30400.latestComparison?.relation, "below");
+    assert.equal(at30400.latestComparison?.difference, 200);
+    assert.ok(
+      at30400.offers[1].amount > at30400.offers[0].amount,
+      "the later $30,400 offer is still below the reference but worse than $29,700",
+    );
+
+    const at30200 = derivePriceState(
+      t(...base, "r: Actually, my revised offer is $30,400 out the door.", "r: I can accept your counter at $30,200."),
+    );
+    assert.deepEqual(at30200.offers.map((offer) => offer.amount), [29700, 30400, 30200]);
+    assert.equal(at30200.latestComparison?.relation, "below");
+    assert.equal(at30200.latestComparison?.difference, 400);
+    assert.match(
+      buildPriceComparisonLines(at30200).join("\n"),
+      /latest offer of \$30,200 is \$400 below your stated reference price of \$30,600/i,
+    );
+  });
+
+  test("a higher live offer is labeled above rather than inverted", () => {
+    const state = derivePriceState(
+      t(
+        "c: My budget target is $2,400 a month.",
+        "r: Our monthly rent offer is $2,550.",
+      ),
+    );
+    assert.equal(state.latestComparison?.relation, "above");
+    assert.equal(state.latestComparison?.difference, 150);
   });
 });
 

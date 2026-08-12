@@ -7,14 +7,16 @@ import {
   buildFinalAnsweredQuestionGate,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildPriceComparisonLines,
   buildRepetitionCalloutLines,
   deriveConversationState,
   deriveDirectQuestion,
   deriveRepetitionCallout,
+  derivePriceState,
   hasCustomerAcceptedProposal,
   repeatsClosedAnsweredQuestion,
 } from "./conversationState";
-import { buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
+import { buildPriceGroundingBlock, buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
 import { storage } from "./storage";
 import {
   countPriorVulgarStrikes,
@@ -460,6 +462,11 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
   // Same discipline: each is derived from explicit text in the transcript, so it
   // can only ever assert something the conversation actually contains.
   lines.push(...buildConversationStateLines(deriveConversationState(transcript)));
+  // Price arithmetic must be computed here, in code, from the live transcript.
+  // It cannot live in the cacheable stable prefix because the facts necessarily
+  // change with each offer; this volatile per-turn block is included on every
+  // customer-reply generation once both sides have named their numbers.
+  lines.push(...buildPriceComparisonLines(derivePriceState(transcript)));
   if (lines.length === 0) return "";
 
   return `Where this conversation stands right now (do not contradict any of this):\n${lines.join("\n")}`;
@@ -1469,6 +1476,10 @@ export async function scoreTranscript(
   // session and must not disturb the cacheable prefix. The consulting rubric is
   // the only one that coaches topic timing, so leadership prompts are unchanged.
   const timingGrounding = isLeadership ? "" : buildTimingGroundingBlock(transcript);
+  // Price history is equally transcript-verifiable and applies to the same
+  // consulting scoring path. It is a small sibling of timingGrounding, not a
+  // new rubric or scoring-weight mechanism.
+  const priceGrounding = isLeadership ? "" : buildPriceGroundingBlock(transcript);
 
   // Same volatile-tail treatment as timingGrounding: only present when the
   // caller (today, only the demo's always-scores /complete route) tells us
@@ -1484,6 +1495,7 @@ export async function scoreTranscript(
         stablePrefix,
         `${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
         timingGrounding,
+        priceGrounding,
         noRecommendationNote,
       ]
         .filter((part) => part.length > 0)
