@@ -453,7 +453,7 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
     if (!text) continue;
 
     if (m.role === "customer") {
-      if (matchesAny(text, ASK_MARKERS)) {
+      if (matchesAny(text, SOFT_ASK_MARKERS)) {
         for (const topic of topics) {
           if (mentionsTopic(text, topic)) {
             everAsked.add(topic);

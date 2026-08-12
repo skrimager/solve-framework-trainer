@@ -50,6 +50,20 @@ describe("Rule 2: deflected topics stop being asked", () => {
     assert.match(rendered, /safety-net/i);
   });
 
+  test("tracks a softly phrased department question before the redirect", () => {
+    // This intentionally omits a question mark and inserts "please" between
+    // "can you" and "tell", so the former ASK_MARKERS-only gate misses it.
+    const state = deriveConversationState(
+      t(
+        "c: Can you please tell me a little more about the warranty coverage",
+        "r: Our service department handles the warranty details.",
+      ),
+    );
+    const warranty = state.deflectedTopics.find((d) => d.topic === "warranty");
+    assert.ok(warranty, "the soft warranty ask must be tracked before a department redirect");
+    assert.equal(warranty!.redirectCount, 1);
+  });
+
   test("a second redirect closes the topic permanently", () => {
     const state = deriveConversationState(
       t(
