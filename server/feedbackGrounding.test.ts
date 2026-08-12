@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import type { TranscriptMessage } from "@shared/schema";
 import {
+  buildPriceGroundingBlock,
   buildTimingGroundingBlock,
   deriveTimingCoverage,
   numberedTurns,
@@ -249,5 +250,29 @@ describe("buildTimingGroundingBlock", () => {
 
   test("an empty transcript produces no block, leaving those prompts unchanged", () => {
     assert.equal(buildTimingGroundingBlock([]), "");
+  });
+});
+
+describe("buildPriceGroundingBlock", () => {
+  test("reconstructs Renee's actual session 460 price history without inverted arithmetic", () => {
+    const block = buildPriceGroundingBlock(
+      t(
+        "c: I have a competing written offer of $30,600 out the door for the same XLE.",
+        "r: I can offer you $29,700 out the door.",
+        "c: I need you to be competitive.",
+        "r: My revised offer is $30,400 out the door.",
+        "c: Can you do $30,200?",
+        "r: I can accept your counter at $30,200.",
+      ),
+    );
+    assert.match(block, /Customer reference price: \$30,600/);
+    assert.match(block, /Consultant offer 1: \$29,700 \(\$900 below the reference of \$30,600\)/);
+    assert.match(block, /Consultant offer 2: \$30,400 \(\$200 below the reference of \$30,600\)/);
+    assert.match(block, /Consultant offer 3: \$30,200 \(\$400 below the reference of \$30,600\)/);
+    assert.match(block, /later, higher offer.*price improvement/i);
+  });
+
+  test("returns no price block before a customer reference and consultant offer both exist", () => {
+    assert.equal(buildPriceGroundingBlock(t("c: I like this apartment.", "r: The rent is $2,100.")), "");
   });
 });

@@ -283,6 +283,132 @@ export function parseMoneyAmounts(text: string): number[] {
   return amounts;
 }
 
+// Every explicitly dollar-denominated figure, including a monthly rent or
+// payment. parseMoneyAmounts intentionally rejects monthly payments because
+// Rule D compares purchase totals; price state needs the broader set because a
+// rent negotiation is still a price negotiation. Keep this regex-only and
+// transcript-derived: no model is asked which number it saw.
+export function parseDollarAmounts(text: string): number[] {
+  const amounts: number[] = [];
+  const dollarPattern = /\$\s?([\d,]+(?:\.\d{1,2})?)/g;
+  let match: RegExpExecArray | null;
+  while ((match = dollarPattern.exec(text)) !== null) {
+    const amount = Number(match[1].replace(/,/g, ""));
+    if (Number.isFinite(amount)) amounts.push(amount);
+  }
+  return amounts;
+}
+
+function parsePriceAmounts(text: string): number[] {
+  return Array.from(new Set([...parseDollarAmounts(text), ...parseMoneyAmounts(text)]));
+}
+
+// A customer number is a reference only when the customer explicitly frames it
+// as the competing benchmark, their budget, or their target. A random fee or
+// historical amount must not become the yardstick for the negotiation.
+const PRICE_REFERENCE_MARKERS: RegExp[] = [
+  /\b(?:written|competing|other|another|best|their|dealer'?s?)\s+(?:offer|quote|price|bid)\b/i,
+  /\b(?:offer|quote|price|bid)\b.{0,36}\b(?:from|at|of|for)\b/i,
+  /\bmy (?:budget|target|number|ceiling|limit)\b/i,
+  /\b(?:budget|target|price)\s+(?:is|of|at|around|under|below)\b/i,
+  /\b(?:can'?t|cannot|won'?t|not going to)\b.{0,32}\b(?:over|above|past|beyond)\b/i,
+  /\b(?:need|want|looking)\b.{0,24}\b(?:under|below|at|around|to spend)\b/i,
+];
+
+// A consultant number is an offer only when the consultant presents it as a
+// price, quote, proposed total, or agreement. This avoids treating every dollar
+// figure (taxes, savings, fees) as a replacement offer.
+const PRICE_OFFER_MARKERS: RegExp[] = [
+  /\b(?:my|our|the)\s+(?:offer|quote|price|number|total|proposal)\b/i,
+  /\b(?:i|we)\s+(?:can|could|will|would)\s+(?:do|offer|sell|make|put you at|come in at)\b/i,
+  /\b(?:comes?|lands?|puts? you|brings? it)\s+(?:in |to |at )?(?:at|to)?\b/i,
+  /\b(?:out[- ]the[- ]door|all[- ]in|total price|monthly rent|rent)\b/i,
+  /\b(?:match|beat|accept|agree|work with)\b/i,
+];
+
+export interface PriceReference {
+  amount: number;
+  statement: string;
+}
+
+export interface ConsultantOffer {
+  amount: number;
+  quote: string;
+}
+
+export interface PriceComparison {
+  reference: PriceReference;
+  offer: ConsultantOffer;
+  relation: "below" | "above" | "equal";
+  difference: number;
+}
+
+export interface PriceState {
+  reference: PriceReference | null;
+  offers: ConsultantOffer[];
+  comparisons: PriceComparison[];
+  latestComparison: PriceComparison | null;
+}
+
+function compareOfferToReference(reference: PriceReference, offer: ConsultantOffer): PriceComparison {
+  const difference = Math.abs(offer.amount - reference.amount);
+  return {
+    reference,
+    offer,
+    relation: offer.amount < reference.amount ? "below" : offer.amount > reference.amount ? "above" : "equal",
+    difference,
+  };
+}
+
+// Builds price state from the transcript on every turn. The first explicitly
+// stated benchmark remains the reference for this negotiation; later consultant
+// offers are retained in order, which makes a concession that moves backwards
+// visible instead of letting the model rewrite the arithmetic from memory.
+export function derivePriceState(transcript: TranscriptMessage[]): PriceState {
+  let reference: PriceReference | null = null;
+  const offers: ConsultantOffer[] = [];
+
+  for (const message of transcript) {
+    const text = message.content.trim();
+    if (!text) continue;
+    const amounts = parsePriceAmounts(text);
+    if (amounts.length === 0) continue;
+
+    if (message.role === "customer") {
+      if (!reference && matchesAny(text, PRICE_REFERENCE_MARKERS)) {
+        reference = { amount: Math.max(...amounts), statement: text };
+      }
+      continue;
+    }
+
+    if (!matchesAny(text, PRICE_OFFER_MARKERS)) continue;
+    // A consultant can mention a list of figures, but the last one is normally
+    // the proposed all-in number ("was $31,200; I can do $29,700").
+    offers.push({ amount: amounts[amounts.length - 1], quote: text });
+  }
+
+  const latestOffer = offers[offers.length - 1];
+  const comparisons = reference ? offers.map((offer) => compareOfferToReference(reference!, offer)) : [];
+  return {
+    reference,
+    offers,
+    comparisons,
+    latestComparison: comparisons[comparisons.length - 1] ?? (reference && latestOffer ? compareOfferToReference(reference, latestOffer) : null),
+  };
+}
+
+export function buildPriceComparisonLines(priceState: PriceState): string[] {
+  const comparison = priceState.latestComparison;
+  if (!comparison) return [];
+  const fact =
+    comparison.relation === "equal"
+      ? `The consultant's latest offer of ${formatAmount(comparison.offer.amount)} is equal to your stated reference price of ${formatAmount(comparison.reference.amount)}.`
+      : `The consultant's latest offer of ${formatAmount(comparison.offer.amount)} is ${formatAmount(comparison.difference)} ${comparison.relation} your stated reference price of ${formatAmount(comparison.reference.amount)}.`;
+  return [
+    `- PRICE FACT (computed from the transcript, not estimated): ${fact} Treat this arithmetic as settled. Do not say a lower offer is above or worse than the reference price, and do not describe a higher offer as a better price.`,
+  ];
+}
+
 // A customer line that names a number as a target or a ceiling, rather than just
 // mentioning one in passing.
 const BUDGET_STATEMENT_MARKERS: RegExp[] = [
@@ -594,6 +720,7 @@ const SOFT_ASK_MARKERS: RegExp[] = [
   /\b(?:can|could|would) you\b[^.!?]{0,24}\b(?:tell|explain|give|show|walk)\b/i,
   /\btell me\b[^.!?]{0,16}\babout\b/i,
   /\b(?:want|need|like|love)\s+to\s+(?:know|hear|see|understand)\b/i,
+  /\b(?:want|need|like)\b[^.!?]{0,28}\b(?:confirm|make sure|double[- ]check)\b/i,
   /\b(?:curious|wondering)\b/i,
   /\bgive me\b[^.!?]{0,24}\b(?:information|info|details|idea|sense|rundown)\b/i,
 ];
@@ -637,6 +764,7 @@ const SUBJECT_STOPWORDS = new Set([
   "is", "are", "was", "were", "be", "do", "does", "did", "get", "got", "have", "has",
   "know", "tell", "like", "look", "really", "just", "so", "then", "now", "what",
   "how", "why", "when", "which", "who", "whole", "bit", "lot",
+  "can", "could", "would", "should", "please",
 ]);
 
 // Crude singularization, enough to tie "ratings" to "rating" without pulling in
@@ -681,6 +809,22 @@ export function extractAskedSubject(text: string): AskedSubject | null {
     if (keywords.length === 0) continue;
 
     return { label: phrase, keywords };
+  }
+
+  // Interrogative word order is not the only way people ask. "Are these safety
+  // features standard on the XLE trim?" and "Does the XLE include airbags?"
+  // carry their subject in the whole clause, so preserve its meaningful terms
+  // rather than discarding the question just because it starts with are/does.
+  if (matchesAny(text, SOFT_ASK_MARKERS)) {
+    const keywords = Array.from(
+      new Set(
+        text
+          .split(/\s+/)
+          .map(normalizeKeyword)
+          .filter((word) => word.length > 1 && !SUBJECT_STOPWORDS.has(word)),
+      ),
+    );
+    if (keywords.length > 0) return { label: text.trim(), keywords };
   }
   return null;
 }

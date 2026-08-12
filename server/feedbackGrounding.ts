@@ -20,7 +20,7 @@
 // trainee.
 
 import type { TranscriptMessage } from "@shared/schema";
-import { PROPOSAL_MARKERS, TOPIC_PATTERNS } from "./conversationState";
+import { derivePriceState, PROPOSAL_MARKERS, TOPIC_PATTERNS } from "./conversationState";
 
 export interface NumberedTurn {
   // 1-based position in the transcript as the graded prompts render it.
@@ -249,5 +249,37 @@ export function buildTimingGroundingBlock(
   return [
     "TIMING PRE-CHECK (read out of the transcript above by exact text match, before you write anything). This is fact about this specific conversation. Never contradict it:",
     ...lines,
+  ].join("\n");
+}
+
+function formatPrice(amount: number): string {
+  return `$${amount.toLocaleString("en-US", {
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+// Deterministic price facts for the scoring model. Reuses the customer-state
+// derivation rather than maintaining a second parser, so a customer reply and a
+// score can never disagree about the reference price, offer history, or simple
+// arithmetic. Returns no block until the transcript contains both a customer
+// reference and a consultant offer, leaving unrelated scoring prompts unchanged.
+export function buildPriceGroundingBlock(transcript: TranscriptMessage[]): string {
+  const state = derivePriceState(transcript);
+  if (!state.reference || state.comparisons.length === 0) return "";
+
+  const lines = state.comparisons.map((comparison, index) => {
+    const relationship =
+      comparison.relation === "equal"
+        ? `equal to the reference`
+        : `${formatPrice(comparison.difference)} ${comparison.relation} the reference`;
+    return `- Consultant offer ${index + 1}: ${formatPrice(comparison.offer.amount)} (${relationship} of ${formatPrice(comparison.reference.amount)}). Transcript line: "${comparison.offer.quote}"`;
+  });
+
+  return [
+    "PRICE PRE-CHECK (computed from the transcript's dollar figures before you write feedback). These facts are authoritative; never invert a lower/higher comparison or praise a later, higher offer as a price improvement:",
+    `- Customer reference price: ${formatPrice(state.reference.amount)}. Transcript line: "${state.reference.statement}"`,
+    ...lines,
+    "If you discuss price discipline, cite this actual history. Do not claim the consultant was above a reference when the computed comparison says below, and do not call a worse (higher) later offer a concession merely because the customer accepted it.",
   ].join("\n");
 }
