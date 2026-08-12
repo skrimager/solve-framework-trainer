@@ -37,7 +37,7 @@ function assertColdAndReactivePersona(slug: string, core: string): void {
 describe("all-vertical scenario consistency audit guards", () => {
   test("covers the full public portfolio across all 19 verticals with structured personas", () => {
     const publicScenarios = scenarios.filter((scenario) => !isInternalTestScenario(scenario.slug));
-    assert.equal(publicScenarios.length, 99);
+    assert.equal(publicScenarios.length, 114);
     assert.equal(new Set(publicScenarios.map((scenario) => scenario.vertical)).size, 19);
 
     for (const scenario of publicScenarios) {

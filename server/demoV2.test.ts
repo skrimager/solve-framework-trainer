@@ -133,6 +133,18 @@ describe("pickNextV2Scenario", () => {
     assert.equal(picked.id, 11);
   });
 
+  test("a single-scenario industry returns its only candidate on first and repeat visits", () => {
+    const singleIndustryPool: DemoV2ScenarioOption[] = [
+      { id: 73, slug: "demo-v2-apartment-rental-1", industry: "apartment_rental" },
+    ];
+
+    assert.equal(pickNextV2Scenario("apartment_rental", [], singleIndustryPool).id, 73);
+    assert.equal(
+      pickNextV2Scenario("apartment_rental", [{ scenarioId: 73 }], singleIndustryPool).id,
+      73,
+    );
+  });
+
   test("an empty industry pool throws rather than returning the wrong industry", () => {
     const autoOnly = POOL.filter((o) => o.industry === "auto");
     assert.throws(() => pickNextV2Scenario("real_estate", [], autoOnly));
@@ -146,8 +158,31 @@ describe("pickNextV2Scenario", () => {
 });
 
 describe("demo v2 industry metadata", () => {
-  test("exactly Auto and Real Estate are offered", () => {
-    assert.deepEqual(DEMO_V2_INDUSTRIES.map((o) => o.key), ["auto", "real_estate"]);
+  test("all demo industries are offered with their intended group", () => {
+    const expectedKeys = [
+      "auto",
+      "real_estate",
+      "apartment_rental",
+      "financial_advisor",
+      "home_improvement",
+      "hvac_sales",
+      "hvac_service",
+      "insurance_auto",
+      "manufactured_housing",
+      "manufactured_housing_community",
+      "pest_control",
+      "plumbing",
+      "pool_landscaping",
+      "roofing",
+      "saas",
+      "solar",
+      "employee_grievance",
+      "peer_conflict",
+      "upset_customer_service",
+    ];
+    assert.deepEqual(DEMO_V2_INDUSTRIES.map((o) => o.key), expectedKeys);
+    assert.equal(DEMO_V2_INDUSTRIES.filter((o) => o.group === "sales_service").length, 16);
+    assert.equal(DEMO_V2_INDUSTRIES.filter((o) => o.group === "leadership").length, 3);
   });
 
   test("every option has visitor-facing copy", () => {
@@ -158,43 +193,44 @@ describe("demo v2 industry metadata", () => {
   });
 
   test("industryForSlug maps every declared slug and rejects anything else", () => {
-    for (const slug of DEMO_V2_SLUGS.auto) assert.equal(industryForSlug(slug), "auto");
-    for (const slug of DEMO_V2_SLUGS.real_estate) assert.equal(industryForSlug(slug), "real_estate");
+    for (const [industry, slugs] of Object.entries(DEMO_V2_SLUGS)) {
+      for (const slug of slugs) assert.equal(industryForSlug(slug), industry);
+    }
     assert.equal(industryForSlug("real-estate-demo-buyer-30-days"), null);
   });
 
-  test("isDemoV2Industry rejects arbitrary input", () => {
-    assert.equal(isDemoV2Industry("auto"), true);
-    assert.equal(isDemoV2Industry("real_estate"), true);
-    assert.equal(isDemoV2Industry("apartment_rental"), false);
+  test("isDemoV2Industry resolves every declared key and rejects arbitrary input", () => {
+    for (const { key } of DEMO_V2_INDUSTRIES) assert.equal(isDemoV2Industry(key), true, key);
+    assert.equal(isDemoV2Industry("not_an_industry"), false);
     assert.equal(isDemoV2Industry(undefined), false);
   });
 
-  // The pool stays at three per industry even though the free allowance is now
-  // one session. Allowlisted founder emails run many sessions back to back and
-  // must not repeat a customer, and the pool is what a paid session will draw
-  // from, so shrinking it to match the free cap would be a regression.
-  test("three scenarios per industry, a pool wider than the free-session cap", () => {
+  test("the original industries retain their three-scenario pools and new industries use one", () => {
     assert.equal(DEMO_V2_SLUGS.auto.length, 3);
     assert.equal(DEMO_V2_SLUGS.real_estate.length, 3);
     assert.ok(DEMO_V2_SLUGS.auto.length > MAX_DEMO_SESSIONS);
     assert.ok(DEMO_V2_SLUGS.real_estate.length > MAX_DEMO_SESSIONS);
+    for (const [industry, slugs] of Object.entries(DEMO_V2_SLUGS)) {
+      if (industry === "auto" || industry === "real_estate") continue;
+      assert.equal(slugs.length, 1, industry);
+    }
   });
 });
 
 // ===========================================================================
-// The six seeded scenarios
+// The seeded scenarios
 // ===========================================================================
 
 describe("demo v2 seeded scenarios", () => {
   const rows = new Map(scenarios.filter((s) => DEMO_V2_ALL_SLUGS.includes(s.slug)).map((s) => [s.slug, s]));
+  const demoSpecificPersonaSlugs = DEMO_V2_ALL_SLUGS.filter((slug) => slug.startsWith("demo-v2-"));
 
-  test("all six slugs exist in the seed portfolio", () => {
-    assert.equal(rows.size, 6);
+  test("all demo slugs exist in the seed portfolio", () => {
+    assert.equal(rows.size, DEMO_V2_ALL_SLUGS.length);
     for (const slug of DEMO_V2_ALL_SLUGS) assert.ok(rows.has(slug), `missing ${slug}`);
   });
 
-  test("all six are beginner difficulty", () => {
+  test("all demo scenarios are beginner difficulty", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
       assert.equal(rows.get(slug)!.difficulty, "beginner", slug);
     }
@@ -203,12 +239,13 @@ describe("demo v2 seeded scenarios", () => {
   // The demo's whole premise is that no two sessions repeat, so two personas
   // sharing a voice reads as a repeat even when the scenarios differ. Resolved
   // against each row's seeded gender, which is authoritative over the voice.
-  test("all six resolve to distinct voices from their seeded gender", () => {
-    const voices = DEMO_V2_ALL_SLUGS.map((slug) => getVoiceForScenario(slug, rows.get(slug)!.gender));
+  test("the original six resolve to distinct curated voices from their seeded gender", () => {
+    const originalSlugs = [...DEMO_V2_SLUGS.auto, ...DEMO_V2_SLUGS.real_estate];
+    const voices = originalSlugs.map((slug) => getVoiceForScenario(slug, rows.get(slug)!.gender));
     assert.equal(new Set(voices).size, 6, `voice collision: ${voices.join(", ")}`);
   });
 
-  test("all six are active, because they are the live demo content", () => {
+  test("all demo scenarios are active, because they are the live demo content", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
       assert.equal(rows.get(slug)!.active, true, slug);
     }
@@ -217,13 +254,13 @@ describe("demo v2 seeded scenarios", () => {
   // active:true is what USED to keep these out of real training, so the guard has
   // to be somewhere else now. These two tests are the ones that would catch a
   // regression leaking demo content to paying trainees.
-  test("all six are flagged demo-only, so active:true is not the only gate", () => {
+  test("all demo scenarios are flagged demo-only, so active:true is not the only gate", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
       assert.equal(isDemoOnlyScenario(slug), true, slug);
     }
   });
 
-  test("realTrainingScenarios drops all six while keeping ordinary active scenarios", () => {
+  test("realTrainingScenarios drops all demo scenarios while keeping ordinary active scenarios", () => {
     const kept = realTrainingScenarios(
       scenarios.map((s) => ({ slug: s.slug, active: s.active ?? false })),
     );
@@ -237,8 +274,30 @@ describe("demo v2 seeded scenarios", () => {
   });
 
   test("verticals match the industry they are offered under", () => {
-    for (const slug of DEMO_V2_SLUGS.auto) assert.equal(rows.get(slug)!.vertical, "auto_sales", slug);
-    for (const slug of DEMO_V2_SLUGS.real_estate) assert.equal(rows.get(slug)!.vertical, "real_estate", slug);
+    const expectedVerticals = {
+      auto: "auto_sales",
+      real_estate: "real_estate",
+      apartment_rental: "apartment_rental",
+      employee_grievance: "employee_grievance",
+      financial_advisor: "financial_advisor",
+      home_improvement: "home_improvement",
+      hvac_sales: "hvac_sales",
+      hvac_service: "hvac_service",
+      insurance_auto: "insurance_auto",
+      manufactured_housing: "manufactured_housing",
+      manufactured_housing_community: "manufactured_housing_community",
+      peer_conflict: "peer_conflict",
+      pest_control: "pest_control",
+      plumbing: "plumbing",
+      pool_landscaping: "pool_landscaping",
+      roofing: "roofing",
+      saas: "saas",
+      solar: "solar",
+      upset_customer_service: "upset_customer_service",
+    };
+    for (const [industry, slugs] of Object.entries(DEMO_V2_SLUGS)) {
+      for (const slug of slugs) assert.equal(rows.get(slug)!.vertical, expectedVerticals[industry as keyof typeof expectedVerticals], slug);
+    }
   });
 
   test("real estate rows carry re_buyer_agent; auto rows carry no transaction type", () => {
@@ -252,9 +311,14 @@ describe("demo v2 seeded scenarios", () => {
     }
   });
 
-  test("all six resolve to the consulting track used by the discovery rubric", () => {
+  test("sales and service scenarios use the consulting track while leadership scenarios use the leadership track", () => {
     for (const slug of DEMO_V2_ALL_SLUGS) {
-      assert.equal(scenarioTrack(rows.get(slug)!.track), "consulting", slug);
+      const industry = industryForSlug(slug)!;
+      const expectedTrack =
+        DEMO_V2_INDUSTRIES.find((option) => option.key === industry)!.group === "leadership"
+          ? "leadership"
+          : "consulting";
+      assert.equal(scenarioTrack(rows.get(slug)!.track), expectedTrack, slug);
     }
   });
 
@@ -280,7 +344,7 @@ describe("demo v2 seeded scenarios", () => {
   });
 
   test("every persona states its opening stance and keeps the hidden need hidden", () => {
-    for (const slug of DEMO_V2_ALL_SLUGS) {
+    for (const slug of demoSpecificPersonaSlugs) {
       const core = personaVariantSeed[slug].core;
       assert.match(core, /Your opening stance:/, slug);
       assert.match(core, /do not volunteer it upfront/, slug);
@@ -289,7 +353,7 @@ describe("demo v2 seeded scenarios", () => {
   });
 
   test("every persona reserves discovery signals for a relevant current-message opening", () => {
-    for (const slug of DEMO_V2_ALL_SLUGS) {
+    for (const slug of demoSpecificPersonaSlugs) {
       const core = personaVariantSeed[slug].core;
       assert.doesNotMatch(core, /The one thing you DO volunteer early, unprompted:/, slug);
       assert.match(core, /current message genuinely opens|opening is the one exception/i, slug);
@@ -302,16 +366,16 @@ describe("demo v2 seeded scenarios", () => {
     }
   });
 
-  test("the six hidden motivations are all distinct", () => {
-    const motivations = DEMO_V2_ALL_SLUGS.flatMap((slug) => personaVariantSeed[slug].motivations);
+  test("the demo-specific hidden motivations are all distinct", () => {
+    const motivations = demoSpecificPersonaSlugs.flatMap((slug) => personaVariantSeed[slug].motivations);
     assert.equal(new Set(motivations).size, motivations.length);
   });
 
   test("no persona reuses another's opening stance", () => {
-    const openings = DEMO_V2_ALL_SLUGS.map(
+    const openings = demoSpecificPersonaSlugs.map(
       (slug) => personaVariantSeed[slug].core.match(/Your opening stance: (.*)/)?.[1] ?? slug,
     );
-    assert.equal(new Set(openings).size, 6);
+    assert.equal(new Set(openings).size, demoSpecificPersonaSlugs.length);
   });
 
   test("the v1 demo scenarios are untouched and still reachable by their own slugs", () => {
@@ -475,7 +539,7 @@ describe("demo v2 endpoints", () => {
     const res = await fetch(`${baseUrl}/api/demo/options`);
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.deepEqual(body.options.map((o: any) => o.key), ["auto", "real_estate"]);
+    assert.deepEqual(body.options.map((o: any) => o.key), DEMO_V2_INDUSTRIES.map((o) => o.key));
   });
 
   test("worked example 1: RE, RE, RE yields three distinct Real Estate scenarios", async () => {
@@ -536,7 +600,7 @@ describe("demo v2 endpoints", () => {
   test("a missing or invalid industry is rejected before any usage is spent", async () => {
     verifiedSignup("badindustry@example.com");
     const token = signDemoToken("badindustry@example.com");
-    for (const industry of [undefined, "", "apartment_rental"]) {
+    for (const industry of [undefined, "", "not_an_industry"]) {
       const res = await post("/api/demo/session", { token, industry });
       assert.equal(res.status, 400);
     }
@@ -664,7 +728,7 @@ describe("demo v2 endpoints", () => {
     const res = await post("/api/demo/session", { token: "bogus" });
     assert.equal(res.status, 400);
     const body = await res.json();
-    assert.match(body.message, /Auto Sales or Real Estate/);
+    assert.match(body.message, /choose an industry/i);
   });
 
   test("the old parallel /api/demo-v2/* prefix no longer resolves", async () => {
