@@ -9,8 +9,10 @@ import {
   buildConversationStateLines,
   buildFinalAnsweredQuestionGate,
   buildDirectQuestionLines,
+  buildRepetitionCalloutLines,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveRepetitionCallout,
   extractAskedSubject,
   hasCustomerAcceptedProposal,
   parseMoneyAmounts,
@@ -950,6 +952,89 @@ describe("Rule G: derivation is pure and additive", () => {
   test("it does not disturb the cross-turn conversation state", () => {
     // The PR #87 state derivation is untouched: a plain discovery question still
     // produces no conversation-state lines.
+    assert.deepEqual(
+      buildConversationStateLines(
+        deriveConversationState(t("c: I need something reliable.", "r: What does your commute look like?")),
+      ),
+      [],
+    );
+  });
+});
+
+describe("Rule R: explicit repetition callouts trigger immediate de-escalation", () => {
+  test("detects an ordinal count phrasing (the real Renee transcript wording)", () => {
+    assert.equal(
+      deriveRepetitionCallout(
+        t("r: Yes, like I said, they come standard on all of the Rav 4 models. That's the third time I've told you they come standard on the Rav 4 models."),
+      ),
+      true,
+    );
+  });
+
+  test("detects a cardinal count phrasing", () => {
+    assert.equal(deriveRepetitionCallout(t("r: You've asked me 4 Times Now, and the answer hasn't changed.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: I've told you 5 Times Now, it's included in the price.")), true);
+  });
+
+  test("detects 'twice now' phrasing without an explicit ordinal", () => {
+    assert.equal(
+      deriveRepetitionCallout(t("r: I've already told you twice now, it should hold, so let's leave it there for the moment.")),
+      true,
+    );
+  });
+
+  test("detects 'already told you' and 'like I said... before' framings", () => {
+    assert.equal(deriveRepetitionCallout(t("r: I already told you it's covered under the standard warranty.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: Like I said before, the financing rate is fixed at 4.9%.")), true);
+  });
+
+  test("detects 'you keep asking the same' and 'asked that already' framings", () => {
+    assert.equal(deriveRepetitionCallout(t("r: You keep asking the same question about the mileage.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: You've asked me that already, it's the same trim.")), true);
+  });
+
+  test("does not fire on an ordinary rep statement or question", () => {
+    assert.equal(deriveRepetitionCallout(t("r: What brings you in today?")), false);
+    assert.equal(deriveRepetitionCallout(t("r: The RAV4 comes with a great warranty package.")), false);
+    assert.equal(deriveRepetitionCallout(t("r: This is the third RAV4 we've had on the lot this week.")), false);
+  });
+
+  test("only looks at the rep's live last line, mirroring deriveDirectQuestion", () => {
+    // A callout buried earlier in the transcript, with the customer speaking
+    // last, must not fire — only the rep's most recent line matters.
+    assert.equal(
+      deriveRepetitionCallout(
+        t("r: That's the third time I've told you.", "c: Okay, fine, let's move on to pricing."),
+      ),
+      false,
+    );
+  });
+
+  test("does not fire on a customer line, even with matching language", () => {
+    // The callout direction is rep-calls-out-customer, not the reverse.
+    assert.equal(
+      deriveRepetitionCallout(t("c: I've already told you twice now, I don't want to discuss the trade-in.")),
+      false,
+    );
+  });
+
+  test("buildRepetitionCalloutLines is empty when no callout, non-empty when detected", () => {
+    assert.deepEqual(buildRepetitionCalloutLines(false), []);
+    const lines = buildRepetitionCalloutLines(true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /THIS TURN/);
+    assert.match(lines[0], /acknowledge|accept/i);
+  });
+
+  test("derivation is pure: same transcript yields the same lines", () => {
+    const transcript = t("r: That's the third time I've told you they come standard.");
+    assert.deepEqual(
+      buildRepetitionCalloutLines(deriveRepetitionCallout(transcript)),
+      buildRepetitionCalloutLines(deriveRepetitionCallout(transcript)),
+    );
+  });
+
+  test("does not disturb cross-turn conversation state for an unrelated transcript", () => {
     assert.deepEqual(
       buildConversationStateLines(
         deriveConversationState(t("c: I need something reliable.", "r: What does your commute look like?")),
