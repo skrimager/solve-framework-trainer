@@ -7,8 +7,10 @@ import {
   buildFinalAnsweredQuestionGate,
   buildConversationStateLines,
   buildDirectQuestionLines,
+  buildRepetitionCalloutLines,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveRepetitionCallout,
   hasCustomerAcceptedProposal,
   repeatsClosedAnsweredQuestion,
 } from "./conversationState";
@@ -435,6 +437,11 @@ export function buildTurnStateBlock(transcript: TranscriptMessage[]): string {
       `- The consultant's most recent message, which you are replying to right now: "${lastConsultant.content.trim()}". Whatever you say next must make sense as a response to this, and must be consistent with everything they have already told you, promised you, given you, or asked you earlier in the conversation.`
     );
   }
+  // An explicit repetition callout takes priority over everything else this
+  // turn: a live-model-confirmed gap showed the customer redirecting through
+  // two or three more callouts before finally acknowledging one. Placed first
+  // so it is the most salient instruction the model reads about this turn.
+  lines.push(...buildRepetitionCalloutLines(deriveRepetitionCallout(transcript)));
   // The live question, if they asked one. Sits right after the message it came
   // from, because "which question am I on the hook for" is what a long
   // transcript buries and what a static rule cannot say.

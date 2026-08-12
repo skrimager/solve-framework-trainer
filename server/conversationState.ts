@@ -1173,6 +1173,56 @@ export function buildDirectQuestionLines(question: DirectQuestionState | null): 
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Explicit repetition callout: the rep directly states, in their own words,
+// that they have already answered or explained something multiple times
+// ("that's the third time I've told you", "you've asked me 4 times now",
+// "I've already told you that"). This is a real, live-model-confirmed gap:
+// the customer eventually stopped repeating itself, but only after two or
+// three more rep callouts, not on the FIRST one. A rep who has to say this
+// out loud has already been visibly ignored; the customer's next line must
+// show that landing immediately, not several turns later.
+//
+// Deliberately narrow and marker-based rather than "any rep frustration", so
+// it only fires on an explicit, unambiguous repetition statement and cannot
+// be confused with ordinary firmness, a single restated answer, or a rep
+// simply repeating information without commenting on the repetition itself.
+// ---------------------------------------------------------------------------
+const REPETITION_CALLOUT_MARKERS: RegExp[] = [
+  // Explicit counts, cardinal or ordinal: "third time", "4 times now",
+  // "twice now", "5 times", "fourth time I've told you".
+  /\b(?:that'?s the )?(?:\d+(?:st|nd|rd|th)?|one|two|three|four|five|six|seven|eight|nine|ten|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+times?\b.{0,25}\b(?:i'?ve\s+(?:told|said|explained|answered|mentioned)|you'?ve\s+asked|asking)\b/i,
+  /\b(?:i'?ve\s+(?:told|said|explained|answered|mentioned)|you'?ve\s+asked)\b.{0,25}\b(?:\d+(?:st|nd|rd|th)?|one|two|three|four|five|six|seven|eight|nine|ten|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+times?\b/i,
+  /\btwice now\b/i,
+  // Direct "I already told/said/answered/explained this/that" without a count.
+  /\bi(?:'ve| have)?\s+already\s+(?:told|said|explained|answered|mentioned)\s+you\b/i,
+  /\blike i\s+(?:said|told you|mentioned|explained)\s+(?:earlier|before|already)\b/i,
+  // "you keep asking / you keep asking the same" framing.
+  /\byou\s+keep\s+asking\s+(?:the\s+same|me\s+the\s+same)\b/i,
+  /\byou'?ve\s+asked\s+(?:me\s+)?that\s+(?:already|before)\b/i,
+];
+
+// True when the rep's most recent message contains an explicit repetition
+// callout. Only looks at the rep's live line, mirroring deriveDirectQuestion,
+// so this only ever fires on the turn the callout actually happened, not on
+// stale earlier ones.
+export function deriveRepetitionCallout(transcript: TranscriptMessage[]): boolean {
+  const spoken = transcript.filter((m) => m.content.trim().length > 0);
+  const last = spoken.at(-1);
+  if (!last || last.role !== "consultant") return false;
+  return matchesAny(last.content.trim(), REPETITION_CALLOUT_MARKERS);
+}
+
+// Renders the callout as a prompt line demanding immediate acknowledgment.
+// Empty array when no callout was detected, so a normal turn is byte-identical
+// to the prior prompt.
+export function buildRepetitionCalloutLines(hasCallout: boolean): string[] {
+  if (!hasCallout) return [];
+  return [
+    `- THE CONSULTANT JUST EXPLICITLY CALLED OUT THAT YOU ARE REPEATING YOURSELF (a direct statement like "that's the third time I've told you" or "you've asked me that already"). This must land THIS TURN, not two or three turns from now. Your reply must genuinely acknowledge or accept what they just said, drop the repeated ask, and either pivot to a new topic or move the conversation forward (for example: "you're right, sorry, let's move on to..." or a real concession). Do not restate the same question in different words, do not ignore the callout and ask something adjacent that is really the same ask, and do not wait for a second or third callout before you react. One clear callout is enough.`,
+  ];
+}
+
 export function deriveConversationState(transcript: TranscriptMessage[]): ConversationState {
   return {
     deflectedTopics: deriveDeflectedTopics(transcript),
