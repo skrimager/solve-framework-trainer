@@ -761,12 +761,81 @@ export const STALL_DIAGNOSIS_RULES = `STALL AND OBJECTION DIAGNOSIS:
 The controlling evaluative question is: "Did this consultant help the customer make a better decision than they would have made without them?" Judge this skill by the quality of the customer's decision, not by whether the consultant got a yes.
 - Use "stall" for a delay tactic such as "let me think about it," "let me talk to my partner," "send me some information," or "let me sleep on it." A stall often surfaces because something was never fully resolved earlier. An objection is a reaction to something real, such as price, a specific feature, or another genuine concern. Do not argue with either one. Diagnose the decision behind it.
 - Apply this everywhere in SOLVE, not only near a close: Situation, Open, Listen, Visualize Success, Engineer, Confirm, and Solve. If a customer answers a discovery question with "I don't know, I'll have to talk to my wife about that," that is stall-shaped language to address there, not something to leave until the end. Treat every stall- or objection-shaped statement as a live chance to complete the discovery that was missed earlier.
-- Never answer an assumption. Investigate before explaining or differentiating. For "You're more expensive," a defensive "We're worth more" is weak; "What are you comparing us against?" is strong. Validate before investigating with language such as "I understand" or "That's fair," then use purposeful origin, evidence, decision-process, or stakeholder questions.
+- Never answer an assumption. Investigate before explaining or differentiating. For "You're more expensive," a defensive "We're worth more" is weak; "What are you comparing us against?" is strong. Validate before investigating with language such as "I understand" or "That's fair," then use purposeful origin, evidence, decision-process, stakeholder, or analogy questions. An analogy question uses a familiar situation to uncover decision-making behavior, such as "Would your wife be surprised if you hired a moving company today?"
 - Deconstruct rather than guess. "I need to talk to my wife" can mean price, trust, timing, fear, wanting the spouse involved, or needing more information. Reward a consultant who lets the customer name the specific concern, reflects it back to confirm understanding, and engineers a solution tied to that named concern.
 - Reward advisor behavior over defense: "Let's compare them together," "I don't know why they are less expensive, and I would want to understand why," and "Let's figure this out together." Credit shared language that shifts the conversation from "me versus you" to "us versus the decision." Penalize competitor attacks, unsupported speculation, or telling the customer what to conclude.
 - For an unconsulted-stakeholder stall such as "I need to talk to my spouse or partner," highly reward this process: (1) validate the stall completely without resisting it; (2) ask where the stakeholder is or what they do; (3) ask whether they knew about this conversation; (4) use a branching hypothetical to narrow the real concern; (5) let the customer name that specific concern; (6) reflect and confirm it; (7) engineer a specific solution tied to it; and (8) confirm that the fix resolves it before a natural next step. A consultant who jumps straight to "what is really the issue?" or guesses should score lower even if the guess happens to be right, because the skill being tested is the process of drawing the concern out.
 - Give high credit to direct, transparent diagnostic questioning such as: "It sounded like we were on board with the whole picture until now, and if there is something you need to think about, that usually means there is a piece of the solution we did not quite nail. What part are you not sure about?" Also reward respectfully naming a contradiction with a fact the customer disclosed earlier in this same conversation, then offering a real next step, such as inviting a previously approving stakeholder to join the conversation.
 - Reward clarity over volume: one good question, then silence and room for the customer to answer. Penalize interrupting, answering the consultant's own questions, repeating the same point several ways, stacking multiple questions before the customer can respond, talking significantly longer than necessary, defending price before understanding the comparison, assuming the concern, arguing, pressuring, attacking competitors, or speculating without evidence.`;
+
+// Fixed, queryable vocabulary for the structured evidence captured only on
+// dedicated Stall & Excuse Handling sessions. These values deliberately reuse
+// the short names and phrases in STALL_DIAGNOSIS_RULES rather than creating a
+// second taxonomy beside the scoring guidance.
+export const STALL_EVIDENCE_QUESTION_TYPES = [
+  "origin",
+  "decision-process",
+  "evidence",
+  "stakeholder",
+  "analogy",
+] as const;
+
+export const STALL_EVIDENCE_RED_FLAGS = [
+  "defending price before understanding the comparison",
+  "interrupting",
+  "assuming the concern",
+  "arguing",
+  "speculating without evidence",
+  "answering the consultant's own questions",
+] as const;
+
+export const STALL_EVIDENCE_REWARDED_BEHAVIORS = [
+  "using silence",
+  "summarizing before explaining",
+  "letting the customer reach their own conclusion",
+] as const;
+
+export type StallEvidence = {
+  questionTypesUsed: string[];
+  redFlagsTriggered: string[];
+  rewardedBehaviorsObserved: string[];
+};
+
+const STALL_EVIDENCE_RESPONSE_INSTRUCTION = `THIS IS A STALL & EXCUSE HANDLING SESSION. Extend (do not replace) the required scoring JSON with:
+"stallEvidence": {
+  "questionTypesUsed": string[],
+  "redFlagsTriggered": string[],
+  "rewardedBehaviorsObserved": string[]
+}
+Use only these exact strings. Use [] when none apply; do not add any other values.
+- questionTypesUsed: "origin" (where the belief came from), "decision-process" (how the decision is made), "evidence" (what supports the belief), "stakeholder" (who else is involved), "analogy" (a familiar situation used to uncover decision-making behavior, such as "Would your wife be surprised if you hired a moving company today?")
+Include "analogy" whenever the consultant uses a familiar hypothetical or comparison to uncover decision-making behavior.
+- redFlagsTriggered: "defending price before understanding the comparison", "interrupting", "assuming the concern", "arguing", "speculating without evidence", "answering the consultant's own questions"
+- rewardedBehaviorsObserved: "using silence", "summarizing before explaining", "letting the customer reach their own conclusion"`;
+
+function hasOnlyAllowedStrings(value: unknown, allowed: readonly string[]): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && allowed.includes(item));
+}
+
+// The evidence is independent of the rubric's five fixed numeric keys. A
+// malformed optional object must never prevent the existing scoring pipeline
+// from completing, so invalid/missing evidence cleanly becomes null.
+export function parseStallEvidence(value: unknown): StallEvidence | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const evidence = value as Record<string, unknown>;
+  if (
+    !hasOnlyAllowedStrings(evidence.questionTypesUsed, STALL_EVIDENCE_QUESTION_TYPES) ||
+    !hasOnlyAllowedStrings(evidence.redFlagsTriggered, STALL_EVIDENCE_RED_FLAGS) ||
+    !hasOnlyAllowedStrings(evidence.rewardedBehaviorsObserved, STALL_EVIDENCE_REWARDED_BEHAVIORS)
+  ) {
+    return null;
+  }
+  return {
+    questionTypesUsed: evidence.questionTypesUsed,
+    redFlagsTriggered: evidence.redFlagsTriggered,
+    rewardedBehaviorsObserved: evidence.rewardedBehaviorsObserved,
+  };
+}
 
 // Renders a transcript for any graded prompt (scoring, the recommendation gate,
 // coaching) so all of them see the identical, unambiguously attributed text.
@@ -1236,7 +1305,12 @@ export function detectCloseIntent(text: string): boolean {
 }
 
 // The scoring result shape returned to callers and cached verbatim.
-export type ScoreResult = { rubric: RubricScores | LeadershipRubricScores; feedback: string; overall: number };
+export type ScoreResult = {
+  rubric: RubricScores | LeadershipRubricScores;
+  feedback: string;
+  overall: number;
+  stallEvidence: StallEvidence | null;
+};
 
 // The one API call scoreTranscript makes, factored out so tests can inject a
 // spy/stub without reaching OpenAI. Mirrors the WrittenGradeResponder seam:
@@ -1303,9 +1377,10 @@ export const RUBRIC_VERSION = 1;
 // guarantee identical output even at temperature 0, so this cache — not
 // model-level determinism — is what makes repeat scoring reproducible.
 //
-// `deps` is injected only by tests (spy responder + in-memory cache); production
-// callers pass nothing and get the real OpenAI client and Postgres-backed
-// storage. The public 4-arg signature is unchanged so existing callers work.
+// `deps` is injected only by tests (spy responder + in-memory cache); the real
+// session completion route additionally passes the scenario's internal
+// stallType so only dedicated stall sessions request structured evidence. The
+// public 4-arg signature is unchanged so existing callers work.
 export async function scoreTranscript(
   transcript: TranscriptMessage[],
   difficulty: string = "intermediate",
@@ -1323,10 +1398,16 @@ export async function scoreTranscript(
   // a cut-short conversation as if it had a normal ending. Left undefined by
   // every other caller (including server/routes.ts's real-session call,
   // which must stay byte-for-byte unchanged), so this is purely additive.
-  deps: { responder?: ScoreResponder; cache?: ScoreCacheStore; noRecommendationHint?: boolean } = {}
+  deps: {
+    responder?: ScoreResponder;
+    cache?: ScoreCacheStore;
+    noRecommendationHint?: boolean;
+    stallType?: string | null;
+  } = {}
 ): Promise<ScoreResult> {
   const responder = deps.responder ?? defaultScoreResponder;
   const cache = deps.cache ?? storage;
+  const isStallSession = Boolean(deps.stallType);
 
   // Deterministic short-circuit: identical inputs return the stored result and
   // make no API call. computeScoreCacheHash's own signature stays untouched
@@ -1335,12 +1416,16 @@ export async function scoreTranscript(
   // same transcript must never collide on the same cache entry, since the
   // hinted one asks the model to write different feedback.
   const contentHash = computeScoreCacheHash(transcript, difficulty, track, transactionType) + (deps.noRecommendationHint ? ":no-rec" : "");
-  const cached = await cache.getScoreCacheEntry(contentHash);
+  // score_cache predates stallEvidence and holds only rubric/feedback/overall.
+  // Do not read or write it for stall sessions, where returning cached feedback
+  // without the separately requested evidence would lose the new session data.
+  const cached = isStallSession ? undefined : await cache.getScoreCacheEntry(contentHash);
   if (cached) {
     return {
       rubric: JSON.parse(cached.rubric) as RubricScores | LeadershipRubricScores,
       feedback: cached.feedback,
       overall: cached.overall,
+      stallEvidence: null,
     };
   }
 
@@ -1364,9 +1449,12 @@ export async function scoreTranscript(
   // Stable rubric + calibration lead; the volatile transcript comes last so the
   // rubric prefix (identical for every session at the same track/difficulty/type)
   // can be served from cache.
-  const stablePrefix = txnCalibration
+  const rubricPrefix = txnCalibration
     ? `${system}\n\n${calibration}\n\n${txnCalibration}`
     : `${system}\n\n${calibration}`;
+  const stablePrefix = isStallSession
+    ? `${rubricPrefix}\n\n${STALL_EVIDENCE_RESPONSE_INSTRUCTION}`
+    : rubricPrefix;
 
   // Per-session facts about what the transcript contains, so TIMING_FEEDBACK_RULES
   // has something deterministic to apply instead of the model's recollection. It
@@ -1405,6 +1493,7 @@ export async function scoreTranscript(
   const rubric = Object.fromEntries(keys.map((k) => [k, parsed[k] ?? 0])) as unknown as
     | RubricScores
     | LeadershipRubricScores;
+  const stallEvidence = isStallSession ? parseStallEvidence(parsed.stallEvidence) : null;
 
   // Consulting sessions use the tiered recommendation + client-buy-in weighting
   // (see computeConsultingOverall). Leadership sessions keep the flat mean of
@@ -1418,22 +1507,24 @@ export async function scoreTranscript(
         closeExpectationForTransactionType(transactionType)
       );
 
-  const result: ScoreResult = { rubric, feedback: parsed.feedback ?? "", overall };
+  const result: ScoreResult = { rubric, feedback: parsed.feedback ?? "", overall, stallEvidence };
 
   // Persist under the content hash so the identical input returns this exact
   // result next time with no API call. The raw transcript + params are stored
   // for debuggability; lookups key only on contentHash.
-  await cache.createScoreCacheEntry({
-    contentHash,
-    rubric: JSON.stringify(result.rubric),
-    feedback: result.feedback,
-    overall: result.overall,
-    track,
-    difficulty,
-    transactionType: transactionType ?? null,
-    transcript: JSON.stringify(transcript.map((m) => ({ role: m.role, content: m.content }))),
-    createdAt: new Date().toISOString(),
-  });
+  if (!isStallSession) {
+    await cache.createScoreCacheEntry({
+      contentHash,
+      rubric: JSON.stringify(result.rubric),
+      feedback: result.feedback,
+      overall: result.overall,
+      track,
+      difficulty,
+      transactionType: transactionType ?? null,
+      transcript: JSON.stringify(transcript.map((m) => ({ role: m.role, content: m.content }))),
+      createdAt: new Date().toISOString(),
+    });
+  }
 
   return result;
 }

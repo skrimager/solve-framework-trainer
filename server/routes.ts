@@ -411,9 +411,16 @@ export function registerScenarioAndSessionRoutes(app: Express): void {
   });
 }
 
+export type RegisterRoutesOptions = {
+  // Test-only seam for the real session completion handler. Production keeps
+  // scoreTranscript; tests can exercise persistence without a model call.
+  practiceSessionScorer?: typeof scoreTranscript;
+};
+
 export async function registerRoutes(
   httpServer: Server,
-  app: Express
+  app: Express,
+  opts: RegisterRoutesOptions = {},
 ): Promise<Server> {
   await seed();
 
@@ -1225,13 +1232,21 @@ export async function registerRoutes(
       // its track (consulting vs. leadership uses a different rubric).
       const scenario = await storage.getScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
+      const scoringResult = opts.practiceSessionScorer
+        ? await opts.practiceSessionScorer(transcript, scenario?.difficulty, track, scenario?.transactionType, {
+            stallType: scenario?.stallType ?? null,
+          })
+        : await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType, {
+            stallType: scenario?.stallType ?? null,
+          });
+      const { rubric, feedback, overall, stallEvidence } = scoringResult;
 
       const completedAt = new Date().toISOString();
       const updated = await storage.updateSession(session.id, {
         status: "completed",
         score: overall,
         rubricScores: JSON.stringify(rubric),
+        stallEvidence: stallEvidence ? JSON.stringify(stallEvidence) : null,
         feedback,
         completedAt,
         scenarioVersion: scenario?.version ?? null,

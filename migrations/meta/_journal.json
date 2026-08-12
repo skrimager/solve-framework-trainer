@@ -260,6 +260,13 @@
       "when": 1783106670500,
       "tag": "0036_stall_excuse_handling",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1783867140000,
+      "tag": "0037_session_stall_evidence",
+      "breakpoints": true
     }
   ]
 }

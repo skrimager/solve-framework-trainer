@@ -187,6 +187,7 @@ export const sessions = pgTable("sessions", {
   transcript: text("transcript").notNull().default("[]"), // JSON array of {role, content, audioUrl?}
   score: integer("score"), // 0-100 overall, set on completion
   rubricScores: text("rubric_scores"), // JSON: per-dimension scores, set on completion
+  stallEvidence: text("stall_evidence"), // JSON: { questionTypesUsed: string[], redFlagsTriggered: string[], rewardedBehaviorsObserved: string[] } — null except for stall-type sessions
   feedback: text("feedback"), // narrative feedback, set on completion
   // Versions are stamped at completion. They intentionally remain null for
   // sessions completed before version tracking existed.

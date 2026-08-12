@@ -19,6 +19,9 @@ import {
   streamCustomerReply,
   checkVulgarBaitStrike,
   STALL_DIAGNOSIS_RULES,
+  STALL_EVIDENCE_QUESTION_TYPES,
+  STALL_EVIDENCE_RED_FLAGS,
+  STALL_EVIDENCE_REWARDED_BEHAVIORS,
   type ScoreResponder,
   type ScoreCacheStore,
 } from "./llm";
@@ -1145,6 +1148,122 @@ describe("scoreTranscript - deterministic content-hash cache", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Structured stall evidence is a separate optional extraction. These tests
+// intentionally mock only the score responder: they verify response shape and
+// graceful parsing without making any conversational-quality claim.
+// ---------------------------------------------------------------------------
+describe("scoreTranscript - structured stallEvidence", () => {
+  const stallTranscript = [
+    turn("customer", "I need to think about it because another company is cheaper."),
+    turn("consultant", "That's fair. What are you comparing us against?"),
+    turn("customer", "They gave me a lower quote, but I do not know what it includes."),
+    turn("consultant", "Would it help to compare the two quotes together?"),
+  ];
+
+  const scoringResponse = (stallEvidence: unknown) =>
+    JSON.stringify({
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+      closeOutcome: "client_asked_next_steps",
+      feedback: "Specific, grounded coaching feedback.",
+      stallEvidence,
+    });
+
+  test("returns populated fixed-vocabulary evidence for a stall-type session", async () => {
+    const cache = makeInMemoryCache();
+    let prompt = "";
+    const responder: ScoreResponder = async (input) => {
+      prompt = input;
+      return scoringResponse({
+        questionTypesUsed: ["origin", "evidence"],
+        redFlagsTriggered: ["interrupting"],
+        rewardedBehaviorsObserved: ["using silence", "letting the customer reach their own conclusion"],
+      });
+    };
+
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, {
+      responder,
+      cache,
+      stallType: "think_it_over",
+    });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.deepEqual(result.stallEvidence, {
+      questionTypesUsed: ["origin", "evidence"],
+      redFlagsTriggered: ["interrupting"],
+      rewardedBehaviorsObserved: ["using silence", "letting the customer reach their own conclusion"],
+    });
+    assert.ok(prompt.includes("THIS IS A STALL & EXCUSE HANDLING SESSION"));
+    for (const questionType of STALL_EVIDENCE_QUESTION_TYPES) {
+      assert.ok(prompt.includes(`"${questionType}"`));
+    }
+    assert.match(prompt, /"analogy" \(a familiar situation used to uncover decision-making behavior/);
+    assert.match(prompt, /Include "analogy" whenever the consultant uses a familiar hypothetical or comparison/);
+    assert.ok(prompt.includes(STALL_EVIDENCE_RED_FLAGS.join('", "')));
+    assert.ok(prompt.includes(STALL_EVIDENCE_REWARDED_BEHAVIORS.join('", "')));
+    assert.equal(cache.size(), 0, "stall evidence must not be lost to the legacy score cache");
+  });
+
+  test("keeps non-stall scoring unchanged and returns null evidence", async () => {
+    const cache = makeInMemoryCache();
+    let prompt = "";
+    const responder: ScoreResponder = async (input) => {
+      prompt = input;
+      return scoringResponse({
+        questionTypesUsed: ["not a permitted value"],
+        redFlagsTriggered: [],
+        rewardedBehaviorsObserved: [],
+      });
+    };
+
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, { responder, cache });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.equal(result.stallEvidence, null);
+    assert.ok(!prompt.includes("THIS IS A STALL & EXCUSE HANDLING SESSION"));
+    assert.equal(cache.size(), 1, "the established non-stall score cache behavior remains unchanged");
+  });
+
+  test("treats malformed or missing stall evidence as null without blocking rubric scoring", async () => {
+    const malformedEvidence = {
+      questionTypesUsed: "origin",
+      redFlagsTriggered: ["interrupting"],
+      rewardedBehaviorsObserved: ["using silence"],
+    };
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, {
+      responder: async () => scoringResponse(malformedEvidence),
+      cache: makeInMemoryCache(),
+      stallType: "think_it_over",
+    });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.equal(result.feedback, "Specific, grounded coaching feedback.");
+    assert.equal(result.stallEvidence, null);
+  });
+});
+
 describe("computeScoreCacheHash - stability and sensitivity", () => {
   const transcript = [
     turn("consultant", "Hello there."),
@@ -1907,6 +2026,8 @@ describe("STALL_DIAGNOSIS_RULES - scoring stalls and objections as diagnostic mo
     assert.match(STALL_DIAGNOSIS_RULES, /Never answer an assumption/);
     assert.match(STALL_DIAGNOSIS_RULES, /What are you comparing us against/);
     assert.match(STALL_DIAGNOSIS_RULES, /Validate before investigating/);
+    assert.match(STALL_DIAGNOSIS_RULES, /origin, evidence, decision-process, stakeholder, or analogy questions/);
+    assert.match(STALL_DIAGNOSIS_RULES, /An analogy question uses a familiar situation to uncover decision-making behavior/);
     assert.match(STALL_DIAGNOSIS_RULES, /lets the customer name the specific concern/);
     assert.match(STALL_DIAGNOSIS_RULES, /us versus the decision/);
   });
