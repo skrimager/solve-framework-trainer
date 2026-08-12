@@ -634,6 +634,18 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     assert.equal(q!.narrowing, false);
   });
 
+  test("auxiliary-inversion questions count without terminal punctuation", () => {
+    for (const ask of [
+      "Does that sound like what you were expecting",
+      "Would that work for your budget",
+      "Is that something you'd consider",
+    ]) {
+      const q = deriveDirectQuestion(t(`r: ${ask}`));
+      assert.ok(q, `${ask} must be detected as a live ask`);
+      assert.deepEqual(q!.asks, [ask]);
+    }
+  });
+
   test("a rep message that asks nothing produces no lines", () => {
     assert.equal(deriveDirectQuestion(t("c: Hi.", "r: Nice to meet you, I'm Sam.")), null);
     assert.deepEqual(buildDirectQuestionLines(null), []);
