@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
+import { compareUserPassword, hashUserPassword } from "./userPasswords";
 import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike, RUBRIC_VERSION } from "./llm";
 import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
@@ -839,120 +840,7 @@ export async function registerRoutes(
     }
   });
 
-  // --- Auth (simple demo-credential login, no sessions/passwords hashing needed for pilot) ---
-  app.post("/api/login", async (req, res) => {
-    const { username, password } = req.body ?? {};
-    const user = await storage.getUserByUsername(username ?? "");
-    if (!user || user.password !== password) {
-      return res.status(401).json({ message: "Invalid username or password" });
-    }
-    res.json(publicUser(user));
-  });
-
-  // --- Registration (self-serve office sign-up) ---
-  app.post("/api/register/manager", async (req, res) => {
-    const schema = z.object({
-      officeName: z.string().trim().min(1, "Office name is required"),
-      username: z.string().trim().min(1, "Username is required"),
-      password: z.string().min(1, "Password is required"),
-      displayName: z.string().trim().min(1, "Your name is required"),
-    });
-    const parsed = schema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
-    }
-    const { officeName, username, password, displayName } = parsed.data;
-
-    const existing = await storage.getUserByUsername(username);
-    if (existing) {
-      return res.status(409).json({ message: "That username is already taken. Please choose another." });
-    }
-
-    const inviteCode = await generateUniqueInviteCode();
-    // Free-path offices start PENDING: the manager can register and log in, but the
-    // office cannot practice until an admin activates it (see checkSeatAccess and the
-    // admin Vault activate action). Paid self-serve offices are provisioned active by
-    // the Stripe webhook, and all pre-existing offices are grandfathered active by the
-    // status column default.
-    const office = await storage.createOffice({
-      name: officeName,
-      inviteCode,
-      createdAt: new Date().toISOString(),
-      status: "pending",
-    });
-    const user = await storage.createUser({
-      officeId: office.id,
-      username,
-      password,
-      role: "manager",
-      displayName,
-      currentLevel: "beginner",
-    });
-
-    res.json({ user: publicUser(user), office });
-  });
-
-  app.post("/api/register/consultant", async (req, res) => {
-    const schema = z.object({
-      inviteCode: z.string().trim().min(1, "Invite code is required"),
-      username: z.string().trim().min(1, "Username is required"),
-      password: z.string().min(1, "Password is required"),
-      displayName: z.string().trim().min(1, "Your name is required"),
-    });
-    const parsed = schema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
-    }
-    const { inviteCode, username, password, displayName } = parsed.data;
-
-    const office = await storage.getOfficeByInviteCode(inviteCode.trim().toUpperCase());
-    if (!office) {
-      return res.status(404).json({ message: "That invite code doesn't match any office. Double-check it with your manager." });
-    }
-
-    // A consultant may join an office that is active OR a free-path office still
-    // pending admin activation (so the team can be assembled before go-live; they
-    // are gated from practice by office.status in checkSeatAccess). Any other
-    // inactive office (e.g. a lapsed paid subscription) still blocks joining.
-    if (!officeIsActive(office) && office.status !== "pending") {
-      return res.status(402).json({ message: "This office's subscription isn't active yet. Ask your manager to complete billing setup." });
-    }
-
-    const existing = await storage.getUserByUsername(username);
-    if (existing) {
-      return res.status(409).json({ message: "That username is already taken. Please choose another." });
-    }
-
-    // Increment the Stripe seat quantity BEFORE creating the user, so a billing
-    // failure never yields a free seat. Skipped only when Stripe isn't configured
-    // (dev/demo), in which case the seat is granted locally.
-    let seatActive = true;
-    if (isStripeConfigured() && office.stripeSubscriptionId) {
-      try {
-        const targetQty = (await storage.countPaidSeats(office.id)) + 1;
-        await setSeatQuantity(office, targetQty);
-        await storage.updateOffice(office.id, { activeSeatCount: targetQty });
-      } catch (err: any) {
-        console.error("Failed to increment Stripe seat for new consultant:", err);
-        return res.status(502).json({ message: "Couldn't reserve a billing seat. Please try again in a moment." });
-      }
-    }
-
-    const user = await storage.createUser({
-      officeId: office.id,
-      username,
-      password,
-      role: "consultant",
-      displayName,
-      currentLevel: "beginner",
-      seatActive,
-      // Stamp seat activation now so the 60-day credit-eligibility clock starts
-      // the moment the consultant's paid seat goes live.
-      seatActivatedAt: seatActive ? new Date().toISOString() : null,
-    });
-
-    res.json({ user: publicUser(user) });
-  });
+  registerUserAuthRoutes(app);
 
   // Manager enrolls consultants by email (step 6). Sends each address an
   // enrollment email with the office invite code and an activation link. This is
@@ -1630,6 +1518,126 @@ export async function registerRoutes(
   startOutreachScheduler(storage);
 
   return httpServer;
+}
+
+// User authentication and registration routes are separately mountable for
+// focused HTTP tests without booting the full application or database seed.
+export function registerUserAuthRoutes(app: Express): void {
+  // --- Auth ---
+  app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body ?? {};
+    const user = await storage.getUserByUsername(username ?? "");
+    if (!user || typeof password !== "string" || !(await compareUserPassword(password, user.password))) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+    res.json(publicUser(user));
+  });
+
+  // --- Registration (self-serve office sign-up) ---
+  app.post("/api/register/manager", async (req, res) => {
+    const schema = z.object({
+      officeName: z.string().trim().min(1, "Office name is required"),
+      username: z.string().trim().min(1, "Username is required"),
+      password: z.string().min(1, "Password is required"),
+      displayName: z.string().trim().min(1, "Your name is required"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { officeName, username, password, displayName } = parsed.data;
+
+    const existing = await storage.getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken. Please choose another." });
+    }
+
+    const inviteCode = await generateUniqueInviteCode();
+    // Free-path offices start PENDING: the manager can register and log in, but the
+    // office cannot practice until an admin activates it (see checkSeatAccess and the
+    // admin Vault activate action). Paid self-serve offices are provisioned active by
+    // the Stripe webhook, and all pre-existing offices are grandfathered active by the
+    // status column default.
+    const office = await storage.createOffice({
+      name: officeName,
+      inviteCode,
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    });
+    const user = await storage.createUser({
+      officeId: office.id,
+      username,
+      password: await hashUserPassword(password),
+      role: "manager",
+      displayName,
+      currentLevel: "beginner",
+    });
+
+    res.json({ user: publicUser(user), office });
+  });
+
+  app.post("/api/register/consultant", async (req, res) => {
+    const schema = z.object({
+      inviteCode: z.string().trim().min(1, "Invite code is required"),
+      username: z.string().trim().min(1, "Username is required"),
+      password: z.string().min(1, "Password is required"),
+      displayName: z.string().trim().min(1, "Your name is required"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { inviteCode, username, password, displayName } = parsed.data;
+
+    const office = await storage.getOfficeByInviteCode(inviteCode.trim().toUpperCase());
+    if (!office) {
+      return res.status(404).json({ message: "That invite code doesn't match any office. Double-check it with your manager." });
+    }
+
+    // A consultant may join an office that is active OR a free-path office still
+    // pending admin activation (so the team can be assembled before go-live; they
+    // are gated from practice by office.status in checkSeatAccess). Any other
+    // inactive office (e.g. a lapsed paid subscription) still blocks joining.
+    if (!officeIsActive(office) && office.status !== "pending") {
+      return res.status(402).json({ message: "This office's subscription isn't active yet. Ask your manager to complete billing setup." });
+    }
+
+    const existing = await storage.getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken. Please choose another." });
+    }
+
+    // Increment the Stripe seat quantity BEFORE creating the user, so a billing
+    // failure never yields a free seat. Skipped only when Stripe isn't configured
+    // (dev/demo), in which case the seat is granted locally.
+    let seatActive = true;
+    if (isStripeConfigured() && office.stripeSubscriptionId) {
+      try {
+        const targetQty = (await storage.countPaidSeats(office.id)) + 1;
+        await setSeatQuantity(office, targetQty);
+        await storage.updateOffice(office.id, { activeSeatCount: targetQty });
+      } catch (err: any) {
+        console.error("Failed to increment Stripe seat for new consultant:", err);
+        return res.status(502).json({ message: "Couldn't reserve a billing seat. Please try again in a moment." });
+      }
+    }
+
+    const user = await storage.createUser({
+      officeId: office.id,
+      username,
+      password: await hashUserPassword(password),
+      role: "consultant",
+      displayName,
+      currentLevel: "beginner",
+      seatActive,
+      // Stamp seat activation now so the 60-day credit-eligibility clock starts
+      // the moment the consultant's paid seat goes live.
+      seatActivatedAt: seatActive ? new Date().toISOString() : null,
+    });
+
+    res.json({ user: publicUser(user) });
+  });
+
 }
 
 // Per-track certification status shape returned to the client. Kept a pure
@@ -3682,11 +3690,11 @@ export function registerManagerAuthRecoveryRoutes(app: Express): void {
       return res.status(400).json({ message: "This reset link has expired. Please request a new one." });
     }
 
-    // Same credential storage /api/login already compares against (plaintext
-    // in this table today — see the login handler above). Reset must not
-    // invent a different hashing scheme than the one login actually checks.
+    // Same credential storage /api/login checks against via compareUserPassword
+    // (bcrypt-hashed, see the login handler above). Reset must hash with the
+    // same scheme login actually verifies against.
     await storage.updateUser(account.id, {
-      password: newPassword,
+      password: await hashUserPassword(newPassword),
       passwordResetToken: null,
       passwordResetExpiresAt: null,
     });

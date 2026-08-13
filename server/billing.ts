@@ -1,6 +1,7 @@
 import type Stripe from "stripe";
 import type { Office } from "@shared/schema";
 import { storage } from "./storage";
+import { hashUserPassword } from "./userPasswords";
 import {
   getStripe,
   APP_URL,
@@ -369,7 +370,7 @@ export async function provisionSelfServeOffice(
       await storage.createUser({
         officeId: office.id,
         username,
-        password: signup.password,
+        password: await hashUserPassword(signup.password),
         role: "manager",
         displayName: (signup.managerName ?? "").trim() || username,
         currentLevel: "beginner",

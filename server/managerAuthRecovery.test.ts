@@ -14,6 +14,7 @@ import {
   __setFetchForTests,
 } from "./notifications";
 import type { User } from "@shared/schema";
+import { compareUserPassword } from "./userPasswords";
 
 // ===========================================================================
 // Command Center (manager login) previously had NO forgot-password or
@@ -263,9 +264,9 @@ describe("manager auth recovery HTTP routes", () => {
       assert.match(body.message, /reset/i);
 
       const updated = users[0];
-      // Same plaintext storage scheme /api/login already compares against for
-      // this table — reset must not invent scrypt/bcrypt hashing here.
-      assert.equal(updated.password, "brand-new-pass123");
+      // Reset hashes with the same bcrypt scheme /api/login now compares
+      // against via compareUserPassword.
+      assert.equal(await compareUserPassword("brand-new-pass123", updated.password), true);
       assert.equal(updated.passwordResetToken, null);
       assert.equal(updated.passwordResetExpiresAt, null);
     });
@@ -333,7 +334,7 @@ describe("manager auth recovery HTTP routes", () => {
       const body = await secondRes.json();
       assert.match(body.message, /invalid|expired/i);
       // Password from the first (successful) redemption must be untouched by the replay.
-      assert.equal(users[0].password, "first-new-pass123");
+      assert.equal(await compareUserPassword("first-new-pass123", users[0].password), true);
     });
 
     test("short new password is rejected by validation before any lookup", async () => {
