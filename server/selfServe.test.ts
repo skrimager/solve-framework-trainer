@@ -1,5 +1,6 @@
 import { test, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
+import bcrypt from "bcrypt";
 
 import { storage } from "./storage";
 import { __setStripeForTests } from "./stripe";
@@ -416,7 +417,7 @@ describe("provisionSelfServeOffice manager-user creation (signupId)", () => {
     };
   });
 
-  test("creates a manager login from the signup row and consumes the password", async () => {
+  test("creates a bcrypt-hashed manager login from the signup row and consumes the staged password", async () => {
     const office = await provisionSelfServeOffice(withSignup(), fakeSubscription(withSignup()));
     assert.ok(office);
     assert.equal(users.length, 1, "exactly one manager user created");
@@ -424,6 +425,9 @@ describe("provisionSelfServeOffice manager-user creation (signupId)", () => {
     assert.equal(users[0].officeId, office!.id);
     assert.equal(users[0].username, "dana");
     assert.equal(users[0].displayName, "Dana Rivers");
+    assert.match(users[0].password, /^\$2[aby]\$12\$/);
+    assert.equal(await bcrypt.compare("s3cret-plain", users[0].password), true);
+    assert.notEqual(users[0].password, "s3cret-plain");
     // Plaintext password must be cleared from the signup row after use.
     assert.equal(signupRows.get(42)!.password, null);
   });

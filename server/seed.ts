@@ -2,7 +2,8 @@ import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
 import { personaVariantSeed } from "./personaVariants";
-import type { InsertScenario, Office, Scenario } from "@shared/schema";
+import type { InsertScenario, InsertUser, Office, Scenario } from "@shared/schema";
+import { DEMO_USER_ACCOUNTS, hashUserPassword } from "./userPasswords";
 
 const DEMO_OFFICE_NAME = "Demo Office";
 const DEMO_OFFICE_INVITE_CODE = "DEMO2024";
@@ -84,6 +85,28 @@ export async function reconcileDemoV2Active(
   return reconciled;
 }
 
+type DemoUserStore = {
+  createUser(user: InsertUser): Promise<unknown>;
+};
+
+// Kept separate from the broad scenario seed so its bcrypt behavior can be
+// exercised directly. All four familiar demo credentials remain the same; only
+// their stored representation changes.
+export async function seedDemoUsers(officeId: number, store: DemoUserStore): Promise<void> {
+  for (const account of DEMO_USER_ACCOUNTS) {
+    await store.createUser({
+      officeId,
+      username: account.username,
+      password: await hashUserPassword(account.password),
+      role: account.role,
+      displayName: account.displayName,
+      currentLevel: "beginner",
+      seatActive: true,
+      isDemoAccount: true,
+    });
+  }
+}
+
 // Seeds demo users and the full scenario portfolio across all verticals.
 // Safe to run multiple times — skips if data already exists.
 export async function seed() {
@@ -97,10 +120,7 @@ export async function seed() {
     // All seeded demo users are permanently free demo accounts: they never consume a
     // paid Stripe seat, never count toward activeSeatCount, and bypass the seat gate.
     // seatActive is true so they can run roleplay without a live subscription.
-    await storage.createUser({ officeId: demoOffice.id, username: "manager", password: "manager123", role: "manager", displayName: "Manager Demo", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
-    await storage.createUser({ officeId: demoOffice.id, username: "consultant", password: "consultant123", role: "consultant", displayName: "Consultant Demo", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
-    await storage.createUser({ officeId: demoOffice.id, username: "qa_taylor", password: "qatest123", role: "qa", displayName: "Taylor (QA)", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
-    await storage.createUser({ officeId: demoOffice.id, username: "qa_morgan", password: "qatest123", role: "qa", displayName: "Morgan (QA)", currentLevel: "beginner", seatActive: true, isDemoAccount: true });
+    await seedDemoUsers(demoOffice.id, storage);
     console.log("Seeded demo users into Demo Office.");
   }
 

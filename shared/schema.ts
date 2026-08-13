@@ -766,9 +766,8 @@ export const officeSignups = pgTable("office_signups", {
   codeExpiresAt: text("code_expires_at"), // ISO timestamp; code invalid past this
   verified: boolean("verified").notNull().default(false), // flips true once a code is confirmed (step 2)
   // Office-setup inputs, filled in when the verified buyer starts checkout (step 4).
-  // Null until then. The password is plaintext to match the existing /api/login
-  // credential model; it is stored here (never in Stripe) and consumed once by the
-  // provisioning webhook to create the manager user.
+  // Null until then. The password is staged here (never in Stripe) only until the
+  // provisioning webhook bcrypt-hashes it into the users table, then clears it.
   managerName: text("manager_name"),
   username: text("username"),
   password: text("password"),

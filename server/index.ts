@@ -4,6 +4,8 @@ import type { Request } from 'express';
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { runMigrations } from "./migrate";
+import { migratePlaintextUserPasswords } from "./userPasswords";
+import { storage } from "./storage";
 import { createServer } from "node:http";
 
 const app = express();
@@ -75,6 +77,7 @@ app.use((req, res, next) => {
   // run drizzle-kit push) brings the live database up to date before seed()
   // queries it and before we start serving traffic.
   await runMigrations();
+  await migratePlaintextUserPasswords(storage);
 
   await registerRoutes(httpServer, app);
 
