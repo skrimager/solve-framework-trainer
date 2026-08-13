@@ -55,6 +55,20 @@ describe("Rule 2: deflected topics stop being asked", () => {
     assert.match(rendered, /safety-net/i);
   });
 
+  test("tracks a softly phrased department question before the redirect", () => {
+    // This intentionally omits a question mark and inserts "please" between
+    // "can you" and "tell", so the former ASK_MARKERS-only gate misses it.
+    const state = deriveConversationState(
+      t(
+        "c: Can you please tell me a little more about the warranty coverage",
+        "r: Our service department handles the warranty details.",
+      ),
+    );
+    const warranty = state.deflectedTopics.find((d) => d.topic === "warranty");
+    assert.ok(warranty, "the soft warranty ask must be tracked before a department redirect");
+    assert.equal(warranty!.redirectCount, 1);
+  });
+
   test("a second redirect closes the topic permanently", () => {
     const state = deriveConversationState(
       t(
@@ -678,6 +692,18 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     const q = deriveDirectQuestion(t("r: Walk me through what a normal week looks like for you."));
     assert.ok(q);
     assert.equal(q!.narrowing, false);
+  });
+
+  test("auxiliary-inversion questions count without terminal punctuation", () => {
+    for (const ask of [
+      "Does that sound like what you were expecting",
+      "Would that work for your budget",
+      "Is that something you'd consider",
+    ]) {
+      const q = deriveDirectQuestion(t(`r: ${ask}`));
+      assert.ok(q, `${ask} must be detected as a live ask`);
+      assert.deepEqual(q!.asks, [ask]);
+    }
   });
 
   test("a rep message that asks nothing produces no lines", () => {

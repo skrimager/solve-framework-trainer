@@ -579,7 +579,7 @@ function deriveDeflectedTopics(transcript: TranscriptMessage[]): DeflectedTopicS
     if (!text) continue;
 
     if (m.role === "customer") {
-      if (matchesAny(text, ASK_MARKERS)) {
+      if (matchesAny(text, SOFT_ASK_MARKERS)) {
         for (const topic of topics) {
           if (mentionsTopic(text, topic)) {
             everAsked.add(topic);
@@ -1169,6 +1169,18 @@ const IMPERATIVE_ASK_MARKERS: RegExp[] = [
 
 // The rep NARROWING: asking the customer to convert something general into a
 // concrete one. This is the teachable rep skill the customer has to reward.
+// Auxiliary-inversion questions lose their terminal question mark in spoken and
+// run-on transcripts. These forms must start the clause so ordinary statements
+// that merely contain the same words do not become live asks.
+const INTERROGATIVE_CLAUSE_MARKERS: RegExp[] = [
+  /^\b(?:does|do|did)\s+that\b/i,
+  /^\bwould\s+that\b/i,
+  /^\b(?:is|are)\s+(?:that|this)\b/i,
+  /^\b(?:can|could)\s+you\b/i,
+  /^\b(?:will|won't|will not)\s+that\b/i,
+  /^\b(?:has|have)\s+that\b/i,
+];
+
 const NARROWING_MARKERS: RegExp[] = [
   /\bwhen you say\b[^?]{0,60}\bwhat\b/i,
   /\bwhat (?:specifically|exactly)\b/i,
@@ -1233,7 +1245,10 @@ export interface DirectQuestionState {
 
 function extractAsks(text: string): string[] {
   return splitSentences(text).filter(
-    (s) => s.endsWith("?") || matchesAny(s, IMPERATIVE_ASK_MARKERS),
+    (s) =>
+      s.endsWith("?") ||
+      matchesAny(s, IMPERATIVE_ASK_MARKERS) ||
+      matchesAny(s, INTERROGATIVE_CLAUSE_MARKERS),
   );
 }
 
