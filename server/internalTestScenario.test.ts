@@ -29,6 +29,7 @@ import {
 import { scenarios as seedScenarios, ensureInternalTestAccount } from "./seed";
 import { getVoiceForScenario } from "./voices";
 import type { InsertOffice, InsertScenario, Office, Scenario, Session, User } from "@shared/schema";
+import { compareUserPassword } from "./userPasswords";
 
 const INTERNAL_USERNAME = "wade.internal";
 
@@ -258,7 +259,9 @@ describe("the seeded Testdummy account", () => {
     assert.equal(createdUsers.length, 1);
     const user = createdUsers[0];
     assert.equal(user.username, "Testdummy");
-    assert.equal(user.password, "TestDummy@Solve");
+    // Seeded through hashUserPassword, same bcrypt scheme every users-table
+    // password now goes through.
+    assert.equal(await compareUserPassword("TestDummy@Solve", user.password), true);
     assert.equal(user.role, "consultant");
     // Not a demo account, so it hits checkSeatAccess and the practice cap like a
     // paying customer does; seatActive so those gates actually let it practise.
