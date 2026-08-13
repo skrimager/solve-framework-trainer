@@ -10,8 +10,9 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { storage } from "./storage";
-import { runTurnStream } from "./routes";
+import { runTurnStream, updateSessionMsgContentAndStatus, updateDemoMsgContentAndStatus } from "./routes";
 import { __setReplyStreamDepsForTests, historyForTurn } from "./turnStream";
+import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import { sessionVariantSection } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
 import type { Scenario, Session, TranscriptMessage } from "@shared/schema";
@@ -135,7 +136,7 @@ describe("historyForTurn", () => {
 });
 
 describe("real session turn stream", () => {
-  let persisted: Array<{ content: string; status: string }>;
+  let persisted: Array<{ content: string; status: string; sessionEnded: boolean }>;
   let replyArgs: any[] | null;
   let synthesized: Array<{ text: string; voice: string; instructions?: string }>;
 
@@ -149,8 +150,8 @@ describe("real session turn stream", () => {
       scenario: SCENARIO,
       voice: getVoiceForScenario(SCENARIO.slug, SCENARIO.gender),
       instructions: getVoiceInstructionsForScenario(SCENARIO.slug),
-      persist: async (content, status) => {
-        persisted.push({ content, status });
+      persist: async (content, status, sessionEnded) => {
+        persisted.push({ content, status, sessionEnded });
       },
     }).then(() => out);
   }
@@ -169,7 +170,7 @@ describe("real session turn stream", () => {
         const onSentence = args[5] as SentenceHandler;
         onSentence("Hi there.", 0);
         onSentence("I'm just looking.", 1);
-        return "Hi there. I'm just looking.";
+        return { text: "Hi there. I'm just looking.", sessionEnded: false };
       },
       synthesize: async (text: string, voice: string, instructions?: string) => {
         synthesized.push({ text, voice, instructions });
@@ -192,7 +193,7 @@ describe("real session turn stream", () => {
     assert.deepEqual(out.events(), [
       { event: "sentence", data: { index: 0, text: "Hi there.", audioUrl: `/api/audio/${MSG_ID}-0.mp3` } },
       { event: "sentence", data: { index: 1, text: "I'm just looking.", audioUrl: `/api/audio/${MSG_ID}-1.mp3` } },
-      { event: "done", data: { msgId: MSG_ID, text: "Hi there. I'm just looking." } },
+      { event: "done", data: { msgId: MSG_ID, text: "Hi there. I'm just looking.", sessionEnded: false } },
     ]);
   });
 
@@ -216,9 +217,9 @@ describe("real session turn stream", () => {
     assert.deepEqual([...new Set(synthesized.map((s) => s.voice))], ["nova"]);
   });
 
-  test("persists the full reply once, marked ready", async () => {
+  test("persists the full reply once, marked ready, with sessionEnded false", async () => {
     await runRealTurn();
-    assert.deepEqual(persisted, [{ content: "Hi there. I'm just looking.", status: "ready" }]);
+    assert.deepEqual(persisted, [{ content: "Hi there. I'm just looking.", status: "ready", sessionEnded: false }]);
   });
 
   test("starts sending sentences before the reply has finished generating", async () => {
@@ -229,7 +230,7 @@ describe("real session turn stream", () => {
         onSentence("First sentence.", 0);
         await held.promise;
         onSentence("Second sentence.", 1);
-        return "First sentence. Second sentence.";
+        return { text: "First sentence. Second sentence.", sessionEnded: false };
       },
       synthesize: async () => Buffer.from("audio"),
     });
@@ -260,7 +261,7 @@ describe("real session turn stream", () => {
         onSentence("Good one.", 0);
         onSentence("Bad one.", 1);
         onSentence("Good again.", 2);
-        return "Good one. Bad one. Good again.";
+        return { text: "Good one. Bad one. Good again.", sessionEnded: false };
       },
       synthesize: async (text: string) => {
         if (text === "Bad one.") throw new Error("tts down");
@@ -284,7 +285,7 @@ describe("real session turn stream", () => {
     __setReplyStreamDepsForTests({
       streamReply: async (...args: any[]) => {
         (args[5] as SentenceHandler)("Only one.", 0);
-        return "Only one.";
+        return { text: "Only one.", sessionEnded: false };
       },
       synthesize: async () => {
         throw new Error("tts down");
@@ -293,7 +294,7 @@ describe("real session turn stream", () => {
 
     const out = await runRealTurn();
     assert.equal(out.events().at(-1)?.event, "done");
-    assert.deepEqual(persisted, [{ content: "Only one.", status: "failed" }]);
+    assert.deepEqual(persisted, [{ content: "Only one.", status: "failed", sessionEnded: false }]);
   });
 
   test("a failed reply emits error and persists whatever text exists", async () => {
@@ -306,6 +307,185 @@ describe("real session turn stream", () => {
 
     const out = await runRealTurn();
     assert.deepEqual(out.events(), [{ event: "error", data: { message: "reply_failed" } }]);
-    assert.deepEqual(persisted, [{ content: "", status: "failed" }]);
+    assert.deepEqual(persisted, [{ content: "", status: "failed", sessionEnded: false }]);
+  });
+
+  // --- Vulgar/belligerent strike coverage for the voice/streaming path -----
+  // These pin exactly the behavior the parent task called out as unverified:
+  // a strike's scripted line goes through the SAME onSentence -> synthesize
+  // path as a normal reply (so voice users hear it, not just text users), and
+  // sessionEnded flows all the way through to the persist callback and the
+  // SSE `done` event -- not just returned silently. server/llm.test.ts covers
+  // that streamCustomerReply itself never calls the model on a strike; this
+  // level pins that runReplyStream/runTurnStream correctly propagate whatever
+  // streamCustomerReply (real or, here, mocked) hands back.
+  test("a strike's scripted reply is synthesized exactly like a normal sentence", async () => {
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        const onSentence = args[5] as SentenceHandler;
+        onSentence("Haha, that's funny. I get it, checking my temperature!", 0);
+        return { text: "Haha, that's funny. I get it, checking my temperature!", sessionEnded: false };
+      },
+      synthesize: async (text: string, voice: string, instructions?: string) => {
+        synthesized.push({ text, voice, instructions });
+        return Buffer.from("audio");
+      },
+    });
+
+    const out = await runRealTurn();
+    assert.deepEqual(
+      synthesized.map((s) => s.text),
+      ["Haha, that's funny. I get it, checking my temperature!"],
+    );
+    assert.equal(out.events()[0].event, "sentence");
+    assert.ok(out.events()[0].data.audioUrl, "the strike line must get a synthesized audio clip, not a text-only reply");
+  });
+
+  test("first strike: sessionEnded stays false all the way to persist and the done event", async () => {
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        (args[5] as SentenceHandler)("Haha, that's funny. I get it, checking my temperature!", 0);
+        return { text: "Haha, that's funny. I get it, checking my temperature!", sessionEnded: false };
+      },
+      synthesize: async () => Buffer.from("audio"),
+    });
+
+    const out = await runRealTurn();
+    assert.equal(out.events().at(-1)?.data.sessionEnded, false);
+    assert.equal(persisted[0].sessionEnded, false);
+  });
+
+  test("second strike: sessionEnded=true reaches persist and the done event, ending the session", async () => {
+    __setReplyStreamDepsForTests({
+      streamReply: async (...args: any[]) => {
+        (args[5] as SentenceHandler)("Oh man! Sorry, he's yelling at me. I gotta go.", 0);
+        return { text: "Oh man! Sorry, he's yelling at me. I gotta go.", sessionEnded: true };
+      },
+      synthesize: async () => Buffer.from("audio"),
+    });
+
+    const out = await runRealTurn();
+    assert.equal(out.events().at(-1)?.event, "done");
+    assert.equal(out.events().at(-1)?.data.sessionEnded, true);
+    assert.deepEqual(persisted, [
+      { content: "Oh man! Sorry, he's yelling at me. I gotta go.", status: "ready", sessionEnded: true },
+    ]);
+  });
+});
+
+// Pins that the real-session route (server/routes.ts) and the demo route
+// (server/demoV2Routes.ts) both wire the EXACT SAME persist targets that the
+// non-streaming /message branch uses, so a strike detected mid-stream (voice
+// mode) ends the session identically to one detected up front (text mode).
+// runTurnStream's own persist plumbing is already pinned above; this closes
+// the loop by calling the two persist targets themselves the way routes.ts's
+// and demoV2Routes.ts's own `persist:` closures do -- proving a sessionEnded
+// of true, arriving from a streamed reply, really lands as VULGAR_ENDED_STATUS
+// + completedAt on the right table (sessions vs demo_sessions).
+describe("vulgar strike ends the session through both persist targets (voice path)", () => {
+  test("real session: updateSessionMsgContentAndStatus writes VULGAR_ENDED_STATUS + completedAt when sessionEnded is true", async () => {
+    let patched: any = null;
+    (storage as any).getSession = async () => ({ ...SESSION, transcript: JSON.stringify(TRANSCRIPT) });
+    (storage as any).updateSession = async (id: number, patch: any) => {
+      patched = { id, patch };
+      return { ...SESSION, ...patch };
+    };
+
+    // Exactly the call shape routes.ts's turn-stream persist closure makes:
+    // `persist: (content, status, sessionEnded) => updateSessionMsgContentAndStatus(session.id, msgId, content, status, sessionEnded)`.
+    await updateSessionMsgContentAndStatus(
+      SESSION.id,
+      MSG_ID,
+      "Oh man! Sorry, he's yelling at me. I gotta go.",
+      "ready",
+      true,
+    );
+
+    assert.ok(patched, "storage.updateSession must have been called");
+    assert.equal(patched.id, SESSION.id);
+    assert.equal(patched.patch.status, VULGAR_ENDED_STATUS);
+    assert.ok(patched.patch.completedAt, "completedAt must be set when the session ends");
+    const savedTranscript: TranscriptMessage[] = JSON.parse(patched.patch.transcript);
+    assert.equal(savedTranscript.find((m) => m.msgId === MSG_ID)?.content, "Oh man! Sorry, he's yelling at me. I gotta go.");
+  });
+
+  test("real session: sessionEnded=false (first strike) does NOT end the session", async () => {
+    let patched: any = null;
+    (storage as any).getSession = async () => ({ ...SESSION, transcript: JSON.stringify(TRANSCRIPT) });
+    (storage as any).updateSession = async (id: number, patch: any) => {
+      patched = { id, patch };
+      return { ...SESSION, ...patch };
+    };
+
+    await updateSessionMsgContentAndStatus(
+      SESSION.id,
+      MSG_ID,
+      "Haha, that's funny. I get it, checking my temperature!",
+      "ready",
+      false,
+    );
+
+    assert.ok(patched);
+    assert.equal(patched.patch.status, undefined, "status must not be touched on a non-ending strike");
+    assert.equal(patched.patch.completedAt, undefined);
+  });
+
+  test("demo session: updateDemoMsgContentAndStatus writes VULGAR_ENDED_STATUS + completedAt when sessionEnded is true", async () => {
+    const DEMO_SESSION = {
+      id: 9,
+      signupId: 1,
+      scenarioId: SCENARIO.id,
+      status: "in_progress",
+      transcript: JSON.stringify(TRANSCRIPT),
+    } as any;
+    let patched: any = null;
+    (storage as any).getDemoSession = async () => DEMO_SESSION;
+    (storage as any).updateDemoSession = async (id: number, patch: any) => {
+      patched = { id, patch };
+      return { ...DEMO_SESSION, ...patch };
+    };
+
+    // Exactly the call shape demoV2Routes.ts's turn-stream persist closure
+    // makes: `updateDemoMsgContentAndStatus(session.id, msgId, content, status, sessionEnded)`.
+    await updateDemoMsgContentAndStatus(
+      DEMO_SESSION.id,
+      MSG_ID,
+      "Oh man! Sorry, he's yelling at me. I gotta go.",
+      "ready",
+      true,
+    );
+
+    assert.ok(patched, "storage.updateDemoSession must have been called");
+    assert.equal(patched.id, DEMO_SESSION.id);
+    assert.equal(patched.patch.status, VULGAR_ENDED_STATUS);
+    assert.ok(patched.patch.completedAt, "completedAt must be set when the demo session ends");
+  });
+
+  test("demo session: sessionEnded=false (first strike) does NOT end the demo session", async () => {
+    const DEMO_SESSION = {
+      id: 9,
+      signupId: 1,
+      scenarioId: SCENARIO.id,
+      status: "in_progress",
+      transcript: JSON.stringify(TRANSCRIPT),
+    } as any;
+    let patched: any = null;
+    (storage as any).getDemoSession = async () => DEMO_SESSION;
+    (storage as any).updateDemoSession = async (id: number, patch: any) => {
+      patched = { id, patch };
+      return { ...DEMO_SESSION, ...patch };
+    };
+
+    await updateDemoMsgContentAndStatus(
+      DEMO_SESSION.id,
+      MSG_ID,
+      "Haha, that's funny. I get it, checking my temperature!",
+      "ready",
+      false,
+    );
+
+    assert.ok(patched);
+    assert.equal(patched.patch.status, undefined);
+    assert.equal(patched.patch.completedAt, undefined);
   });
 });

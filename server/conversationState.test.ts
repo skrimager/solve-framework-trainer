@@ -4,13 +4,22 @@ import assert from "node:assert/strict";
 import type { TranscriptMessage } from "@shared/schema";
 import {
   DEFLECTION_STOP_THRESHOLD,
+  SEQUENCING_STOP_THRESHOLD,
   TRIVIAL_GAP_FRACTION,
   buildConversationStateLines,
+  buildFinalAnsweredQuestionGate,
   buildDirectQuestionLines,
+  buildPriceComparisonLines,
+  buildRepetitionCalloutLines,
   deriveConversationState,
   deriveDirectQuestion,
+  deriveRepetitionCallout,
+  derivePriceState,
+  extractAskedSubject,
   hasCustomerAcceptedProposal,
+  parseDollarAmounts,
   parseMoneyAmounts,
+  repeatsClosedAnsweredQuestion,
 } from "./conversationState";
 
 // Terse transcript builder: "c: ..." is the customer, "r: ..." is the rep.
@@ -30,7 +39,7 @@ function stateLines(...lines: string[]): string {
 }
 
 describe("Rule 2: deflected topics stop being asked", () => {
-  test("one redirect leaves the topic open for exactly one more ask", () => {
+  test("one redirect remains tracked only as a safety-net while reactive-only rules forbid a callback", () => {
     const state = deriveConversationState(
       t(
         "c: What does the warranty cover on this one?",
@@ -41,7 +50,23 @@ describe("Rule 2: deflected topics stop being asked", () => {
     assert.ok(warranty, "expected the warranty redirect to be detected");
     assert.equal(warranty!.redirectCount, 1);
     assert.equal(warranty!.closed, false);
-    assert.match(buildConversationStateLines(state).join("\n"), /at most ONE more time/);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
+  });
+
+  test("tracks a softly phrased department question before the redirect", () => {
+    // This intentionally omits a question mark and inserts "please" between
+    // "can you" and "tell", so the former ASK_MARKERS-only gate misses it.
+    const state = deriveConversationState(
+      t(
+        "c: Can you please tell me a little more about the warranty coverage",
+        "r: Our service department handles the warranty details.",
+      ),
+    );
+    const warranty = state.deflectedTopics.find((d) => d.topic === "warranty");
+    assert.ok(warranty, "the soft warranty ask must be tracked before a department redirect");
+    assert.equal(warranty!.redirectCount, 1);
   });
 
   test("a second redirect closes the topic permanently", () => {
@@ -86,6 +111,206 @@ describe("Rule 2: deflected topics stop being asked", () => {
     );
     assert.deepEqual(state.deflectedTopics, []);
     assert.deepEqual(buildConversationStateLines(state), []);
+  });
+});
+
+describe("Rule S: a topic the rep sequences for later stops being re-asked", () => {
+  // The reported transcript, near-verbatim. Before this rule existed the customer
+  // re-asked the safety question on every following turn, because safety is not
+  // one of the four DeflectableTopic values and so no state was ever produced.
+  const SAFETY = [
+    "r: What brings you in today?",
+    "c: I'm looking at this SUV. What's the safety rating on it?",
+    "r: I appreciate you wanting to know about the safety features, but let's make sure we find the right vehicle for you first. The safety features on this one don't matter if it's not the right vehicle. What's most important to you in your next vehicle?",
+  ];
+
+  test("a sequencing redirect plus discovery is tracked as a safety-net without authorizing a callback", () => {
+    const state = deriveConversationState(t(...SAFETY));
+    assert.equal(state.sequencedTopics.length, 1);
+    const safety = state.sequencedTopics[0];
+    assert.match(safety.label, /safety rating/i);
+    assert.equal(safety.redirectCount, 1);
+    assert.equal(safety.closed, false);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
+  });
+
+  test("a second sequencing redirect closes the topic permanently", () => {
+    const state = deriveConversationState(
+      t(
+        ...SAFETY,
+        "c: Four-wheel drive matters most, we get a lot of snow. Can you tell me more about the safety rating?",
+        "r: We'll come back to that. Before we get into specs, how many people are you hauling around day to day?",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    const safety = state.sequencedTopics[0];
+    assert.ok(safety.redirectCount >= SEQUENCING_STOP_THRESHOLD);
+    assert.equal(safety.closed, true);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /CLOSED/);
+    assert.match(rendered, /Do not raise it again/);
+  });
+
+  test("a subject nothing in this codebase has ever heard of gets the same treatment", () => {
+    // Tow capacity is not in TOPIC_PATTERNS, not in any marker list, and not
+    // named anywhere in the source. It works because the subject is read out of
+    // the customer's own question rather than looked up.
+    const state = deriveConversationState(
+      t(
+        "c: What's the tow capacity on this thing?",
+        "r: Let's figure out what you're hauling first, then we'll cover tow numbers. What are you towing, and how often?",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /tow capacity/i);
+    assert.equal(state.sequencedTopics[0].redirectCount, 1);
+  });
+
+  test("and so does a second unrelated subject nobody hardcoded", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What are the paint color options?",
+        "r: Before we get into colors, let's make sure the vehicle itself is right. How many kids are you fitting in the back?",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /paint color/i);
+  });
+
+  // Wade's literal words from the voice session, split into the two turns he
+  // reported them as. Deliberately NOT cleaned up: no question mark on the
+  // customer's ask, no sentence breaks in the rep's reply, no ordering adverb
+  // anywhere. The first version of this rule was validated against a tidied-up
+  // paraphrase of this and detected nothing at all on the real thing.
+  const LITERAL_CUSTOMER =
+    "Oh, I appreciate you wanting to show me the right vehicle. Can you please tell me more about the safety features can you make sure that you can give me information on the safety ratings";
+  const LITERAL_REP =
+    "hey let's make sure we found the right vehicle for you if it's not the right vehicle the safety features on this one doesn't matter let's figure out exactly what you're looking for";
+
+  test("the literal reported voice transcript is detected, punctuation and all", () => {
+    const state = deriveConversationState(
+      t("r: What brings you in today?", `c: ${LITERAL_CUSTOMER}`, `r: ${LITERAL_REP}`),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /safety features/i);
+    assert.equal(state.sequencedTopics[0].redirectCount, 1);
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /reactive-only rule means you should not raise .* again on your own/i);
+    assert.match(rendered, /safety-net/i);
+  });
+
+  test("the literal transcript is caught by relevance conditioning, with no ordering word present", () => {
+    // Guards the actual regression: the reply contains no "first", "before we",
+    // or "once we", so an ordering-adverb-only rule cannot see it.
+    assert.doesNotMatch(LITERAL_REP, /\bfirst\b|\bbefore we\b|\bonce we\b|\bafter we\b/i);
+    assert.equal(
+      deriveConversationState(t(`c: ${LITERAL_CUSTOMER}`, `r: ${LITERAL_REP}`)).sequencedTopics.length,
+      1,
+    );
+  });
+
+  test("conditional sequencing works on an unrelated subject too, so it is not one tuned sentence", () => {
+    const state = deriveConversationState(
+      t(
+        "c: I'm curious about the tow capacity",
+        "r: honestly until we know what you're hauling the tow numbers don't mean much let's figure out what you actually put in the bed",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1);
+    assert.match(state.sequencedTopics[0].label, /tow capacity/i);
+  });
+
+  test("relevance conditioning with no discovery pivot is still just a brush-off", () => {
+    assert.deepEqual(
+      deriveConversationState(
+        t("c: What's the safety rating on this one?", "r: If it's not the right vehicle the safety features don't matter."),
+      ).sequencedTopics,
+      [],
+    );
+  });
+
+  test("a bare brush-off with no discovery question is not sequencing and is not accepted", () => {
+    const state = deriveConversationState(
+      t("c: What's the tow capacity on this one?", "r: Let's come back to that later."),
+    );
+    assert.deepEqual(state.sequencedTopics, []);
+    assert.deepEqual(buildConversationStateLines(state), []);
+  });
+
+  test("a rep who simply answers has redirected nothing", () => {
+    const state = deriveConversationState(
+      t("c: What's the tow capacity on this thing?", "r: It's rated to 5,000 pounds."),
+    );
+    assert.deepEqual(state.sequencedTopics, []);
+  });
+
+  test("a question that names no subject produces no state", () => {
+    assert.deepEqual(
+      deriveConversationState(
+        t("c: Can you tell me more about it?", "r: Let's find the right vehicle first. What are you driving today?"),
+      ).sequencedTopics,
+      [],
+    );
+  });
+
+  test("the same subject worded differently is one topic, not two", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What's the safety rating on this one?",
+        "r: Let's find the right vehicle first. What's your commute like?",
+        "c: Thirty minutes of highway. What are the safety ratings like though?",
+        "r: We'll circle back to that. Before we get into specs, who else rides with you?",
+      ),
+    );
+    assert.equal(state.sequencedTopics.length, 1, "'safety rating' and 'safety ratings' are the same subject");
+    assert.equal(state.sequencedTopics[0].closed, true);
+  });
+});
+
+describe("Rule S: the four department-handoff topics keep their own mechanism", () => {
+  const DEPARTMENT_CASES: [string, string, string][] = [
+    [
+      "warranty",
+      "c: What does the warranty cover on this one?",
+      "r: Our service department handles the warranty. Let's find the right vehicle first. What are you driving today?",
+    ],
+    [
+      "financing",
+      "c: What kind of financing do you offer?",
+      "r: The finance department handles all of that. Let's figure out the vehicle first. What's your commute like?",
+    ],
+    [
+      "loanTerms",
+      "c: What loan lengths can you do?",
+      "r: The lender sets that, they'll walk you through it. Let's nail down the vehicle first. Who else drives it?",
+    ],
+    [
+      "paymentSpecifics",
+      "c: How big a down payment would you need?",
+      "r: The finance office handles that side. Let's find the right vehicle first. What are you hauling around?",
+    ],
+  ];
+
+  for (const [topic, ask, reply] of DEPARTMENT_CASES) {
+    test(`${topic} stays with Rule 2 and is never double-counted as sequencing`, () => {
+      const state = deriveConversationState(t(ask, reply));
+      const deflected = state.deflectedTopics.find((d) => d.topic === topic);
+      assert.ok(deflected, `${topic} must still be detected by the existing mechanism`);
+      assert.equal(deflected!.redirectCount, 1);
+      assert.equal(deflected!.closed, false);
+      assert.deepEqual(state.sequencedTopics, [], `${topic} must not also be tracked as sequenced`);
+      // Exactly one prompt line about the topic, from Rule 2, worded as before.
+      const rendered = buildConversationStateLines(state);
+      assert.equal(rendered.length, 1);
+      assert.match(rendered[0], /handled elsewhere/);
+    });
+  }
+
+  test("the two thresholds are independent constants", () => {
+    assert.equal(DEFLECTION_STOP_THRESHOLD, 2);
+    assert.equal(SEQUENCING_STOP_THRESHOLD, 2);
   });
 });
 
@@ -302,6 +527,61 @@ describe("Rule D: a number the rep has met is recognized as met", () => {
   });
 });
 
+describe("price-state arithmetic for negotiated reference offers", () => {
+  test("extracts explicit dollar figures without mistaking the model for the calculator", () => {
+    assert.deepEqual(parseDollarAmounts("Their written offer is $30,600; I can do $29,700."), [30600, 29700]);
+    assert.deepEqual(parseDollarAmounts("No dollar figure here."), []);
+  });
+
+  test("Renee's real offer history stays below her $30,600 competing reference at every step", () => {
+    const base = [
+      "c: I have a written competing offer of $30,600 out the door for this exact XLE.",
+      "r: I can offer you $29,700 out the door today.",
+    ];
+    const at29700 = derivePriceState(t(...base));
+    assert.equal(at29700.reference?.amount, 30600);
+    assert.deepEqual(at29700.offers.map((offer) => offer.amount), [29700]);
+    assert.deepEqual(
+      at29700.latestComparison && {
+        relation: at29700.latestComparison.relation,
+        difference: at29700.latestComparison.difference,
+      },
+      { relation: "below", difference: 900 },
+    );
+
+    const at30400 = derivePriceState(t(...base, "r: Actually, my revised offer is $30,400 out the door."));
+    assert.deepEqual(at30400.offers.map((offer) => offer.amount), [29700, 30400]);
+    assert.equal(at30400.latestComparison?.relation, "below");
+    assert.equal(at30400.latestComparison?.difference, 200);
+    assert.ok(
+      at30400.offers[1].amount > at30400.offers[0].amount,
+      "the later $30,400 offer is still below the reference but worse than $29,700",
+    );
+
+    const at30200 = derivePriceState(
+      t(...base, "r: Actually, my revised offer is $30,400 out the door.", "r: I can accept your counter at $30,200."),
+    );
+    assert.deepEqual(at30200.offers.map((offer) => offer.amount), [29700, 30400, 30200]);
+    assert.equal(at30200.latestComparison?.relation, "below");
+    assert.equal(at30200.latestComparison?.difference, 400);
+    assert.match(
+      buildPriceComparisonLines(at30200).join("\n"),
+      /latest offer of \$30,200 is \$400 below your stated reference price of \$30,600/i,
+    );
+  });
+
+  test("a higher live offer is labeled above rather than inverted", () => {
+    const state = derivePriceState(
+      t(
+        "c: My budget target is $2,400 a month.",
+        "r: Our monthly rent offer is $2,550.",
+      ),
+    );
+    assert.equal(state.latestComparison?.relation, "above");
+    assert.equal(state.latestComparison?.difference, 150);
+  });
+});
+
 describe("prompt stability", () => {
   test("a conversation with none of these situations produces no extra prompt lines", () => {
     assert.deepEqual(
@@ -414,6 +694,18 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     assert.equal(q!.narrowing, false);
   });
 
+  test("auxiliary-inversion questions count without terminal punctuation", () => {
+    for (const ask of [
+      "Does that sound like what you were expecting",
+      "Would that work for your budget",
+      "Is that something you'd consider",
+    ]) {
+      const q = deriveDirectQuestion(t(`r: ${ask}`));
+      assert.ok(q, `${ask} must be detected as a live ask`);
+      assert.deepEqual(q!.asks, [ask]);
+    }
+  });
+
   test("a rep message that asks nothing produces no lines", () => {
     assert.equal(deriveDirectQuestion(t("c: Hi.", "r: Nice to meet you, I'm Sam.")), null);
     assert.deepEqual(buildDirectQuestionLines(null), []);
@@ -436,7 +728,8 @@ describe("Rule G: identifying the question the customer owes an answer to", () =
     assert.match(rendered, /do not bounce the question back/);
     // Guardrail: answering is required, guardedness is not surrendered.
     assert.match(rendered, /still be guarded about how much you give them/);
-    assert.match(rendered, /AFTER you have answered/);
+    assert.match(rendered, /stop after the relevant answer/i);
+    assert.match(rendered, /separate customer agenda/i);
   });
 });
 
@@ -524,6 +817,213 @@ describe("Rule G: a redirected premature question is accepted, not re-pushed", (
   });
 });
 
+describe("Rule Q: answered customer factual questions do not get re-asked", () => {
+  test("records Frank's tow-capacity question and a specific pound range as closed", () => {
+    const transcript = t(
+      "c: What towing capacity does this truck have?",
+      "r: This truck is rated to tow 12,000 to 14,000 pounds depending on configuration.",
+    );
+    const state = deriveConversationState(transcript);
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    const towing = state.answeredCustomerQuestions[0];
+    assert.equal(towing.status, "answered");
+    assert.match(towing.label, /towing capacity/i);
+    assert.match(towing.answer, /12,000 to 14,000 pounds/i);
+
+    const rendered = buildConversationStateLines(state).join("\n");
+    assert.match(rendered, /ANSWERED AND CLOSED/);
+    assert.match(rendered, /Do NOT ask another version/i);
+    assert.match(rendered, /brief natural reaction/i);
+  });
+
+  test("ties a rephrased tow question to the already answered factual topic", () => {
+    const state = deriveConversationState(
+      t(
+        "c: How much can this truck tow?",
+        "r: It can tow 12,000 to 14,000 pounds depending on configuration.",
+        "c: Okay. What is the tow capacity again?",
+        "r: Like I said, 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(buildConversationStateLines(state).join("\n"), /same fact again with different wording/i);
+  });
+
+  test("keeps every towing-package/capacity surface form inside one final closed boundary", () => {
+    const initial = "What specific towing package and towing capacity does this truck have?";
+    const rephrase = "Can you tell me about the features that come with the towing package?";
+    const subject = extractAskedSubject(initial);
+    const rephrasedSubject = extractAskedSubject(rephrase);
+    assert.deepEqual(subject?.keywords, ["specific", "tow", "package", "capacity"]);
+    assert.deepEqual(rephrasedSubject?.keywords, ["feature"]);
+
+    const state = deriveConversationState(
+      t(initial.startsWith("c:") ? initial : `c: ${initial}`, "r: This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.match(gate, /TOWING-CAPABILITY BOUNDARY/);
+    assert.match(gate, /towing features\/options\/configurations\/specifications/i);
+    assert.match(gate, /What comes with the towing package/i);
+    assert.match(gate, /How does it perform with a load/i);
+  });
+
+  test("keeps the stronger towing boundary out of non-auto factual questions", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    const gate = buildFinalAnsweredQuestionGate(state).join("\n");
+    assert.match(gate, /FINAL ANSWERED-QUESTION GATE/);
+    assert.doesNotMatch(gate, /TOWING-CAPABILITY BOUNDARY/);
+  });
+
+  test("recognizes rephrased towing capability questions without mistaking a separate fuel question for one", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What specific towing package and towing capacity does this truck have?",
+        "r: This truck can tow 12,000 to 14,000 pounds depending on configuration.",
+      ),
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What features come with the towing package?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "How does it handle long distances when towing heavy loads?"),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(
+        state,
+        "What I really need to know next is how its payload capacity holds up under heavy use. What’s the maximum weight it can handle in the bed?",
+      ),
+      true,
+    );
+    assert.equal(
+      repeatsClosedAnsweredQuestion(state, "What fuel economy can I expect when not towing?"),
+      false,
+    );
+  });
+
+  test("works for a different vertical's named fact instead of vehicle vocabulary", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What is the fixed interest rate on this mortgage?",
+        "r: The fixed rate is 6.25% for this loan program.",
+      ),
+    );
+    assert.equal(state.answeredCustomerQuestions.length, 1);
+    assert.equal(state.answeredCustomerQuestions[0].status, "answered");
+    assert.match(state.answeredCustomerQuestions[0].label, /fixed interest rate/i);
+    assert.match(buildConversationStateLines(state).join("\n"), /ANSWERED AND CLOSED/);
+  });
+
+  test("allows exactly one concise clarification after a genuinely vague answer", () => {
+    const first = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+      ),
+    );
+    assert.equal(first.answeredCustomerQuestions.length, 1);
+    assert.equal(first.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(first.answeredCustomerQuestions[0].clarificationUsed, false);
+    assert.match(buildConversationStateLines(first).join("\n"), /may make ONE concise clarification directly about it/i);
+
+    const afterClarification = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: It should be able to handle a trailer, but I would need to check the exact rating.",
+        "c: I need the exact number. How much can it tow?",
+        "r: I still cannot confirm that number right now.",
+      ),
+    );
+    assert.equal(afterClarification.answeredCustomerQuestions.length, 1);
+    assert.equal(afterClarification.answeredCustomerQuestions[0].status, "vague");
+    assert.equal(afterClarification.answeredCustomerQuestions[0].clarificationUsed, true);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /already used your ONE fair clarification/i);
+    assert.match(buildConversationStateLines(afterClarification).join("\n"), /Do not ask it again/i);
+  });
+
+  test("does not mistake a discovery pivot for a vague factual answer", () => {
+    const state = deriveConversationState(
+      t(
+        "c: What towing capacity does this truck have?",
+        "r: Let's first figure out what you are hauling. What are you towing, and how often?",
+      ),
+    );
+    assert.deepEqual(state.answeredCustomerQuestions, []);
+  });
+});
+
+describe("Rule G: a topic the rep sequences for later is answered, not re-asked", () => {
+  // The exact turn the bug produced: the customer replied "That sounds good, but
+  // can you tell me more about the safety rating?" instead of answering.
+  const REPORTED = [
+    "c: I'm looking at this SUV. What's the safety rating on it?",
+    "r: I appreciate you wanting to know about the safety features, but let's make sure we find the right vehicle for you first. The safety features on this one don't matter if it's not the right vehicle. What's most important to you in your next vehicle?",
+  ] as const;
+
+  test("the sequenced subject is picked up out of the customer's own words", () => {
+    const q = deriveDirectQuestion(t(...REPORTED));
+    assert.ok(q);
+    assert.match(q!.sequencedTopic ?? "", /safety rating/i);
+    assert.equal(q!.redirectedTopic, null, "safety is not a department handoff");
+  });
+
+  test("the rendered line tells the customer to answer the discovery question instead", () => {
+    const rendered = questionLines(...REPORTED);
+    assert.match(rendered, /"What's most important to you in your next vehicle\?"/);
+    assert.match(rendered, /proposed getting to it later/);
+    assert.match(rendered, /do not spend this turn asking about safety rating again/);
+  });
+
+  test("an arbitrary subject works the same way", () => {
+    const q = deriveDirectQuestion(
+      t(
+        "c: What's the tow capacity on this thing?",
+        "r: Let's figure out what you're hauling first, then we'll get to numbers. What are you towing?",
+      ),
+    );
+    assert.match(q!.sequencedTopic ?? "", /tow capacity/i);
+  });
+
+  test("a sequencing phrase with no question behind it is not attributed to the customer", () => {
+    const q = deriveDirectQuestion(
+      t("c: I need it by the end of the month.", "r: Let's find the right vehicle first. What's the drive like?"),
+    );
+    assert.equal(q!.sequencedTopic, null);
+  });
+
+  test("a department handoff is reported once, by the existing mechanism only", () => {
+    const q = deriveDirectQuestion(
+      t(
+        "c: What kind of financing do you offer?",
+        "r: Finance handles that once we've found your car. Let's find the right vehicle first. What are you driving today?",
+      ),
+    );
+    assert.equal(q!.redirectedTopic, "financing, credit, or lender questions");
+    assert.equal(q!.sequencedTopic, null);
+  });
+
+  test("an ordinary question carries no sequencing line at all", () => {
+    assert.doesNotMatch(questionLines("r: What brings you in today?"), /proposed getting to it later/);
+  });
+
+  test("the literal reported voice transcript produces the turn-scoped acceptance line", () => {
+    const rendered = questionLines(
+      "c: Oh, I appreciate you wanting to show me the right vehicle. Can you please tell me more about the safety features can you make sure that you can give me information on the safety ratings",
+      "r: hey let's make sure we found the right vehicle for you if it's not the right vehicle the safety features on this one doesn't matter let's figure out exactly what you're looking for",
+    );
+    assert.match(rendered, /proposed getting to it later/);
+    assert.match(rendered, /do not spend this turn asking about safety features again/);
+  });
+});
+
 describe("Rule G: derivation is pure and additive", () => {
   test("the same transcript yields the same lines", () => {
     const transcript = t("c: I just want something reliable.", "r: What specifically worries you, the engine, the transmission, the brakes?");
@@ -536,6 +1036,89 @@ describe("Rule G: derivation is pure and additive", () => {
   test("it does not disturb the cross-turn conversation state", () => {
     // The PR #87 state derivation is untouched: a plain discovery question still
     // produces no conversation-state lines.
+    assert.deepEqual(
+      buildConversationStateLines(
+        deriveConversationState(t("c: I need something reliable.", "r: What does your commute look like?")),
+      ),
+      [],
+    );
+  });
+});
+
+describe("Rule R: explicit repetition callouts trigger immediate de-escalation", () => {
+  test("detects an ordinal count phrasing (the real Renee transcript wording)", () => {
+    assert.equal(
+      deriveRepetitionCallout(
+        t("r: Yes, like I said, they come standard on all of the Rav 4 models. That's the third time I've told you they come standard on the Rav 4 models."),
+      ),
+      true,
+    );
+  });
+
+  test("detects a cardinal count phrasing", () => {
+    assert.equal(deriveRepetitionCallout(t("r: You've asked me 4 Times Now, and the answer hasn't changed.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: I've told you 5 Times Now, it's included in the price.")), true);
+  });
+
+  test("detects 'twice now' phrasing without an explicit ordinal", () => {
+    assert.equal(
+      deriveRepetitionCallout(t("r: I've already told you twice now, it should hold, so let's leave it there for the moment.")),
+      true,
+    );
+  });
+
+  test("detects 'already told you' and 'like I said... before' framings", () => {
+    assert.equal(deriveRepetitionCallout(t("r: I already told you it's covered under the standard warranty.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: Like I said before, the financing rate is fixed at 4.9%.")), true);
+  });
+
+  test("detects 'you keep asking the same' and 'asked that already' framings", () => {
+    assert.equal(deriveRepetitionCallout(t("r: You keep asking the same question about the mileage.")), true);
+    assert.equal(deriveRepetitionCallout(t("r: You've asked me that already, it's the same trim.")), true);
+  });
+
+  test("does not fire on an ordinary rep statement or question", () => {
+    assert.equal(deriveRepetitionCallout(t("r: What brings you in today?")), false);
+    assert.equal(deriveRepetitionCallout(t("r: The RAV4 comes with a great warranty package.")), false);
+    assert.equal(deriveRepetitionCallout(t("r: This is the third RAV4 we've had on the lot this week.")), false);
+  });
+
+  test("only looks at the rep's live last line, mirroring deriveDirectQuestion", () => {
+    // A callout buried earlier in the transcript, with the customer speaking
+    // last, must not fire — only the rep's most recent line matters.
+    assert.equal(
+      deriveRepetitionCallout(
+        t("r: That's the third time I've told you.", "c: Okay, fine, let's move on to pricing."),
+      ),
+      false,
+    );
+  });
+
+  test("does not fire on a customer line, even with matching language", () => {
+    // The callout direction is rep-calls-out-customer, not the reverse.
+    assert.equal(
+      deriveRepetitionCallout(t("c: I've already told you twice now, I don't want to discuss the trade-in.")),
+      false,
+    );
+  });
+
+  test("buildRepetitionCalloutLines is empty when no callout, non-empty when detected", () => {
+    assert.deepEqual(buildRepetitionCalloutLines(false), []);
+    const lines = buildRepetitionCalloutLines(true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /THIS TURN/);
+    assert.match(lines[0], /acknowledge|accept/i);
+  });
+
+  test("derivation is pure: same transcript yields the same lines", () => {
+    const transcript = t("r: That's the third time I've told you they come standard.");
+    assert.deepEqual(
+      buildRepetitionCalloutLines(deriveRepetitionCallout(transcript)),
+      buildRepetitionCalloutLines(deriveRepetitionCallout(transcript)),
+    );
+  });
+
+  test("does not disturb cross-turn conversation state for an unrelated transcript", () => {
     assert.deepEqual(
       buildConversationStateLines(
         deriveConversationState(t("c: I need something reliable.", "r: What does your commute look like?")),

@@ -1,16 +1,32 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import {
   buildCustomerReplyPrompt,
   buildCustomerReplyStablePrefix,
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
+  CUSTOMER_ROLE_BOUNDARY_RULES,
+  HIDDEN_MOTIVATION_DISCOVERY_RULES,
+  LOW_KEY_CUSTOMER_CONVERSATION_RULES,
+  REACTIVE_ONLY_CUSTOMER_RULES,
   computeScoreCacheHash,
+  SCORE_CACHE_VERSION,
   scoreTranscript,
+  getCustomerReply,
+  setCustomerReplyTestResponder,
+  streamCustomerReply,
+  checkVulgarBaitStrike,
+  STALL_DIAGNOSIS_RULES,
+  STALL_EVIDENCE_QUESTION_TYPES,
+  STALL_EVIDENCE_RED_FLAGS,
+  STALL_EVIDENCE_REWARDED_BEHAVIORS,
   type ScoreResponder,
   type ScoreCacheStore,
 } from "./llm";
+import { detectVulgarBait, countPriorVulgarStrikes, VULGAR_STRIKE_ONE_REPLY, VULGAR_STRIKE_TWO_REPLY } from "./vulgarBait";
+import { personaVariantSeed } from "./personaVariants";
 import type { TranscriptMessage, ScoreCache, InsertScoreCache } from "@shared/schema";
 
 const PERSONA = "You are Denise, 52, looking at a home in a manufactured-housing community.";
@@ -29,7 +45,7 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
     const rules = CONVERSATION_REALISM_RULES.toLowerCase();
     // Must forbid repeating/rewording a concern already voiced.
     assert.ok(rules.includes("already"));
-    assert.ok(rules.includes("reworded") || rules.includes("rephrased"));
+    assert.ok(rules.includes("lightly reword"));
   });
 
   test("instructs the persona to give NEW information when asked to clarify (issue 3c)", () => {
@@ -42,8 +58,8 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
 
   test("instructs the persona to acknowledge and move on once a concern is addressed (issue 3d)", () => {
     const rules = CONVERSATION_REALISM_RULES.toLowerCase();
-    assert.ok(rules.includes("move on") || rules.includes("moving forward") || rules.includes("forward"));
-    assert.ok(rules.includes("acknowledge"));
+    assert.ok(rules.includes("closed unless the consultant reopens it"));
+    assert.ok(rules.includes("accept that sequencing"));
   });
 
   test("still includes the persona, difficulty behavior, and conversation history", () => {
@@ -70,62 +86,100 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
   });
 });
 
-describe("CONVERSATION_REALISM_RULES - state awareness and forward motion", () => {
+describe("CONVERSATION_REALISM_RULES - state awareness and reactive continuity", () => {
   const rules = CONVERSATION_REALISM_RULES.toLowerCase();
 
   test("forbids repeating a line verbatim or lightly reworded, with no unmet-want loophole", () => {
-    assert.ok(rules.includes("never repeat yourself"));
-    assert.ok(rules.includes("lightly reworded"));
+    assert.ok(rules.includes("never repeat or reopen"));
+    assert.ok(rules.includes("lightly reword"));
     // The old rules allowed re-raising a concern whenever the consultant's last
     // reply "failed to address it", which the model used as license to re-issue
     // the opening demand verbatim. That escape hatch must be gone.
     assert.ok(!rules.includes("unless the consultant's most recent reply"));
   });
 
-  test("requires reacting to the consultant's last move before anything else", () => {
-    assert.ok(rules.includes("react, then advance"));
+  test("requires reacting to the consultant's last move without creating an agenda", () => {
     assert.ok(rules.includes("most recent message"));
-    assert.ok(rules.includes("only make sense if the consultant's last message had not happened"));
+    assert.ok(rules.includes("would only make sense if the consultant's last message had not happened"));
+    assert.ok(rules.includes("independently bring back"));
   });
 
-  test("requires every turn to advance the conversation somewhere new", () => {
-    assert.ok(rules.includes("has not been yet"));
-    assert.ok(rules.includes("never leave the conversation exactly where you found it"));
+  test("does not retain the old imperative to advance somewhere new", () => {
+    assert.ok(!rules.includes("react, then advance"));
+    assert.ok(!rules.includes("take the conversation somewhere it has not been yet"));
+    assert.ok(!rules.includes("never leave the conversation exactly where you found it"));
   });
 
   test("covers the state the customer must not contradict", () => {
-    // A promise to fetch something is pending, not a fresh reason to re-demand it.
-    assert.ok(rules.includes("go get you a number"));
-    assert.ok(rules.includes("how long that usually takes"));
     // A number already given cannot be asked for again.
     assert.ok(rules.includes("already been given to you"));
     assert.ok(rules.includes("do not ask for it again"));
     // A question asked must be acknowledged.
     assert.ok(rules.includes("never behave as though no question was asked"));
     // An alternative or budget question must be answered on its own terms.
-    assert.ok(rules.includes("respond to that specific thing"));
+    assert.ok(rules.includes("respond to that specific move"));
   });
 
-  test("reinterprets persona 'stay firm' instructions as being about the want, not the wording", () => {
-    // Nearly every scenario core ends with a failure branch telling the customer
-    // to stay fixed on / keep asking about their opening demand. Those phrases
-    // must be neutralized here or they keep producing verbatim loops.
-    assert.ok(rules.includes("stay firm"));
-    assert.ok(rules.includes("stay fixed on"));
-    assert.ok(rules.includes("keep asking"));
-    assert.ok(rules.includes("keep steering back"));
-    assert.ok(rules.includes("it never means reusing the same sentence"));
+  test("treats repeated or parked topics as closed unless the current message opens them", () => {
+    assert.ok(rules.includes("parked topic stays parked"));
+    assert.ok(rules.includes("current message itself makes it genuinely relevant"));
+    assert.ok(rules.includes("backstop"));
   });
 
-  test("preserves the tough-customer behaviors that make the drill worth doing", () => {
-    assert.ok(rules.includes("being difficult is good"));
-    assert.ok(rules.includes("escalating impatience in new words"));
-    assert.ok(rules.includes("is that real or is that a stall?"));
-    // Threatening to leave and accepting an honest referral are both wins to keep.
-    assert.ok(rules.includes("about to leave"));
-    assert.ok(rules.includes("refers you elsewhere"));
-    // Reward a consultant who is doing everything right.
-    assert.ok(rules.includes("do not stonewall someone who is doing everything right"));
+  test("preserves toughness as guarded answering rather than combativeness", () => {
+    assert.ok(rules.includes("being tough means guarded, not combative"));
+    assert.ok(rules.includes("short or careful answers"));
+    assert.ok(rules.includes("slow warming"));
+    assert.ok(rules.includes("manufacturing a new objection"));
+  });
+});
+
+describe("REACTIVE_ONLY_CUSTOMER_RULES - primary customer-turn architecture", () => {
+  test("is present in every shared customer prompt and is last in the stable prefix", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, 2);
+      assert.ok(prompt.includes(REACTIVE_ONLY_CUSTOMER_RULES), `${difficulty} must inherit reactive-only rules`);
+      assert.ok(
+        prompt.indexOf(REACTIVE_ONLY_CUSTOMER_RULES) < prompt.indexOf("Conversation so far:"),
+        `${difficulty} must receive reactive-only rules in the stable prefix`,
+      );
+    }
+
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.endsWith(REACTIVE_ONLY_CUSTOMER_RULES));
+    assert.ok(prefix.indexOf(CUSTOMER_ROLE_BOUNDARY_RULES) < prefix.indexOf(REACTIVE_ONLY_CUSTOMER_RULES));
+  });
+
+  test("allows only the opening exception and requires every later turn to react", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /THE OPENING IS THE ONE EXCEPTION/);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /only respond to the consultant's immediately preceding message/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /If the consultant asked a question, answer that question/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /If the consultant made a statement, react naturally/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /Then stop/i);
+  });
+
+  test("permits hidden motivations only through a genuine current opening", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /current message creates a genuine, relevant opening/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /never a scheduled reveal or an independent callback/i);
+    assert.match(HIDDEN_MOTIVATION_DISCOVERY_RULES, /SURFACE A HIDDEN FACT ONLY THROUGH A REAL CURRENT OPENING/);
+  });
+
+  test("forbids self-initiated callbacks and explicitly overrides legacy advancing language", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /NO INDEPENDENT CALLBACKS/);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /do not bring it back later on your own/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /react then advance, take the conversation somewhere it has not been/i);
+
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced");
+    assert.ok(!prefix.includes("REACT, THEN ADVANCE"));
+    assert.ok(!prefix.includes("Take the conversation somewhere it has not been yet"));
+    assert.ok(!prefix.includes("Never leave the conversation exactly where you found it"));
+  });
+
+  test("defines advanced difficulty as reluctant, guarded, and slow-warming rather than combative", () => {
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /short guarded answers/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /slow warming/i);
+    assert.match(REACTIVE_ONLY_CUSTOMER_RULES, /not what you force back into the conversation/i);
+    assert.match(buildCustomerReplyStablePrefix(PERSONA, "advanced"), /Make the consultant work for information/i);
   });
 });
 
@@ -1094,6 +1148,122 @@ describe("scoreTranscript - deterministic content-hash cache", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Structured stall evidence is a separate optional extraction. These tests
+// intentionally mock only the score responder: they verify response shape and
+// graceful parsing without making any conversational-quality claim.
+// ---------------------------------------------------------------------------
+describe("scoreTranscript - structured stallEvidence", () => {
+  const stallTranscript = [
+    turn("customer", "I need to think about it because another company is cheaper."),
+    turn("consultant", "That's fair. What are you comparing us against?"),
+    turn("customer", "They gave me a lower quote, but I do not know what it includes."),
+    turn("consultant", "Would it help to compare the two quotes together?"),
+  ];
+
+  const scoringResponse = (stallEvidence: unknown) =>
+    JSON.stringify({
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+      closeOutcome: "client_asked_next_steps",
+      feedback: "Specific, grounded coaching feedback.",
+      stallEvidence,
+    });
+
+  test("returns populated fixed-vocabulary evidence for a stall-type session", async () => {
+    const cache = makeInMemoryCache();
+    let prompt = "";
+    const responder: ScoreResponder = async (input) => {
+      prompt = input;
+      return scoringResponse({
+        questionTypesUsed: ["origin", "evidence"],
+        redFlagsTriggered: ["interrupting"],
+        rewardedBehaviorsObserved: ["using silence", "letting the customer reach their own conclusion"],
+      });
+    };
+
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, {
+      responder,
+      cache,
+      stallType: "think_it_over",
+    });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.deepEqual(result.stallEvidence, {
+      questionTypesUsed: ["origin", "evidence"],
+      redFlagsTriggered: ["interrupting"],
+      rewardedBehaviorsObserved: ["using silence", "letting the customer reach their own conclusion"],
+    });
+    assert.ok(prompt.includes("THIS IS A STALL & EXCUSE HANDLING SESSION"));
+    for (const questionType of STALL_EVIDENCE_QUESTION_TYPES) {
+      assert.ok(prompt.includes(`"${questionType}"`));
+    }
+    assert.match(prompt, /"analogy" \(a familiar situation used to uncover decision-making behavior/);
+    assert.match(prompt, /Include "analogy" whenever the consultant uses a familiar hypothetical or comparison/);
+    assert.ok(prompt.includes(STALL_EVIDENCE_RED_FLAGS.join('", "')));
+    assert.ok(prompt.includes(STALL_EVIDENCE_REWARDED_BEHAVIORS.join('", "')));
+    assert.equal(cache.size(), 0, "stall evidence must not be lost to the legacy score cache");
+  });
+
+  test("keeps non-stall scoring unchanged and returns null evidence", async () => {
+    const cache = makeInMemoryCache();
+    let prompt = "";
+    const responder: ScoreResponder = async (input) => {
+      prompt = input;
+      return scoringResponse({
+        questionTypesUsed: ["not a permitted value"],
+        redFlagsTriggered: [],
+        rewardedBehaviorsObserved: [],
+      });
+    };
+
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, { responder, cache });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.equal(result.stallEvidence, null);
+    assert.ok(!prompt.includes("THIS IS A STALL & EXCUSE HANDLING SESSION"));
+    assert.equal(cache.size(), 1, "the established non-stall score cache behavior remains unchanged");
+  });
+
+  test("treats malformed or missing stall evidence as null without blocking rubric scoring", async () => {
+    const malformedEvidence = {
+      questionTypesUsed: "origin",
+      redFlagsTriggered: ["interrupting"],
+      rewardedBehaviorsObserved: ["using silence"],
+    };
+    const result = await scoreTranscript(stallTranscript, "intermediate", "consulting", null, {
+      responder: async () => scoringResponse(malformedEvidence),
+      cache: makeInMemoryCache(),
+      stallType: "think_it_over",
+    });
+
+    assert.deepEqual(result.rubric, {
+      needsDiscovery: 81,
+      objectionPrevention: 82,
+      trustBuilding: 83,
+      naturalClose: 84,
+      relationshipContinuity: 85,
+    });
+    assert.equal(result.feedback, "Specific, grounded coaching feedback.");
+    assert.equal(result.stallEvidence, null);
+  });
+});
+
 describe("computeScoreCacheHash - stability and sensitivity", () => {
   const transcript = [
     turn("consultant", "Hello there."),
@@ -1133,6 +1303,24 @@ describe("computeScoreCacheHash - stability and sensitivity", () => {
     assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "leadership", null));
     assert.notEqual(base, computeScoreCacheHash(transcript, "intermediate", "consulting", "resale_buyer"));
   });
+
+  test("the scoring-rule version invalidates the pre-version cache key", () => {
+    const legacyNormalized = {
+      transcript: transcript.map((m) => ({ role: m.role, content: m.content })),
+      difficulty: "intermediate",
+      track: "consulting",
+      transactionType: null,
+    };
+    const legacyHash = createHash("sha256").update(JSON.stringify(legacyNormalized)).digest("hex");
+    const currentHash = computeScoreCacheHash(transcript, "intermediate", "consulting", null);
+
+    assert.equal(SCORE_CACHE_VERSION, "2026-08-08.warranty-follow-up-grounding.v1");
+    assert.notEqual(
+      currentHash,
+      legacyHash,
+      "a score generated before this rubric/grounding version must be a cache miss",
+    );
+  });
 });
 
 // ===========================================================================
@@ -1153,8 +1341,8 @@ import {
 describe("CONVERSATION_REALISM_RULES - universal behavior rules (Rules 2, 4-7)", () => {
   const rules = CONVERSATION_REALISM_RULES;
 
-  test("Rule 2: a properly redirected topic must be dropped after the second redirect", () => {
-    assert.match(rules, /STOP ASKING IT/i);
+  test("Rule 2: a properly redirected topic is closed unless the consultant reopens it", () => {
+    assert.match(rules, /ONCE A QUESTION IS ANSWERED OR PROPERLY REDIRECTED, IT IS CLOSED/i);
     assert.match(rules, /redirect/i);
   });
 
@@ -1163,16 +1351,17 @@ describe("CONVERSATION_REALISM_RULES - universal behavior rules (Rules 2, 4-7)",
     assert.match(rules, /absent/i);
   });
 
-  test("Rule 5: other options may be asked for at most once", () => {
-    assert.match(rules, /OTHER OPTIONS AT MOST ONCE/i);
+  test("Rule 5: alternatives already discussed are not independently re-opened", () => {
+    assert.match(rules, /If the consultant offered an alternative/i);
+    assert.match(rules, /rather than your original demand/i);
   });
 
   test("Rule 6: the conversation must be allowed to end", () => {
     assert.match(rules, /LET THE CONVERSATION BE ABLE TO END/i);
   });
 
-  test("Rule 7: difficulty has to evolve rather than repeat", () => {
-    assert.match(rules, /EVOLVES/i);
+  test("Rule 7: difficulty is expressed through guarded answers rather than repeat demands", () => {
+    assert.match(rules, /BEING TOUGH MEANS GUARDED, NOT COMBATIVE/i);
   });
 
   test("Rule 1 (PR #86) is not regressed by the additions", () => {
@@ -1205,6 +1394,15 @@ describe("buildTurnStateBlock - carries the derived conversation state (Rules 2-
       turn("customer", "That sounds right, that's exactly what we need."),
     ]);
     assert.match(block, /ALREADY said the proposed solution fits/);
+  });
+
+  test("computed price arithmetic is carried into every customer-reply turn", () => {
+    const block = buildTurnStateBlock([
+      turn("customer", "I have a written competing offer of $30,600 out the door."),
+      turn("consultant", "I can offer you $29,700 out the door today."),
+    ]);
+    assert.match(block, /latest offer of \$29,700 is \$900 below your stated reference price of \$30,600/i);
+    assert.match(block, /computed from the transcript, not estimated/i);
   });
 
   test("a conversation with none of these situations is byte-identical to the PR #86 behavior", () => {
@@ -1294,6 +1492,13 @@ describe("the shared scoring-accuracy blocks (Rules 8-10)", () => {
     assert.match(TRANSCRIPT_FIDELITY_RULES, /Never state that the consultant failed to do something they demonstrably did/);
   });
 
+  test("Rule 10 also forbids an equivalent you-could-have-asked critique without checking all consultant turns", () => {
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /you could have asked X/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /you missed an opportunity to ask X/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /does not appear anywhere in the CONSULTANT-labeled turns/i);
+    assert.match(TRANSCRIPT_FIDELITY_RULES, /materially equivalent phrasing/i);
+  });
+
   test("Rule 8: an accepted solution is a success and no close may be required", () => {
     assert.match(ACCEPTED_SOLUTION_RULES, /client_agreed/);
     assert.match(ACCEPTED_SOLUTION_RULES, /paperwork/i);
@@ -1366,7 +1571,7 @@ describe("TIMING_FEEDBACK_RULES - transcript-grounded timing claims (Rule 11)", 
 
 });
 
-describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", () => {
+describe("scoreTranscript - deterministic transcript grounding reaches the model", () => {
   function capture() {
     let seen = "";
     let key = "";
@@ -1418,6 +1623,42 @@ describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", (
     );
   });
 
+  test("the Rene-style warranty repro explicitly blocks an equivalent never-asked critique", async () => {
+    const cap = capture();
+    const warrantyFollowUp = [
+      turn("consultant", "I hear that you need a dependable SUV and a dealer you can trust long-term."),
+      turn(
+        "customer",
+        "After my last service experience, warranties and maintenance value matter as much as the price.",
+      ),
+      turn(
+        "consultant",
+        "What specific warranty coverages are you looking for, so I can flag that for the finance team?",
+      ),
+      turn(
+        "customer",
+        "I want protection for expensive repairs and to know what maintenance support is available.",
+      ),
+      turn(
+        "consultant",
+        "The finance office can walk us through the exact service-plan options after we identify the right SUV.",
+      ),
+    ];
+
+    await scoreTranscript(warrantyFollowUp, "intermediate", "consulting", null, {
+      responder: cap.responder,
+      cache: makeInMemoryCache(),
+    });
+
+    assert.match(cap.input(), /SPECIFIC FOLLOW-UP ASKED/);
+    assert.match(
+      cap.input(),
+      /The CONSULTANT DID ask a specific warranty\/service-plan\/maintenance follow-up question at turn 3 of 5/,
+    );
+    assert.match(cap.input(), /What specific warranty coverages are you looking for/);
+    assert.match(cap.input(), /do not coach them to ask an equivalent question as though it were absent/);
+  });
+
   test("the pre-check follows the transcript and stays out of the cacheable prefix", async () => {
     const cap = capture();
     await scoreTranscript(comfortThenBudget, "beginner", "consulting", null, {
@@ -1448,6 +1689,26 @@ describe("scoreTranscript - the timing pre-check reaches the model (Rule 11)", (
       cache: makeInMemoryCache(),
     });
     assert.ok(!cap.input().includes("TIMING PRE-CHECK"));
+  });
+
+  test("the consulting scorer receives the deterministic offer history", async () => {
+    const cap = capture();
+    await scoreTranscript(
+      [
+        turn("customer", "I have a written competing offer of $30,600 out the door."),
+        turn("consultant", "I can offer you $29,700 out the door."),
+        turn("consultant", "My revised offer is $30,400 out the door."),
+        turn("consultant", "I can accept your counter at $30,200."),
+      ],
+      "beginner",
+      "consulting",
+      null,
+      { responder: cap.responder, cache: makeInMemoryCache() },
+    );
+    assert.match(cap.input(), /PRICE PRE-CHECK/);
+    assert.match(cap.input(), /Consultant offer 1: \$29,700 \(\$900 below the reference/);
+    assert.match(cap.input(), /Consultant offer 2: \$30,400 \(\$200 below the reference/);
+    assert.match(cap.input(), /Consultant offer 3: \$30,200 \(\$400 below the reference/);
   });
 });
 
@@ -1602,13 +1863,17 @@ describe("REASONABLE_CUSTOMER_RULES - reaches every customer prompt", () => {
     assert.ok(prompt.indexOf(REASONABLE_CUSTOMER_RULES) < prompt.indexOf("Conversation so far:"));
   });
 
-  test("it comes AFTER the difficulty behavior and the realism rules, so it is the final word", () => {
+  test("it comes after difficulty and realism while remaining subordinate to the final reactive-only rule", () => {
     const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
     assert.ok(
       prefix.indexOf(CONVERSATION_REALISM_RULES) < prefix.indexOf(REASONABLE_CUSTOMER_RULES),
-      "the reasonableness bound must be read last to override 'do not make it easy'",
+      "the reasonableness bound must follow the baseline difficulty and realism guidance",
     );
-    assert.match(REASONABLE_CUSTOMER_RULES, /take precedence over any instruction above/i);
+    assert.ok(
+      prefix.indexOf(REASONABLE_CUSTOMER_RULES) < prefix.indexOf(REACTIVE_ONLY_CUSTOMER_RULES),
+      "the reactive-only rule must be the ultimate customer-turn constraint",
+    );
+    assert.match(REASONABLE_CUSTOMER_RULES, /never authorize an independent topic change/i);
   });
 });
 
@@ -1639,15 +1904,14 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
     assert.match(rules, /no downtime, no breakdowns, no repairs, no delays, no missed deadlines, no recurrence/i);
   });
 
-  test("Rule B closes after at most one more pass, matching Rule A/C's close-out pattern", () => {
-    // Rules A and C already have an explicit "answered, so stop asking"
-    // mechanic ("never re-ask it in different words", "that specific is
-    // FINISHED"). Rule B was missing the equivalent, which is why a customer
-    // could keep re-demanding a guarantee in new words forever. This asserts
-    // the same shape now exists on Rule B specifically.
-    assert.match(rules, /you get exactly ONE more pass/);
+  test("Rule B closes immediately after a response, except for a current-message opening", () => {
+    // The primary architecture removes the former "one more pass" permission:
+    // after a proper response, the customer cannot independently restart the
+    // guarantee topic. A later related question can still earn a relevant answer.
+    assert.match(rules, /Do not independently push on it again/);
+    assert.match(rules, /If the consultant later asks a new, genuinely related question/);
     assert.match(rules, /the topic is CLOSED PERMANENTLY: never ask for that guarantee again in any wording/);
-    assert.match(rules, /refusing to accept an honest answer, and it is forbidden/);
+    assert.match(rules, /refusing to have the conversation in front of you, and it is forbidden/);
   });
 
   test("Rule C: an invited specific must be answerable, and is finished once answered", () => {
@@ -1676,27 +1940,22 @@ describe("REASONABLE_CUSTOMER_RULES - Rules A-E content", () => {
     // guarded and route pressure into the persona's real worry, which is HARDER
     // to answer than a technicality, not easier.
     assert.match(rules, /Being hard to satisfy is realistic and wanted/);
-    assert.match(rules, /Stay guarded, stay skeptical, make the consultant earn it/);
-    assert.match(rules, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
-    assert.match(rules, /stronger pressure, not weaker/);
+    assert.match(rules, /Stay guarded and skeptical, and make the consultant earn fuller information/);
+    assert.match(rules, /WHEN A CURRENT QUESTION OPENS THE DOOR, ANSWER WITH YOUR REAL WORRY, NOT A RIDDLE/);
+    assert.match(rules, /only name the real worry if it helps answer the consultant's current question/);
   });
 
-  test("guardrail: the difficulty and escalation instructions themselves are untouched", () => {
-    // The fix is additive. If it had been implemented by softening these, a hard
-    // customer would have stopped being hard.
+  test("guardrail: difficulty and escalation preserve guarded disclosure without a separate agenda", () => {
     const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 0);
-    assert.match(advanced, /Push back hard on price and value/);
-    assert.match(advanced, /Do not make it easy/);
-    assert.match(escalationAddon(2), /tougher objection/i);
+    assert.match(advanced, /skeptical and less immediately cooperative/);
+    assert.match(advanced, /Use short, guarded, non-committal answers/);
+    assert.match(escalationAddon(2), /stay guarded a bit longer/i);
   });
 
-  test("tier 2 escalation cannot be satisfied by re-raising a Rule-B-closed guarantee demand", () => {
-    // Tier 2 escalation ("surface a tougher objection") had no exception for
-    // topics REASONABLE_CUSTOMER_RULES already resolved, so escalation could
-    // read as license to re-raise a guarantee demand in a new wording to
-    // satisfy "tougher". This asserts the explicit carve-out exists.
-    assert.match(escalationAddon(2), /must still be a NEW one/);
-    assert.match(escalationAddon(2), /never a Rule-B-governed guarantee demand you have already had answered and closed out/);
+  test("tier 2 escalation makes current answers more guarded without creating a new objection", () => {
+    assert.match(escalationAddon(2), /require clearer rapport/i);
+    assert.match(escalationAddon(2), /answer in a more skeptical, concise way/i);
+    assert.doesNotMatch(escalationAddon(2), /new objection/i);
   });
 });
 
@@ -1781,6 +2040,61 @@ describe("GRACEFUL_RELEASE_RULES - Rule F, scoring recognition", () => {
       { responder, cache: makeInMemoryCache() },
     );
     assert.ok(seen.includes(GRACEFUL_RELEASE_RULES));
+  });
+});
+
+describe("STALL_DIAGNOSIS_RULES - scoring stalls and objections as diagnostic moments", () => {
+  test("defines the decision-first philosophy and applies it throughout SOLVE", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /better decision than they would have made without them/);
+    assert.match(STALL_DIAGNOSIS_RULES, /not only near a close/);
+    assert.match(STALL_DIAGNOSIS_RULES, /Situation, Open, Listen, Visualize Success, Engineer, Confirm, and Solve/);
+    assert.match(STALL_DIAGNOSIS_RULES, /I don't know, I'll have to talk to my wife about that/);
+  });
+
+  test("requires validation and investigation instead of defensive assumptions", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /Never answer an assumption/);
+    assert.match(STALL_DIAGNOSIS_RULES, /What are you comparing us against/);
+    assert.match(STALL_DIAGNOSIS_RULES, /Validate before investigating/);
+    assert.match(STALL_DIAGNOSIS_RULES, /origin, evidence, decision-process, stakeholder, or analogy questions/);
+    assert.match(STALL_DIAGNOSIS_RULES, /An analogy question uses a familiar situation to uncover decision-making behavior/);
+    assert.match(STALL_DIAGNOSIS_RULES, /lets the customer name the specific concern/);
+    assert.match(STALL_DIAGNOSIS_RULES, /us versus the decision/);
+  });
+
+  test("rewards the unconsulted-stakeholder process and concise communication", () => {
+    assert.match(STALL_DIAGNOSIS_RULES, /validate the stall completely without resisting it/);
+    assert.match(STALL_DIAGNOSIS_RULES, /use a branching hypothetical to narrow the real concern/);
+    assert.match(STALL_DIAGNOSIS_RULES, /the skill being tested is the process of drawing the concern out/);
+    assert.match(STALL_DIAGNOSIS_RULES, /one good question, then silence/);
+    assert.match(STALL_DIAGNOSIS_RULES, /defending price before understanding the comparison/);
+  });
+
+  test("reaches the consulting rubric prompt the scorer actually sees", async () => {
+    let seen = "";
+    const responder: ScoreResponder = async (input) => {
+      seen = input;
+      return JSON.stringify({
+        needsDiscovery: 80,
+        objectionPrevention: 80,
+        trustBuilding: 80,
+        naturalClose: 80,
+        relationshipContinuity: 80,
+        closeOutcome: "recommendation_made",
+        feedback: "ok",
+      });
+    };
+    await scoreTranscript(
+      [
+        turn("consultant", "What are you comparing us against?"),
+        turn("customer", "I need to talk to my partner first."),
+      ],
+      "intermediate",
+      "consulting",
+      null,
+      { responder, cache: makeInMemoryCache() },
+    );
+    assert.ok(seen.includes(STALL_DIAGNOSIS_RULES));
+    assert.match(seen, /Score the quality of that process, not whether it produced a yes/);
   });
 });
 
@@ -1923,12 +2237,94 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - reaches every customer prompt", () => 
   });
 });
 
+describe("LOW_KEY_CUSTOMER_CONVERSATION_RULES - normal customer baseline", () => {
+  test("is embedded in every shared customer prompt and remains in the stable prefix", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      const prompt = buildCustomerReplyPrompt(PERSONA, [], difficulty, 2);
+      assert.ok(prompt.includes(LOW_KEY_CUSTOMER_CONVERSATION_RULES), `${difficulty} must inherit the low-key rules`);
+      assert.ok(
+        prompt.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES) < prompt.indexOf("Conversation so far:"),
+        `${difficulty} must receive the rule in the cacheable shared prefix`,
+      );
+    }
+  });
+
+  test("explicitly favors a quiet, responsive customer who accepts specific factual answers", () => {
+    const rules = LOW_KEY_CUSTOMER_CONVERSATION_RULES;
+    assert.match(rules, /STAY RELATIVELY QUIET AND RESPONSIVE/);
+    assert.match(rules, /own questions, stacked follow-ups, or repeated tests/i);
+    assert.match(rules, /clear, specific, on-topic factual answer/i);
+    assert.match(rules, /Do not rephrase the same question/i);
+    assert.match(rules, /short clarification directly about that message can be natural/i);
+    assert.match(rules, /The consultant leads discovery/i);
+  });
+
+  test("composes after responsiveness and before hidden-motivation guidance", () => {
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prefix.indexOf(CUSTOMER_RESPONSIVENESS_RULES) < prefix.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES));
+    assert.ok(prefix.indexOf(LOW_KEY_CUSTOMER_CONVERSATION_RULES) < prefix.indexOf(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+  });
+});
+
+describe("buildCustomerReplyPrompt - answered factual-question memory", () => {
+  test("puts a customer question and its specific consultant answer into the volatile state tail", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What towing capacity does this truck have?"),
+        msg(
+          "consultant",
+          "This truck is rated to tow 12,000 to 14,000 pounds depending on its configuration.",
+        ),
+      ],
+      "advanced",
+    );
+    assert.match(prompt, /ANSWERED AND CLOSED/);
+    assert.match(prompt, /brief natural reaction/i);
+    assert.match(prompt, /same fact again with different wording/i);
+    assert.ok(
+      prompt.indexOf("Conversation so far:") < prompt.indexOf("ANSWERED AND CLOSED"),
+      "the derived factual-answer memory must be after the transcript in the volatile tail",
+    );
+  });
+
+  test("places a concrete towing closure gate immediately before the output instruction", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What specific towing package and towing capacity does this truck have?"),
+        msg("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+      ],
+      "advanced",
+    );
+    const gate = prompt.lastIndexOf("FINAL PRE-REPLY CHECK");
+    const output = prompt.lastIndexOf("Respond with your next line as the customer");
+    assert.ok(gate > prompt.lastIndexOf("Conversation so far:"));
+    assert.ok(gate < output);
+    assert.match(prompt.slice(gate, output), /TOWING-CAPABILITY BOUNDARY/);
+    assert.match(prompt.slice(gate, output), /What comes with the towing package/i);
+  });
+
+  test("preserves one concise clarification when the consultant is genuinely vague", () => {
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [
+        msg("customer", "What towing capacity does this truck have?"),
+        msg("consultant", "It should be able to handle a trailer, but I would need to check the exact rating."),
+      ],
+      "advanced",
+    );
+    assert.match(prompt, /may make ONE concise clarification directly about it/i);
+    assert.doesNotMatch(prompt, /ANSWERED AND CLOSED/);
+  });
+});
+
 describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   const rules = CUSTOMER_RESPONSIVENESS_RULES;
 
-  test("core rule: the rep drives discovery and answering is the default job", () => {
-    assert.match(rules, /THE CONSULTANT IS DRIVING DISCOVERY AND YOUR DEFAULT JOB IS TO ANSWER/);
-    assert.match(rules, /never a licence to talk past the question/);
+  test("core rule: the rep drives and the customer responds", () => {
+    assert.match(rules, /THE CONSULTANT DRIVES THE CONVERSATION; YOUR JOB IS TO RESPOND/);
+    assert.match(rules, /never a licence to talk past the question or to introduce a different subject/);
   });
 
   test("Rule 1: a direct question gets a relevant answer, not an unrelated concern", () => {
@@ -1942,38 +2338,82 @@ describe("CUSTOMER_RESPONSIVENESS_RULES - Rules 1-4 content", () => {
   test("Rule 2: general, then narrowed, then COMMITTED", () => {
     assert.match(rules, /WHEN THEY NARROW, YOU COMMIT/);
     assert.match(rules, /Never general, narrowed, then general again/);
-    assert.match(rules, /It's the transmission mostly/);
-    assert.match(rules, /I just want to make sure none of those things happen/);
+    assert.match(rules, /General, then narrowed, then committed/);
+    assert.match(rules, /Never general, narrowed, then general again/);
   });
 
   test("Rule 3: a premature question is redirected once and the customer returns to answering", () => {
     assert.match(rules, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
     assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics/);
-    assert.match(rules, /Do not keep pushing the parked topic/);
+    assert.match(rules, /Do not keep a parked topic alive as unfinished business/);
+  });
+
+  test("Rule 3: the department topics are a worked example, not the whole list", () => {
+    assert.match(rules, /warranties, service coverage, financing, loan terms, payment mechanics, features, or specs/i);
+    assert.match(rules, /Do not keep a parked topic alive as unfinished business/i);
   });
 
   test("Rule 4: a re-steered tangent is answered, not bounced back", () => {
     assert.match(rules, /WHEN THEY STEER A TANGENT BACK, ANSWER THE REAL QUESTION/);
-    assert.match(rules, /Probably a hybrid, I do a lot of highway miles/);
-    assert.match(rules, /Do not answer a question with a question/);
+    assert.match(rules, /Do not answer a question with another question/);
   });
 
-  test("guardrail: difficulty is preserved and PR #88's own outs are explicitly kept", () => {
+  test("guardrail: difficulty is preserved without a customer-side follow-up agenda", () => {
     assert.match(rules, /This makes you no easier to sell to/);
-    assert.match(rules, /still guarded, still skeptical, still slow to hand over your real motivation/);
-    // PR #88's Rule A out-of-scope question and the one alternatives round survive.
-    assert.match(rules, /one out-of-scope question and one round of "what else do you have"/);
-    assert.match(rules, /None of that changes/);
-    assert.match(rules, /answer first, then ask/);
+    assert.match(rules, /still guarded, skeptical, and slow to hand over your real motivation/);
+    assert.match(rules, /make the consultant work through better questions and better listening/i);
+    assert.match(rules, /not through a fight for control of the topic/i);
   });
 
-  test("guardrail: the difficulty, escalation, and reasonableness text is untouched", () => {
+  test("guardrail: the difficulty and escalation text makes disclosure harder without adding combativeness", () => {
     const advanced = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
-    assert.match(advanced, /Push back hard on price and value/);
-    assert.match(advanced, /Do not make it easy/);
+    assert.match(advanced, /Use short, guarded, non-committal answers/i);
+    assert.match(advanced, /never by independently reviving an old concern/i);
     assert.match(advanced, /Being hard to satisfy is realistic and wanted/);
-    assert.match(advanced, /PUSH BACK WITH YOUR REAL WORRY, NOT A RIDDLE/);
-    assert.match(escalationAddon(2), /tougher objection/i);
+    assert.match(advanced, /WHEN A CURRENT QUESTION OPENS THE DOOR/i);
+    assert.match(escalationAddon(2), /stay guarded a bit longer/i);
+  });
+});
+
+// The trainer is only useful when the persona's real priorities must be
+// discovered. These assertions deliberately check the shared prompt, rather than
+// a one-off Vince fixture, because the same internal-state discipline must govern
+// every vertical and every selected persona variation.
+describe("HIDDEN_MOTIVATION_DISCOVERY_RULES - discovery over scripted pivots", () => {
+  test("is present in every shared customer prompt before the role boundary", () => {
+    const prompt = buildCustomerReplyPrompt(PERSONA, [], "beginner");
+    const prefix = buildCustomerReplyStablePrefix(PERSONA, "advanced", 2);
+    assert.ok(prompt.includes(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+    assert.ok(prefix.includes(HIDDEN_MOTIVATION_DISCOVERY_RULES));
+    assert.ok(
+      prefix.indexOf(HIDDEN_MOTIVATION_DISCOVERY_RULES) < prefix.indexOf(CUSTOMER_ROLE_BOUNDARY_RULES),
+      "hidden-motivation guidance must be active before the final customer-role boundary",
+    );
+  });
+
+  test("makes motivations internal state instead of a repeated spoken script", () => {
+    const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
+    assert.match(rules, /INTERNAL STATE, not a script/i);
+    assert.match(rules, /A consultant should have to draw them out through good discovery questions/i);
+    assert.match(rules, /DO NOT ANNOUNCE OR SIGNAL THE SAME CORE MOTIVATION ON EVERY TURN/i);
+    assert.match(rules, /Do not tack an opening demand, a price pivot, or another version of the same hidden concern onto unrelated answers/i);
+    assert.match(rules, /REVEAL IN LAYERS, NOT AS A LOOP/i);
+  });
+
+  test("requires the named topic to be answered instead of substituting a favored concern", () => {
+    const rules = HIDDEN_MOTIVATION_DISCOVERY_RULES;
+    assert.match(rules, /TOPIC FIDELITY COMES FIRST/i);
+    assert.match(rules, /If they ask about safety, talk about the safety you need/i);
+    assert.match(rules, /private motivation can add context only after it has helped answer the topic, never in place of the answer/i);
+
+    const prompt = buildCustomerReplyPrompt(
+      PERSONA,
+      [msg("consultant", "Safety matters to you. What specifically do you need to feel safe?")],
+      "beginner",
+    );
+    assert.match(prompt, /FINAL DIRECT-ANSWER CHECK/i);
+    assert.match(prompt, /If they ask about safety, explicitly address safety/i);
+    assert.match(prompt, /Do not replace that subject with your recurring opening request/i);
   });
 });
 
@@ -2041,7 +2481,7 @@ describe("worked example (spec): the reliability narrowing", () => {
 
   test("the BAD reply is the exact shape both layers name and forbid", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_NARROWING, "advanced", 2);
-    assert.match(prompt, /I just want to make sure none of those things happen/, "the static rules name it");
+    assert.match(prompt, /Never general, narrowed, then general again/, "the static rules name the forbidden shape");
     assert.match(prompt, /I just don't want any of those to happen/, "the per-turn line names its shape too");
     assert.ok(
       BAD.startsWith("I just want to make sure none of those"),
@@ -2080,12 +2520,11 @@ describe("worked example (spec): the premature warranty question", () => {
     assert.match(prompt, /TAKE A REDIRECT ON A PREMATURE QUESTION AND GET BACK TO ANSWERING/);
   });
 
-  test("PR #87's one-more-ask allowance is preserved, it is just not this turn's move", () => {
-    // Composition check: the deflection rule still says the topic may come back
-    // once, so the fix narrows the customer's move on THIS turn without closing a
-    // topic the rep has only redirected a single time.
+  test("the primary rule forbids an independent callback even after the first redirect", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, AT_THE_REDIRECT, "advanced", 2);
-    assert.match(prompt, /You may raise it at most ONE more time/);
+    assert.match(prompt, /reactive-only rule means you should not raise it again on your own/i);
+    assert.match(prompt, /NO INDEPENDENT CALLBACKS/);
+    assert.doesNotMatch(prompt, /You may raise it at most ONE more time/);
     assert.doesNotMatch(prompt, /That topic is CLOSED/);
   });
 
@@ -2104,3 +2543,309 @@ describe("worked example (spec): the premature warranty question", () => {
 function escapeForRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ===========================================================================
+// Vulgar/belligerent bait: detection, strike bookkeeping, and the scripted
+// reply/session-ending behavior in getCustomerReply + streamCustomerReply.
+// ===========================================================================
+// The live incident this covers: a consultant sent hostile/dismissive lines
+// ("fuck off", "sorry not worth my time") at the simulated customer and the
+// session never reached a recommendation. See server/vulgarBait.ts.
+
+describe("detectVulgarBait", () => {
+  test("flags common profanity as a whole word", () => {
+    assert.equal(detectVulgarBait("fuck off, I'm done here"), true);
+    assert.equal(detectVulgarBait("this is bullshit"), true);
+    assert.equal(detectVulgarBait("you're an asshole"), true);
+  });
+
+  test("flags multi-word bait phrases even without a listed single word", () => {
+    assert.equal(detectVulgarBait("sorry not worth my time, piss off"), true);
+    assert.equal(detectVulgarBait("go to hell with this demo"), true);
+  });
+
+  test("does not false-positive inside an unrelated longer word", () => {
+    // "assassin" contains "ass" but must not trip an "asshole"-style match; more
+    // to the point, word-boundary matching must not fire on substrings that
+    // merely contain a banned word as part of a longer, unrelated word.
+    assert.equal(detectVulgarBait("classic assessment of the market"), false);
+  });
+
+  test("ordinary consultant language never flags", () => {
+    assert.equal(detectVulgarBait("What's your timeline for moving?"), false);
+    assert.equal(detectVulgarBait("Let's talk about your budget."), false);
+  });
+
+  test("empty or whitespace-only text never flags", () => {
+    assert.equal(detectVulgarBait(""), false);
+    assert.equal(detectVulgarBait("   "), false);
+  });
+});
+
+describe("countPriorVulgarStrikes", () => {
+  test("counts only consultant turns, and only the ones that flag", () => {
+    const transcript = [
+      msg("customer", "What's your best price?"),
+      msg("consultant", "fuck off, just give me a number"),
+      msg("customer", "Haha, that's funny..."),
+      msg("consultant", "Sorry, let's get back to it. What's your budget?"),
+      msg("customer", "Around $20,000."),
+    ];
+    assert.equal(countPriorVulgarStrikes(transcript), 1);
+  });
+
+  test("a customer turn containing a flagged word is never counted (role must be consultant)", () => {
+    const transcript = [msg("customer", "Are you fucking kidding me with this price")];
+    assert.equal(countPriorVulgarStrikes(transcript), 0);
+  });
+
+  test("a clean transcript counts zero strikes", () => {
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    assert.equal(countPriorVulgarStrikes(transcript), 0);
+  });
+});
+
+describe("checkVulgarBaitStrike", () => {
+  test("no strike when the transcript has no consultant turn yet", () => {
+    assert.equal(checkVulgarBaitStrike([msg("customer", "Hi there.")]), null);
+  });
+
+  test("no strike when the last consultant message is clean, even if an earlier one was vulgar", () => {
+    // The vulgar check only ever looks at the LAST consultant turn for whether
+    // THIS turn is a strike; an earlier flagged turn still counts toward the
+    // running total (see the next test), but a clean latest turn is not itself
+    // a new strike.
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "Sorry about that. What's your budget?"),
+    ];
+    assert.equal(checkVulgarBaitStrike(transcript), null);
+  });
+
+  test("first offense returns the scripted strike-one reply and does not end the session", () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+
+  test("second offense returns the scripted strike-two reply and ends the session", () => {
+    const transcript = [
+      msg("customer", "What's your best price?"),
+      msg("consultant", "fuck off, just answer"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+  });
+
+  test("the in-flight consultant message itself is excluded from the prior-strike count", () => {
+    // Only one PRIOR consultant turn was vulgar; the current (last) one is the
+    // second vulgar turn overall, so this call must see priorStrikes = 1 and
+    // report the ending strike, not miscount it as strike 1 again or as strike 3.
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "still not worth my time, piss off"),
+    ];
+    const result = checkVulgarBaitStrike(transcript);
+    assert.equal(result?.sessionEnded, true);
+  });
+});
+
+// These prove the model is genuinely never invoked on a strike, for BOTH the
+// non-streaming and streaming reply paths -- not merely that the code LOOKS
+// like it returns early. The suite runs with OPENAI_API_KEY=sk-test-dummy and
+// no network mocking, so a real (unmocked) OpenAI call synchronously rejects
+// with AuthenticationError before any request completes. If either function's
+// early-return were removed or bypassed, these tests would fail with that
+// same AuthenticationError instead of resolving.
+describe("getCustomerReply / streamCustomerReply - vulgar strikes never reach the model", () => {
+  test("getCustomerReply: first strike resolves with the scripted line and sessionEnded=false, without calling OpenAI", async () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = await getCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+
+  test("getCustomerReply: second strike resolves with the scripted ending line and sessionEnded=true, without calling OpenAI", async () => {
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const result = await getCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+  });
+
+  test("getCustomerReply: a clean transcript is NOT short-circuited (it genuinely reaches the model and fails on the dummy key)", async () => {
+    // Sanity check for the two tests above: proves the dummy-key/no-mock setup
+    // really does fail when the strike short-circuit does NOT apply, so their
+    // passing is meaningful rather than an artifact of every call succeeding
+    // regardless of path.
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    await assert.rejects(getCustomerReply(PERSONA, transcript, "beginner", 0, ""));
+  });
+
+  test("streamCustomerReply: first strike sends the scripted line through onSentence exactly once, sessionEnded=false, without calling OpenAI", async () => {
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const sentences: Array<{ text: string; index: number }> = [];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "", (text, index) =>
+      sentences.push({ text, index }),
+    );
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+    // Voice mode gets the strike line the same way it gets any normal sentence:
+    // via onSentence, so the caller's TTS pipeline (deps.synthesize in
+    // server/turnStream.ts) synthesizes it exactly like ordinary customer
+    // speech, rather than the strike silently becoming text-only.
+    assert.deepEqual(sentences, [{ text: VULGAR_STRIKE_ONE_REPLY, index: 0 }]);
+  });
+
+  test("streamCustomerReply: second strike sends the scripted ending line through onSentence, sessionEnded=true, without calling OpenAI", async () => {
+    const transcript = [
+      msg("consultant", "fuck off"),
+      msg("customer", VULGAR_STRIKE_ONE_REPLY),
+      msg("consultant", "sorry not worth my time, piss off"),
+    ];
+    const sentences: Array<{ text: string; index: number }> = [];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "", (text, index) =>
+      sentences.push({ text, index }),
+    );
+    assert.deepEqual(result, { text: VULGAR_STRIKE_TWO_REPLY, sessionEnded: true });
+    assert.deepEqual(sentences, [{ text: VULGAR_STRIKE_TWO_REPLY, index: 0 }]);
+  });
+
+  test("streamCustomerReply: a clean transcript is NOT short-circuited (it genuinely reaches the model and fails on the dummy key)", async () => {
+    const transcript = [msg("customer", "Hi"), msg("consultant", "What are you looking for today?")];
+    await assert.rejects(streamCustomerReply(PERSONA, transcript, "beginner", 0, "", () => {}));
+  });
+
+  test("streamCustomerReply: onSentence works even with no handler passed (default no-op), first strike", async () => {
+    // streamCustomerReply's onSentence parameter defaults to a no-op, so a
+    // caller that omits it (unlikely in practice, but the signature allows it)
+    // must not throw when a strike fires.
+    const transcript = [msg("customer", "What's your best price?"), msg("consultant", "fuck off, just answer")];
+    const result = await streamCustomerReply(PERSONA, transcript, "beginner", 0, "");
+    assert.deepEqual(result, { text: VULGAR_STRIKE_ONE_REPLY, sessionEnded: false });
+  });
+});
+
+
+// This exercises getCustomerReply itself (including its real prompt construction)
+// through a deterministic responder. It is intentionally mocked: no OpenAI request
+// is made, so the expected customer lines remain stable in CI while the test still
+// proves the generated prompt carries role, direct-answer, and running-memory state
+// across the exact two-turn Auto Sales failure shape.
+describe("getCustomerReply - mocked Don Auto Sales answer discipline", () => {
+  test("answers as Don, builds on disclosed facts, and never becomes the dealership", async () => {
+    const replies = [
+      "For us, safe and comfortable means good visibility, helpful driver-assistance features, a smooth quiet highway ride, and seats that will not leave us sore after six hours. We do not need luxury extras.",
+      "Used is the better fit for us. We are on a fixed retirement income, so I need a dependable car and a payment that will not make us feel squeezed each month.",
+    ];
+    const prompts: string[] = [];
+    setCustomerReplyTestResponder(({ input }) => {
+      prompts.push(input);
+      const reply = replies.shift();
+      assert.ok(reply, "the fixture must provide one reply for each getCustomerReply call");
+      return reply;
+    });
+
+    try {
+      const transcript: TranscriptMessage[] = [
+        turn("customer", "We are replacing our nine-year-old sedan. We are looking for a used car, nothing fancy."),
+        turn("consultant", "When you say safe and comfortable for the six-hour drive to your grandkids, what does that mean to you?"),
+      ];
+
+      const safetyReply = (await getCustomerReply(personaVariantSeed["demo-v2-auto-2"].core, transcript)).text;
+      transcript.push(turn("customer", safetyReply));
+      transcript.push(turn("consultant", "Would you rather focus on a new vehicle or a used one?"));
+      const usedReply = (await getCustomerReply(personaVariantSeed["demo-v2-auto-2"].core, transcript)).text;
+
+      assert.equal(prompts.length, 2);
+      assert.ok(prompts.every((prompt) => prompt.includes(CUSTOMER_ROLE_BOUNDARY_RULES)));
+      assert.match(prompts[0], /THE CONSULTANT JUST ASKED YOU SOMETHING DIRECTLY/);
+      assert.match(prompts[1], /RUNNING CUSTOMER MEMORY CONTRACT/);
+      assert.match(prompts[1], /looking for a used car, nothing fancy/i);
+      assert.match(prompts[1], /good visibility, helpful driver-assistance features/i);
+
+      assert.match(safetyReply, /good visibility/i);
+      assert.match(safetyReply, /driver-assistance/i);
+      assert.match(safetyReply, /smooth quiet highway ride/i);
+      assert.doesNotMatch(safetyReply, /\bwe (?:have|carry|offer|stock|recommend)\b/i);
+      assert.doesNotMatch(safetyReply, /car dealer|what are you looking for/i);
+      assert.doesNotMatch(safetyReply, /\?$/);
+
+      assert.match(usedReply, /^Used is the better fit for us\./);
+      assert.match(usedReply, /fixed retirement income/i);
+      assert.match(usedReply, /payment that will not make us feel squeezed/i);
+      assert.doesNotMatch(usedReply, /good visibility|driver-assistance|smooth quiet highway ride/i);
+      assert.doesNotMatch(usedReply, /\?$/);
+      assert.doesNotMatch(usedReply, /\bwe (?:have|carry|offer|stock|recommend)\b/i);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
+  });
+});
+
+describe("getCustomerReply - closed factual-question repair", () => {
+  test("repairs a rephrased towing-package repeat before it reaches the caller", async () => {
+    const prompts: string[] = [];
+    const replies = [
+      "What features come with the towing package?",
+      "Okay, that helps.",
+    ];
+    setCustomerReplyTestResponder(({ input }) => {
+      prompts.push(input);
+      const reply = replies.shift();
+      assert.ok(reply);
+      return reply;
+    });
+
+    try {
+      const result = await getCustomerReply(
+        personaVariantSeed["auto-sales-skeptical-negotiator"].core,
+        [
+          turn("customer", "What specific towing package and towing capacity does this truck have?"),
+          turn("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+        ],
+      );
+      assert.equal(result.text, "Okay, that helps.");
+      assert.equal(prompts.length, 2);
+      assert.match(prompts[1], /VALIDATION FAILED/);
+      assert.match(prompts[1], /REJECTED DRAFT/);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
+  });
+
+  test("uses that same validated path before streaming a closed factual topic", async () => {
+    const replies = [
+      "What features come with the towing package?",
+      "Okay, that helps.",
+    ];
+    const spoken: string[] = [];
+    setCustomerReplyTestResponder(() => {
+      const reply = replies.shift();
+      assert.ok(reply);
+      return reply;
+    });
+
+    try {
+      const result = await streamCustomerReply(
+        personaVariantSeed["auto-sales-skeptical-negotiator"].core,
+        [
+          turn("customer", "What specific towing package and towing capacity does this truck have?"),
+          turn("consultant", "This truck can tow 12,000 to 14,000 pounds depending on configuration."),
+        ],
+        "intermediate",
+        0,
+        "",
+        (sentence) => spoken.push(sentence),
+      );
+      assert.equal(result.text, "Okay, that helps.");
+      assert.deepEqual(spoken, ["Okay, that helps."]);
+    } finally {
+      setCustomerReplyTestResponder(null);
+    }
+  });
+});

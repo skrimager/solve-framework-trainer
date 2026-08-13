@@ -12,6 +12,16 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+  AlertDialogCancel,
+} from "@/components/ui/alert-dialog";
 import { getAvatarUrl } from "@/lib/avatars";
 import { useVoiceConversation } from "@/hooks/use-voice-conversation";
 import {
@@ -251,9 +261,9 @@ function Landing({ onStart, paidReturn }: { onStart: () => void; paidReturn: boo
         One free practice conversation. No credit card.
       </h1>
       <p className="mx-auto max-w-xl text-muted-foreground">
-        Pick Auto or Real Estate, and our AI plays a customer whose real motivation
-        sits underneath what they first ask for. Talk to them like a real call, dig
-        for what they actually need, and get scored on your discovery.
+        Pick your industry, and our AI plays a customer whose real motivation sits
+        underneath what they first ask for. Talk to them like a real call, dig for
+        what they actually need, and get scored on your discovery.
       </p>
 
       <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
@@ -481,6 +491,43 @@ function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
     );
   }
 
+  const salesServiceOptions = options.filter((option) => option.group === "sales_service");
+  const leadershipOptions = options.filter((option) => option.group === "leadership");
+  const renderOptions = (groupOptions: DemoV2Industry[]) =>
+    groupOptions.map((option) => {
+      const isSelected = selected === option.key;
+      return (
+        <button
+          key={option.key}
+          type="button"
+          role="radio"
+          aria-checked={isSelected}
+          onClick={() => setSelected(option.key)}
+          className="relative flex flex-col items-start gap-1.5 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
+          style={
+            isSelected
+              ? { borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }
+              : { borderColor: "var(--border)" }
+          }
+          data-testid={`demo-v2-industry-option-${option.key}`}
+        >
+          {isSelected && (
+            <span
+              className="absolute top-3 right-3 flex h-5 w-5 items-center justify-center rounded-full"
+              style={{ backgroundColor: ORANGE }}
+              aria-hidden="true"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5 text-white" />
+            </span>
+          )}
+          <span className="text-base font-semibold" style={isSelected ? { color: ORANGE } : undefined}>
+            {option.label}
+          </span>
+          <span className="text-xs text-muted-foreground">{option.blurb}</span>
+        </button>
+      );
+    });
+
   return (
     <div className="space-y-6 text-center">
       <p className="text-sm font-medium text-muted-foreground" data-testid="text-demo-v2-session-counter">
@@ -488,49 +535,28 @@ function IndustryStep({ onChoose }: { onChoose: (key: string) => void }) {
       </p>
       <h2 className="text-2xl font-semibold">Which industry do you want?</h2>
       <p className="mx-auto max-w-xl text-sm text-muted-foreground">
-        Pick either one. You will meet a customer whose real motivation sits
-        underneath the request they open with.
+        Pick the kind of conversation you want to practice. You will meet a
+        customer whose real motivation sits underneath the request they open with.
       </p>
 
       <div
-        className="grid gap-3 sm:grid-cols-2"
+        className="space-y-6"
         role="radiogroup"
         aria-label="Choose your industry"
         data-testid="demo-v2-industry-picker"
       >
-        {options.map((option) => {
-          const isSelected = selected === option.key;
-          return (
-            <button
-              key={option.key}
-              type="button"
-              role="radio"
-              aria-checked={isSelected}
-              onClick={() => setSelected(option.key)}
-              className="relative flex flex-col items-start gap-1.5 rounded-xl border-2 p-4 text-left transition-colors hover-elevate"
-              style={
-                isSelected
-                  ? { borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }
-                  : { borderColor: "var(--border)" }
-              }
-              data-testid={`demo-v2-industry-option-${option.key}`}
-            >
-              {isSelected && (
-                <span
-                  className="absolute top-3 right-3 flex h-5 w-5 items-center justify-center rounded-full"
-                  style={{ backgroundColor: ORANGE }}
-                  aria-hidden="true"
-                >
-                  <CheckCircle2 className="h-3.5 w-3.5 text-white" />
-                </span>
-              )}
-              <span className="text-base font-semibold" style={isSelected ? { color: ORANGE } : undefined}>
-                {option.label}
-              </span>
-              <span className="text-xs text-muted-foreground">{option.blurb}</span>
-            </button>
-          );
-        })}
+        <section data-testid="demo-v2-industry-group-sales-service" aria-labelledby="demo-v2-sales-service-heading">
+          <h3 id="demo-v2-sales-service-heading" className="mb-3 text-left text-sm font-semibold text-muted-foreground">
+            Sales &amp; Service
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-3">{renderOptions(salesServiceOptions)}</div>
+        </section>
+        <section data-testid="demo-v2-industry-group-leadership" aria-labelledby="demo-v2-leadership-heading">
+          <h3 id="demo-v2-leadership-heading" className="mb-3 text-left text-sm font-semibold text-muted-foreground">
+            Leadership Conversations
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-2">{renderOptions(leadershipOptions)}</div>
+        </section>
       </div>
 
       <Button
@@ -719,7 +745,16 @@ function Roleplay({
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
-  const [incomplete, setIncomplete] = useState(false);
+  // Change 2: the demo's completeness gate is gone, so there is no more
+  // "incomplete" state to force past. Ending is now always a deliberate act,
+  // confirmed once before it fires (see confirmEndOpen below), since a demo
+  // visitor only gets this one conversation and cannot undo ending it early.
+  const [confirmEndOpen, setConfirmEndOpen] = useState(false);
+  // True only when the SECOND vulgar/belligerent strike ends the session for
+  // conduct (see server/vulgarBait.ts) -- distinct from the visitor choosing
+  // to end and score normally. A conduct-ended session is never scored, so the
+  // results step needs to know not to expect a score.
+  const [conductEnded, setConductEnded] = useState(false);
   const voiceRef = useRef<ReturnType<typeof useVoiceConversation> | null>(null);
   const avatarUrl = getAvatarUrl(scenario.slug);
   const sessionId = initialSession.id;
@@ -727,16 +762,26 @@ function Roleplay({
   const sendMessage = useMutation({
     mutationFn: ({ content, withAudio }: { content: string; withAudio: boolean }) =>
       demoV2Api.sendMessage(token, sessionId, content, withAudio),
-    onSuccess: ({ session: updated, replyStreamUrl }) => {
-      queryClient.setQueryData(["/api/demo/session", sessionId], updated);
+    onSuccess: ({ session: updated, replyStreamUrl, sessionEnded }) => {
+      if (updated) queryClient.setQueryData(["/api/demo/session", sessionId], updated);
       // When the backend opened a streamed turn, consume it over SSE and play the
       // reply sentence by sentence. Otherwise fall back to the single-clip path.
+      // A vulgar strike never gets a replyStreamUrl (see server/demoV2Routes.ts),
+      // so it always falls through to the plain-text path here, voice mode or not.
       if (replyStreamUrl) {
         voiceRef.current?.handleReplyStream(replyStreamUrl);
-      } else {
+      } else if (updated) {
         voiceRef.current?.handleReply(parseTranscript(updated.transcript));
       }
       setLastFailedMessage(null);
+      // The second strike ends the session for conduct: stop taking input and
+      // skip straight to results without ever calling /complete (there is
+      // nothing to score -- see checkVulgarBaitStrike in server/llm.ts).
+      if (sessionEnded) {
+        voiceRef.current?.stopAudio();
+        setConductEnded(true);
+        onCompleted(updated ?? session ?? initialSession, null);
+      }
     },
     onError: (_err, variables) => setLastFailedMessage(variables.content),
   });
@@ -768,16 +813,17 @@ function Roleplay({
     initialData: initialSession,
   });
 
-  // The completeness gate mirrors real sessions: a conversation with no
-  // recommendation in it comes back 409 and the visitor is told why before they
-  // can insist on a score.
+  // Change 2: the demo no longer gates completion on having proposed a
+  // recommendation (see server/demoV2Routes.ts) -- it always scores now, so
+  // there is nothing left to force past here. What guards against an
+  // accidental early end instead is the one-time confirm dialog below, since
+  // a demo visitor only gets this single free conversation.
   const complete = useMutation({
-    mutationFn: (force: boolean) => demoV2Api.complete(token, sessionId, force),
+    mutationFn: () => demoV2Api.complete(token, sessionId),
     onSuccess: (data) => onCompleted(data.session, data.stalledStep),
-    onError: (e: Error & { incomplete?: boolean }) => {
-      if (e.incomplete) setIncomplete(true);
-    },
+    onError: (e: Error) => setCompleteError(e.message),
   });
+  const [completeError, setCompleteError] = useState<string | null>(null);
 
   const transcript: TranscriptMessage[] = parseTranscript(session?.transcript);
 
@@ -900,29 +946,22 @@ function Roleplay({
             {voiceStatus}
           </p>
         )}
-        {incomplete && (
+        {conductEnded && (
           <div
             className="flex flex-wrap items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground"
-            data-testid="text-demo-v2-incomplete"
+            data-testid="text-demo-v2-conduct-ended"
           >
             <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span>
-              You haven't recommended anything yet. Real conversations are scored on
-              where they land, so finish with a recommendation if you can.
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7"
-              onClick={() => {
-                voice.stopAudio();
-                complete.mutate(true);
-              }}
-              disabled={complete.isPending}
-              data-testid="button-demo-v2-force-complete"
-            >
-              Score it anyway
-            </Button>
+            <span>This conversation has ended and can't continue.</span>
+          </div>
+        )}
+        {completeError && (
+          <div
+            className="flex flex-wrap items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            data-testid="text-demo-v2-complete-error"
+          >
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{completeError}</span>
           </div>
         )}
         <div className="flex gap-2">
@@ -937,12 +976,13 @@ function Roleplay({
             }}
             placeholder={micActive ? "Listening..." : speechSupported ? "Type or tap the mic to speak..." : "Type what you'd say to the customer..."}
             className="max-h-32 min-h-[44px] resize-none"
+            disabled={conductEnded}
             data-testid="input-demo-v2-message"
           />
           {speechSupported && (
             <Button
               onClick={handleMicTap}
-              disabled={sendMessage.isPending}
+              disabled={sendMessage.isPending || conductEnded}
               size="icon"
               variant={micActive ? "default" : "outline"}
               aria-label={micLabel}
@@ -955,7 +995,7 @@ function Roleplay({
           )}
           <Button
             onClick={handleSend}
-            disabled={!draft.trim() || sendMessage.isPending}
+            disabled={!draft.trim() || sendMessage.isPending || conductEnded}
             size="icon"
             aria-label="Send message"
             data-testid="button-demo-v2-send"
@@ -966,17 +1006,49 @@ function Roleplay({
         <div className="flex justify-end">
           <Button
             variant="secondary"
-            onClick={() => {
-              voice.stopAudio();
-              complete.mutate(false);
-            }}
-            disabled={transcript.length === 0 || complete.isPending}
+            onClick={() => setConfirmEndOpen(true)}
+            disabled={transcript.length === 0 || complete.isPending || conductEnded}
             data-testid="button-demo-v2-complete"
           >
             {complete.isPending ? "Scoring..." : "End & score this conversation"}
           </Button>
         </div>
       </div>
+
+      {/* Change 2: a demo visitor only gets this one free conversation, so
+          ending it is a one-way action worth a single explicit confirmation
+          before it fires -- there is no gate left to catch an early end and
+          no way to resume once /complete has scored and closed the session. */}
+      <AlertDialog open={confirmEndOpen} onOpenChange={setConfirmEndOpen}>
+        <AlertDialogContent data-testid="dialog-demo-v2-confirm-end">
+          <AlertDialogHeader>
+            <AlertDialogTitle data-testid="text-demo-v2-confirm-end-title">
+              End this conversation and get your score?
+            </AlertDialogTitle>
+            <AlertDialogDescription data-testid="text-demo-v2-confirm-end-body">
+              This is your one free practice conversation, and you can't come back to it
+              once it's scored. Make sure you're ready before you end it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-demo-v2-confirm-end-cancel">
+              Keep talking
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                setConfirmEndOpen(false);
+                voice.stopAudio();
+                setCompleteError(null);
+                complete.mutate();
+              }}
+              data-testid="button-demo-v2-confirm-end-action"
+            >
+              End & score it
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -1001,6 +1073,10 @@ function ResultsAndCta({
     : null;
   const rubricLabels: Record<string, string> =
     rubric && isLeadershipRubric(rubric) ? LEADERSHIP_RUBRIC_LABELS : RUBRIC_LABELS;
+  // "ended_conduct" (see server/vulgarBait.ts's VULGAR_ENDED_STATUS) means the
+  // second vulgar/belligerent strike ended the session before it was ever
+  // scored -- there is no rubric or feedback to show, just a plain explanation.
+  const conductEnded = session?.status === "ended_conduct";
 
   return (
     <div className="space-y-6">
@@ -1012,6 +1088,18 @@ function ResultsAndCta({
           <CardContent className="text-sm text-muted-foreground">
             <p data-testid="text-demo-v2-limit-reached">
               Ready to keep practicing? Choose one of the options below.
+            </p>
+          </CardContent>
+        </Card>
+      ) : conductEnded ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">This conversation ended early</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            <p data-testid="text-demo-v2-conduct-ended-results">
+              This practice conversation was cut short and isn't scored. You're welcome to
+              explore what's below whenever you're ready to try again.
             </p>
           </CardContent>
         </Card>

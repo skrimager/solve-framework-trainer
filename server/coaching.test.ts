@@ -16,6 +16,7 @@ import {
   ACCEPTED_SOLUTION_RULES,
   GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
+  STALL_DIAGNOSIS_RULES,
   TIMING_FEEDBACK_RULES,
   TRANSCRIPT_FIDELITY_RULES,
 } from "./llm";
@@ -76,6 +77,13 @@ describe("COACHING_SYSTEM prompt content", () => {
     assert.ok(COACHING_SYSTEM.includes(GRACEFUL_RELEASE_RULES));
     assert.match(COACHING_SYSTEM, /DECLINING TO PROMISE THE IMPOSSIBLE IS A CORRECT ANSWER/);
     assert.match(COACHING_SYSTEM, /REFERRING A GENUINELY OUT-OF-SCOPE TECHNICAL QUESTION/);
+  });
+
+  test("inherits stall and objection diagnosis guidance for every SOLVE moment", () => {
+    assert.ok(COACHING_SYSTEM.includes(STALL_DIAGNOSIS_RULES));
+    assert.match(COACHING_SYSTEM, /STALL AND OBJECTION DEBRIEFS/);
+    assert.match(COACHING_SYSTEM, /whether that was during discovery or near an ending/);
+    assert.match(COACHING_SYSTEM, /make the customer a better decision-maker, not simply push for agreement/);
   });
 });
 
@@ -219,6 +227,24 @@ describe("buildCoachingPrompt structure", () => {
     });
     assert.ok(prompt.includes("Trainee: Why does discovery matter?"));
     assert.ok(prompt.includes("SOLVE Coach: It uncovers the real need."));
+  });
+
+  test("includes stall and objection diagnosis guidance in the assembled coaching prompt", () => {
+    const prompt = buildCoachingPrompt({
+      track: "consulting",
+      feedback: "The customer said they needed to talk to their partner.",
+      rubricScoresJson: '{"objectionPrevention":60}',
+      overallScore: 70,
+      transcript: [
+        { role: "consultant", content: "What are you comparing us against?", timestamp: "t1" },
+        { role: "customer", content: "I need to talk to my partner.", timestamp: "t2" },
+      ],
+      thread: [],
+      question: "How should I have handled that?",
+    });
+    assert.ok(prompt.includes(STALL_DIAGNOSIS_RULES));
+    assert.match(prompt, /Do not argue with either one. Diagnose the decision behind it/);
+    assert.match(prompt, /Ground the advice in the actual transcript and the exact SOLVE moment/);
   });
 
   test("leadership track is framed as conflict-management, not sales", () => {

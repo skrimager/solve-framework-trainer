@@ -204,6 +204,69 @@
       "when": 1783106666500,
       "tag": "0028_demo_paid_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1783106667000,
+      "tag": "0029_message_coach",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1783106667500,
+      "tag": "0030_message_coach_resend_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1783106668000,
+      "tag": "0031_message_coach_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1783106668500,
+      "tag": "0032_manager_password_reset",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1783106669000,
+      "tag": "0033_dashboard_widget_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1783106669500,
+      "tag": "0034_saas_product_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1783106670000,
+      "tag": "0035_scenario_rubric_versioning",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1783106670500,
+      "tag": "0036_stall_excuse_handling",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1783867140000,
+      "tag": "0037_session_stall_evidence",
+      "breakpoints": true
     }
   ]
 }

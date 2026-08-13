@@ -1,4 +1,4 @@
-import type { Scenario, Session } from "@shared/schema";
+import type { Scenario, Session, SaasProductTag } from "@shared/schema";
 
 // Per-session persona variation. Each scenario carries a FIXED core (identity,
 // situation, opening stance, and the designed ideal-outcome behavior that must
@@ -26,8 +26,10 @@ export interface PersonaVariantSeed {
   objections: string[];
 }
 
-// One objection drawn for a session, tagged with roughly where in the
-// conversation it should surface.
+// One concern drawn for a session. The persisted position remains for backwards
+// compatibility with existing session variants, but it is no longer a cue to
+// surface the concern on a scheduled turn: the consultant's current message
+// must create the relevant opening.
 export type ObjectionPosition = "early" | "midway" | "later";
 export interface SelectedObjection {
   text: string;
@@ -100,12 +102,6 @@ export function selectPersonaVariant(
   return { personality, motivation, objections };
 }
 
-const POSITION_HINT: Record<ObjectionPosition, string> = {
-  early: "early in the conversation",
-  midway: "once the conversation is underway",
-  later: "later, after some rapport has built",
-};
-
 // Renders the per-session rendition into the prompt block that follows the fixed
 // core. Kept separate and deterministic so it can be reconstructed identically
 // every turn and unit-tested without the network. Returns "" when nothing was
@@ -117,14 +113,16 @@ export function buildPersonaVariantSection(selected: SelectedPersonaVariant): st
     lines.push(`- Your personality and communication style this time: ${selected.personality}`);
   }
   if (selected.motivation) {
-    lines.push(`- What is most driving you this time: ${selected.motivation}`);
+    lines.push(
+      `- Your internal motivation this time: ${selected.motivation}. Keep this as private context, not a line you must announce or repeat. Let it shape your reactions and reveal it only when a relevant discovery question earns it or it naturally belongs in the topic being discussed.`,
+    );
   }
   if (selected.objections.length > 0) {
     lines.push(
-      "- Concerns that are on your mind this time. These are notes about what is bothering you, not lines to recite: raise each one at most ONCE, in your own words at that moment, at roughly the point noted, and ONLY if the consultant has not already put it to rest. Never repeat one you have already raised. Do not list them all at once, and do not invent extra ones:"
+      "- Concerns that are on your mind this time. These are private notes about what is bothering you, not lines to recite and not a schedule. Do not bring one up merely because a turn number or its stored position says it is due. Surface a concern at most ONCE, in your own words, ONLY when the consultant's current message creates a genuine relevant opening and they have not already put it to rest. Never repeat one you have already raised, do not list them all at once, and do not invent extra ones:"
     );
     for (const obj of selected.objections) {
-      lines.push(`  - ${obj.text} (bring this up ${POSITION_HINT[obj.position]})`);
+      lines.push(`  - ${obj.text} (private concern; use only through a relevant current-message opening)`);
     }
   }
   if (lines.length === 0) return "";
@@ -158,6 +156,28 @@ export function personaCoreFor(scenario: Scenario): string {
   return scenario.personaCore && scenario.personaCore.trim().length > 0
     ? scenario.personaCore
     : scenario.customerPersona;
+}
+
+const SAAS_PRODUCT_OPENING_CONTEXT: Record<SaasProductTag, string> = {
+  crm: "a CRM for managing customer and prospect relationships",
+  website_builder: "a website-building platform",
+  ai_sales_automation: "an AI sales-automation platform",
+  ai_roleplay_platform: "an AI roleplay platform for training sales reps",
+  email_drip_automation: "an automated email follow-up and drip platform",
+};
+
+function isSaasProductTag(value: string | null | undefined): value is SaasProductTag {
+  return Object.prototype.hasOwnProperty.call(SAAS_PRODUCT_OPENING_CONTEXT, value ?? "");
+}
+
+// Adds the internal SaaS category to the OPENING prompt only. The label itself
+// must not be spoken; the customer simply mentions the category naturally in
+// their opening stance so the trainee can orient themselves before discovery.
+export function personaOpeningCoreFor(scenario: Scenario): string {
+  const core = personaCoreFor(scenario);
+  if (scenario.vertical !== "saas" || !isSaasProductTag(scenario.product)) return core;
+
+  return `${core}\n\nInternal opening context: this prospect is evaluating ${SAAS_PRODUCT_OPENING_CONTEXT[scenario.product]}. In the opening line, naturally establish that category in the prospect's own words without naming a tag, dumping features, or revealing any hidden need.`;
 }
 
 function isSelectedPersonaVariant(value: unknown): value is SelectedPersonaVariant {

@@ -27,6 +27,7 @@ export const MEMBER_OPTION = {
     "Level progression",
     "Bronze, Silver, Gold, and Expert achievement awards",
     "Certifications",
+    "Unlimited Message Coach, score and rewrite your outreach before you send it.",
     "Future platform updates",
   ],
 } as const;

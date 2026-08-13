@@ -4,7 +4,8 @@ import type { Server } from 'node:http';
 import multer from "multer";
 import { storage } from "./storage";
 import { compareUserPassword, hashUserPassword } from "./userPasswords";
-import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio } from "./llm";
+import { getCustomerReply, getCustomerOpening, scoreTranscript, synthesizeSpeechStream, hasProposedRecommendation, detectCloseIntent, computeLevelAdvancement, scoresForTrackAtLevel, scoresForVerticalAtLevel, scenarioTrack, isExamEligible, countQualifyingSessions, computeEscalationTier, REQUIRED_QUALIFYING_SESSIONS, ADVANCE_THRESHOLD, LEVEL_ORDER, gradeWrittenAnswer, WrittenGradingUnavailableError, transcribeAudio, checkVulgarBaitStrike, RUBRIC_VERSION } from "./llm";
+import { VULGAR_ENDED_STATUS } from "./vulgarBait";
 import {
   computeAwardableLevels,
   countDistinctCertifiedVerticals,
@@ -33,6 +34,7 @@ import {
   buildPersonaVariantSection,
   scenarioPersonaVariants,
   personaCoreFor,
+  personaOpeningCoreFor,
   sessionVariantSection,
 } from "./persona";
 import { getVoiceForScenario, getVoiceInstructionsForScenario } from "./voices";
@@ -56,7 +58,7 @@ import {
   realConversationCapBlockedMessage,
   REAL_CONVERSATION_MONTHLY_CAP,
 } from "./realConversationCap";
-import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail } from "./notifications";
+import { sendLeadNotification, sendDemoVerificationCode, sendProspectEmail, sendInboundEmail, sendSignupVerificationCode, sendConsultantEnrollmentEmail, sendManagerPasswordResetEmail, sendManagerUsernameReminderEmail } from "./notifications";
 import {
   canResendSignupCode,
   validateOfficeSetupInput,
@@ -95,6 +97,11 @@ import {
 import { registerDemoV2Routes } from "./demoV2Routes";
 import { DEMO_V2_ALL_SLUGS } from "./demoV2";
 import {
+  isInternalTestScenario,
+  isInternalTestUser,
+  canAccessScenarioSlug,
+} from "./internalTestScenario";
+import {
   contactTypeSchema,
   contactPatchSchema,
   normalizeContactPatch,
@@ -105,6 +112,7 @@ import {
   DEFAULT_TYPE,
   DEFAULT_SOURCE,
   DEFAULT_PRIORITY,
+  enrollDemoVoiceContact,
   type ContactArchiveView,
   type ContactFilters,
 } from "./contacts";
@@ -129,6 +137,8 @@ import {
   addDashboard,
 } from "./billing";
 import { handleDemoPaymentEvent } from "./demoPayments";
+import { handleMessageCoachPaymentEvent } from "./messageCoach";
+import { registerMessageCoachRoutes } from "./messageCoachRoutes";
 import { generateUniqueInviteCode } from "./invite";
 import {
   evaluatePracticeCap,
@@ -136,7 +146,7 @@ import {
   blockedMessage,
   type PracticeCapStatus,
 } from "./fairUse";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -244,13 +254,174 @@ export function isDemoOnlyScenario(slug: string): boolean {
 // The scenarios a real (seat-holding) trainee may be offered. Every trainee-facing
 // pool built from listScenarios() goes through this, so `active` is never the only
 // thing standing between demo content and real training.
+//
+// Internal test scenarios are dropped here too, which is what keeps them out of
+// the random vertical draw, the certification expert picker, manager scenario
+// coverage, and every other pool derived from this function. The single
+// user-scoped exception is applied by scenariosVisibleTo below, not here, so a
+// caller that forgets to pass a user gets the hidden-from-everyone behaviour.
 export function realTrainingScenarios<T extends { slug: string; active: boolean }>(all: T[]): T[] {
-  return all.filter((s) => s.active && !isDemoOnlyScenario(s.slug));
+  return all.filter((s) => s.active && !isDemoOnlyScenario(s.slug) && !isInternalTestScenario(s.slug));
 }
+
+// The scenarios a specific requester may see. Identical to realTrainingScenarios
+// for every real user; the internal test account additionally gets the active
+// internal test scenarios folded back in.
+export function scenariosVisibleTo<T extends { slug: string; active: boolean }>(
+  all: T[],
+  user: Pick<User, "username"> | null | undefined,
+): T[] {
+  const base = realTrainingScenarios(all);
+  if (!isInternalTestUser(user)) return base;
+  return [...base, ...all.filter((s) => s.active && isInternalTestScenario(s.slug))];
+}
+
+// Scenario listing/detail plus session creation. Registered from registerRoutes;
+// exported separately so tests can mount these three routes on a bare express app
+// without booting the whole application (and its seed()).
+export function registerScenarioAndSessionRoutes(app: Express): void {
+  // --- Scenarios ---
+  app.get("/api/scenarios", async (req, res) => {
+    // Optional ?requesterId= (same convention as GET /api/sessions): the listing
+    // stays public for the unauthenticated demo flow, but a requester who
+    // identifies themselves can be shown user-scoped content. Only the internal
+    // test account sees anything extra; for everyone else the response is
+    // byte-identical to the anonymous one.
+    const rawRequesterId = req.query.requesterId;
+    let requester: User | undefined;
+    if (typeof rawRequesterId === "string" && rawRequesterId.length > 0) {
+      requester = await storage.getUser(Number(rawRequesterId));
+      if (!requester) return res.status(401).json({ message: "Unknown user" });
+    }
+
+    const scenarios = await storage.listScenarios();
+    let active = scenariosVisibleTo(scenarios, requester);
+    // Optional ?track= filter so the client (consultant picker and admin
+    // management) can request just one track's scenarios. Unknown/absent track
+    // returns all active scenarios (back-compat).
+    const track = typeof req.query.track === "string" ? req.query.track : undefined;
+    if (track === "consulting" || track === "leadership") {
+      active = active.filter((s) => scenarioTrack(s.track) === track);
+    }
+    res.json(active);
+  });
+
+  app.get("/api/scenarios/:id", async (req, res) => {
+    const scenario = await storage.getScenario(Number(req.params.id));
+    if (!scenario) return res.status(404).json({ message: "Not found" });
+    // Internal test scenarios 404 for everyone but the internal account, so
+    // guessing the id reveals nothing that listing already hides. 404 (not 403)
+    // matches the "you can't see this" shape this endpoint already returns.
+    const requesterId = Number(req.query.requesterId);
+    const requester = requesterId ? await storage.getUser(requesterId) : undefined;
+    if (!canAccessScenarioSlug(scenario.slug, requester)) {
+      return res.status(404).json({ message: "Not found" });
+    }
+    res.json(scenario);
+  });
+
+  // --- Sessions (role-play attempts) ---
+  app.post("/api/sessions", async (req, res) => {
+    const { userId, scenarioId } = req.body ?? {};
+
+    // Hiding an internal test scenario from the picker is not enough: refuse to
+    // start one for anyone but the internal account, even when its id is passed
+    // directly. Checked before the seat/cap gates so probing a scenario id tells
+    // an outsider nothing about billing state.
+    const target = await storage.getScenario(Number(scenarioId));
+    if (target && isInternalTestScenario(target.slug)) {
+      const starter = await storage.getUser(Number(userId));
+      if (!isInternalTestUser(starter)) {
+        return res.status(403).json({ message: "Not available" });
+      }
+    }
+
+    const gate = await checkSeatAccess(Number(userId));
+    if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
+
+    // Enforce the monthly fair-use practice cap before creating the session. At
+    // the cap, refuse with a friendly message + reset date; in the warn band,
+    // allow the session but carry the warning back so the client can surface it.
+    const cap = await checkPracticeCap(Number(userId));
+    if (cap.blocked) {
+      return res.status(403).json({
+        message: blockedMessage(cap.resetDate),
+        limitReached: true,
+        resetDate: cap.resetDate,
+        practiceCap: cap,
+      });
+    }
+
+    // Start every session with the customer's own opening line so the consultant
+    // walks in cold (no pre-roleplay briefing) and must uncover the situation
+    // through discovery. Falls back to an empty transcript if generation fails,
+    // so a flaky LLM call never blocks starting a session.
+    // Draw this session's persona rendition (personality, motivation, objections)
+    // once at start and store it resolved on the session, so every turn replays
+    // the same customer while a fresh session gets a different one. Selection is
+    // a no-op for scenarios without variant pools (variantSection is "").
+    let openingTranscript = "[]";
+    let personaVariant: string | null = null;
+    try {
+      const scenario = await storage.getScenario(scenarioId);
+      if (scenario) {
+        const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
+        personaVariant = JSON.stringify(selected);
+        const variantSection = buildPersonaVariantSection(selected);
+        const openingText = await getCustomerOpening(personaOpeningCoreFor(scenario), scenario.track, variantSection);
+        if (openingText) {
+          const openingMsg = transcriptMessageSchema.parse({
+            role: "customer",
+            content: openingText,
+            audioStatus: "none",
+            msgId: randomUUID(),
+            timestamp: new Date().toISOString(),
+          });
+          openingTranscript = JSON.stringify([openingMsg]);
+        }
+      }
+    } catch (err) {
+      console.error("Opening line generation failed; starting with empty transcript:", err);
+    }
+
+    // Starting a new attempt retires any SOLVE Coach follow-up thread from the
+    // trainee's previous attempt: prior threads are soft-cleared so a fresh
+    // attempt never shows the last attempt's Q&A (persistence is per-attempt,
+    // not kept forever). Best-effort — a failure here must not block starting.
+    try {
+      await storage.clearCoachingMessagesForUser(Number(userId));
+    } catch (err) {
+      console.error("Failed to clear prior coaching threads:", err);
+    }
+
+    const session = await storage.createSession({
+      userId,
+      scenarioId,
+      status: "in_progress",
+      personaVariant,
+      transcript: openingTranscript,
+      score: null,
+      rubricScores: null,
+      feedback: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    });
+    // Carry the cap status alongside the session so the client can show the
+    // approaching-limit banner when the user is in the warn band.
+    res.json({ ...session, practiceCap: cap });
+  });
+}
+
+export type RegisterRoutesOptions = {
+  // Test-only seam for the real session completion handler. Production keeps
+  // scoreTranscript; tests can exercise persistence without a model call.
+  practiceSessionScorer?: typeof scoreTranscript;
+};
 
 export async function registerRoutes(
   httpServer: Server,
-  app: Express
+  app: Express,
+  opts: RegisterRoutesOptions = {},
 ): Promise<Server> {
   await seed();
 
@@ -284,13 +455,15 @@ export async function registerRoutes(
       return res.status(400).json({ message: `Webhook signature verification failed` });
     }
     try {
-      // Two independent handlers run for every delivery, one per payment domain:
-      // office subscriptions (billing.ts) and one-time demo practice-session
-      // purchases (demoPayments.ts). Each no-ops on events it does not own and
-      // keeps its own idempotency record, so neither can break or swallow the
-      // other. One endpoint, one STRIPE_WEBHOOK_SECRET.
+      // Three independent handlers run for every delivery, one per payment
+      // domain: office subscriptions (billing.ts), one-time demo
+      // practice-session purchases (demoPayments.ts), and one-time Message Coach
+      // score purchases (messageCoach.ts). Each no-ops on events it does not own
+      // and keeps its own namespaced idempotency record, so none can break or
+      // swallow another. One endpoint, one STRIPE_WEBHOOK_SECRET.
       await handleStripeEvent(event);
       await handleDemoPaymentEvent(event);
+      await handleMessageCoachPaymentEvent(event);
       res.json({ received: true });
     } catch (err: any) {
       // A processing error should return 5xx so Stripe retries later.
@@ -755,103 +928,7 @@ export async function registerRoutes(
     res.json(office);
   });
 
-  // --- Scenarios ---
-  app.get("/api/scenarios", async (req, res) => {
-    const scenarios = await storage.listScenarios();
-    let active = realTrainingScenarios(scenarios);
-    // Optional ?track= filter so the client (consultant picker and admin
-    // management) can request just one track's scenarios. Unknown/absent track
-    // returns all active scenarios (back-compat).
-    const track = typeof req.query.track === "string" ? req.query.track : undefined;
-    if (track === "consulting" || track === "leadership") {
-      active = active.filter((s) => scenarioTrack(s.track) === track);
-    }
-    res.json(active);
-  });
-
-  app.get("/api/scenarios/:id", async (req, res) => {
-    const scenario = await storage.getScenario(Number(req.params.id));
-    if (!scenario) return res.status(404).json({ message: "Not found" });
-    res.json(scenario);
-  });
-
-  // --- Sessions (role-play attempts) ---
-  app.post("/api/sessions", async (req, res) => {
-    const { userId, scenarioId } = req.body ?? {};
-    const gate = await checkSeatAccess(Number(userId));
-    if (!gate.ok) return res.status(gate.status).json({ message: gate.message });
-
-    // Enforce the monthly fair-use practice cap before creating the session. At
-    // the cap, refuse with a friendly message + reset date; in the warn band,
-    // allow the session but carry the warning back so the client can surface it.
-    const cap = await checkPracticeCap(Number(userId));
-    if (cap.blocked) {
-      return res.status(403).json({
-        message: blockedMessage(cap.resetDate),
-        limitReached: true,
-        resetDate: cap.resetDate,
-        practiceCap: cap,
-      });
-    }
-
-    // Start every session with the customer's own opening line so the consultant
-    // walks in cold (no pre-roleplay briefing) and must uncover the situation
-    // through discovery. Falls back to an empty transcript if generation fails,
-    // so a flaky LLM call never blocks starting a session.
-    // Draw this session's persona rendition (personality, motivation, objections)
-    // once at start and store it resolved on the session, so every turn replays
-    // the same customer while a fresh session gets a different one. Selection is
-    // a no-op for scenarios without variant pools (variantSection is "").
-    let openingTranscript = "[]";
-    let personaVariant: string | null = null;
-    try {
-      const scenario = await storage.getScenario(scenarioId);
-      if (scenario) {
-        const selected = selectPersonaVariant(scenarioPersonaVariants(scenario));
-        personaVariant = JSON.stringify(selected);
-        const variantSection = buildPersonaVariantSection(selected);
-        const openingText = await getCustomerOpening(personaCoreFor(scenario), scenario.track, variantSection);
-        if (openingText) {
-          const openingMsg = transcriptMessageSchema.parse({
-            role: "customer",
-            content: openingText,
-            audioStatus: "none",
-            msgId: randomUUID(),
-            timestamp: new Date().toISOString(),
-          });
-          openingTranscript = JSON.stringify([openingMsg]);
-        }
-      }
-    } catch (err) {
-      console.error("Opening line generation failed; starting with empty transcript:", err);
-    }
-
-    // Starting a new attempt retires any SOLVE Coach follow-up thread from the
-    // trainee's previous attempt: prior threads are soft-cleared so a fresh
-    // attempt never shows the last attempt's Q&A (persistence is per-attempt,
-    // not kept forever). Best-effort — a failure here must not block starting.
-    try {
-      await storage.clearCoachingMessagesForUser(Number(userId));
-    } catch (err) {
-      console.error("Failed to clear prior coaching threads:", err);
-    }
-
-    const session = await storage.createSession({
-      userId,
-      scenarioId,
-      status: "in_progress",
-      personaVariant,
-      transcript: openingTranscript,
-      score: null,
-      rubricScores: null,
-      feedback: null,
-      createdAt: new Date().toISOString(),
-      completedAt: null,
-    });
-    // Carry the cap status alongside the session so the client can show the
-    // approaching-limit banner when the user is in the warn band.
-    res.json({ ...session, practiceCap: cap });
-  });
+  registerScenarioAndSessionRoutes(app);
 
   app.get("/api/sessions/:id", async (req, res) => {
     const session = await storage.getSession(Number(req.params.id));
@@ -893,6 +970,13 @@ export async function registerRoutes(
       const { content, withAudio, stream } = req.body ?? {};
       const transcript = JSON.parse(session.transcript);
 
+      // A session already ended by the second vulgar/belligerent strike is
+      // terminal (see server/vulgarBait.ts): reject/no-op instead of letting a
+      // stray retry re-open or re-score it.
+      if (session.status === VULGAR_ENDED_STATUS) {
+        return res.status(409).json({ message: "session_ended", sessionEnded: true });
+      }
+
       const consultantMsg = transcriptMessageSchema.parse({
         role: "consultant",
         content,
@@ -908,6 +992,42 @@ export async function registerRoutes(
       const closeCheckpoint = detectCloseIntent(content);
 
       const msgId = randomUUID();
+
+      // Vulgar/belligerent bait is checked up front, here, in addition to inside
+      // getCustomerReply/streamCustomerReply themselves. Those functions are what
+      // actually decide the scripted reply text (single source of truth, see
+      // checkVulgarBaitStrike in server/llm.ts -- this call below does not
+      // duplicate that decision, it reads the exact same derivation) but the
+      // /message response itself also needs to tell the frontend sessionEnded
+      // synchronously, and for the streaming branch that answer would otherwise
+      // not be knowable until the separate /turn-stream request finishes. Doing
+      // the check here lets a strike short-circuit straight to a normal JSON
+      // reply -- bypassing the SSE placeholder/streaming path entirely for that
+      // turn -- so voice mode gets the same synchronous signal text mode does,
+      // and a baiting message never burns an LLM call either way.
+      const strike = checkVulgarBaitStrike(transcript);
+      if (strike) {
+        const customerMsg = transcriptMessageSchema.parse({
+          role: "customer",
+          content: strike.text,
+          audioStatus: "none",
+          msgId,
+          timestamp: new Date().toISOString(),
+        });
+        transcript.push(customerMsg);
+
+        const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+        if (strike.sessionEnded) {
+          // Terminal: end the session, do not score it. No
+          // score/rubricScores/feedback are written -- this was never a real
+          // practice attempt to grade.
+          sessionPatch.status = VULGAR_ENDED_STATUS;
+          sessionPatch.completedAt = new Date().toISOString();
+        }
+        const updated = await storage.updateSession(session.id, sessionPatch);
+        res.json({ ...updated, closeCheckpoint, sessionEnded: strike.sessionEnded });
+        return;
+      }
 
       // Streaming voice path: do NOT block on the full reply here. Append the
       // consultant turn plus an empty customer placeholder, persist, and hand the
@@ -942,11 +1062,11 @@ export async function registerRoutes(
       const escalationTier = await computeSessionEscalationTier(session, scenario);
 
       const variantSection = sessionVariantSection(scenario, session);
-      const customerReplyText = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
+      const customerReply = await getCustomerReply(personaCoreFor(scenario), transcript, scenario.difficulty, escalationTier, variantSection);
 
       const customerMsg = transcriptMessageSchema.parse({
         role: "customer",
-        content: customerReplyText,
+        content: customerReply.text,
         audioStatus: withAudio ? "pending" : "none",
         // Point at the streaming endpoint up front. The client plays it as soon
         // as the reply arrives (playback starts on the first chunk); the same
@@ -957,12 +1077,21 @@ export async function registerRoutes(
       });
       transcript.push(customerMsg);
 
+      // customerReply.sessionEnded can only be true here if checkVulgarBaitStrike
+      // above somehow missed it and getCustomerReply's own internal check caught
+      // it instead (defense in depth, not the expected path since both read the
+      // same transcript) -- handle it the same way regardless of which check
+      // actually fired.
+      const sessionPatch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+      if (customerReply.sessionEnded) {
+        sessionPatch.status = VULGAR_ENDED_STATUS;
+        sessionPatch.completedAt = new Date().toISOString();
+      }
+
       // Respond immediately with the text reply. Audio is synthesized lazily and
       // streamed when the client requests the audio-stream URL above.
-      const updated = await storage.updateSession(session.id, {
-        transcript: JSON.stringify(transcript),
-      });
-      res.json({ ...updated, closeCheckpoint });
+      const updated = await storage.updateSession(session.id, sessionPatch);
+      res.json({ ...updated, closeCheckpoint, sessionEnded: customerReply.sessionEnded });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ message: err.message ?? "Failed to process message" });
@@ -991,15 +1120,25 @@ export async function registerRoutes(
       // its track (consulting vs. leadership uses a different rubric).
       const scenario = await storage.getScenario(session.scenarioId);
       const track = scenarioTrack(scenario?.track);
-      const { rubric, feedback, overall } = await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType);
+      const scoringResult = opts.practiceSessionScorer
+        ? await opts.practiceSessionScorer(transcript, scenario?.difficulty, track, scenario?.transactionType, {
+            stallType: scenario?.stallType ?? null,
+          })
+        : await scoreTranscript(transcript, scenario?.difficulty, track, scenario?.transactionType, {
+            stallType: scenario?.stallType ?? null,
+          });
+      const { rubric, feedback, overall, stallEvidence } = scoringResult;
 
       const completedAt = new Date().toISOString();
       const updated = await storage.updateSession(session.id, {
         status: "completed",
         score: overall,
         rubricScores: JSON.stringify(rubric),
+        stallEvidence: stallEvidence ? JSON.stringify(stallEvidence) : null,
         feedback,
         completedAt,
+        scenarioVersion: scenario?.version ?? null,
+        rubricVersion: RUBRIC_VERSION,
         // Record practice time consumed (createdAt to now) so it counts toward
         // the user's monthly fair-use total.
         durationSeconds: computeDurationSeconds(session.createdAt, completedAt),
@@ -1154,7 +1293,8 @@ export async function registerRoutes(
       scenario,
       voice: getVoiceForScenario(scenario.slug, scenario.gender),
       instructions: getVoiceInstructionsForScenario(scenario.slug),
-      persist: (content, status) => updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status),
+      persist: (content, status, sessionEnded) =>
+        updateSessionMsgContentAndStatus(session.id, req.params.msgId, content, status, sessionEnded),
     });
   });
 
@@ -1354,6 +1494,8 @@ export async function registerRoutes(
 
   registerManagerRosterRoutes(app);
 
+  registerManagerAuthRecoveryRoutes(app);
+
   registerManagerDashboardRoutes(app);
 
   registerConsultantDashboardRoutes(app);
@@ -1361,6 +1503,13 @@ export async function registerRoutes(
   registerPublicDemoDashboardRoute(app);
 
   registerPublicAndAdminRoutes(app);
+
+  // Message Coach v1. Every route inside 404s unless MESSAGE_COACH_ENABLED is
+  // "true", so registering it unconditionally still leaves the feature dark by
+  // default. checkSeatAccess is passed in rather than imported over there, to
+  // keep the two modules from importing each other and to keep exactly one
+  // implementation of the seat gate.
+  registerMessageCoachRoutes(app, { seatGate: checkSeatAccess });
 
   // Start the Opportunity Intelligence drip sender (every ~20 min it sends any
   // scheduled+due outreach via the existing Resend transport). Guarded against
@@ -1719,7 +1868,7 @@ async function createScenarioSession(
   const personaVariant = JSON.stringify(selected);
   try {
     const openingText = await getCustomerOpening(
-      personaCoreFor(scenario),
+      personaOpeningCoreFor(scenario),
       scenario.track,
       buildPersonaVariantSection(selected)
     );
@@ -1983,6 +2132,11 @@ export function registerPublicAndAdminRoutes(app: Express): void {
     // throws, so it can never block or fail the verify response.
     if (!signup.verified) {
       void enrollDemoDrip({ storage, send: sendInboundEmail }, { id: signup.id, email });
+      // Also auto-create a Contact so this lead shows up in the admin Contacts
+      // tab for manual follow-up. Same fire-and-forget/best-effort posture as
+      // enrollDemoDrip above: never awaited, never throws, so it can never
+      // block or change this endpoint's response either way.
+      void enrollDemoVoiceContact({ storage }, { email });
     }
 
     if (isSessionLimitReached(signup.sessionsUsed, email)) {
@@ -3445,6 +3599,137 @@ function groupBy<T, K>(items: T[], keyOf: (item: T) => K): Map<K, T[]> {
   return map;
 }
 
+// --- Manager/office account self-service recovery ---------------------------
+// Command Center (manager login) previously had NO forgot-password or
+// forgot-username path at all: a locked-out manager had no way back in short of
+// a manual database fix. All three endpoints below share one hard rule: the
+// HTTP response is IDENTICAL whether or not a matching account/email was
+// found, so no response (status, body, or timing-observable branch) can be used
+// to enumerate real accounts. Reuses the existing Resend transport in
+// notifications.ts — no new email provider or credentials.
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Generous but bounded: a locked-out manager may legitimately retry a few
+// times (typo'd email, slow inbox) without opening the door to enumeration
+// probing. Mirrors the shape of the existing demo/leads limiters above.
+const forgotPasswordLimiter = new RateLimiter(10, 60 * 1000);
+const forgotUsernameLimiter = new RateLimiter(10, 60 * 1000);
+const resetPasswordLimiter = new RateLimiter(20, 60 * 1000);
+
+const GENERIC_FORGOT_PASSWORD_MESSAGE =
+  "If an account exists for that email, we've sent a password reset link.";
+const GENERIC_FORGOT_USERNAME_MESSAGE =
+  "If an account exists for that email, we've sent the username(s) on file.";
+
+export function registerManagerAuthRecoveryRoutes(app: Express): void {
+  // --- Forgot password: request a reset link -------------------------------
+  app.post("/api/manager/forgot-password", async (req, res) => {
+    if (!forgotPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      // Reset only the first match. Multiple accounts sharing one inbox is an
+      // edge case (see schema.ts comment on users.email); resetting every
+      // account silently on one request would be surprising, and forgot-
+      // username already offers a way to discover the others.
+      const account = matches[0];
+      if (account) {
+        const token = randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+        await storage.updateUser(account.id, {
+          passwordResetToken: token,
+          passwordResetExpiresAt: expiresAt,
+        });
+        // Best-effort: a Resend outage must never leak account existence via a
+        // different response, so success/failure of the send is only logged.
+        sendManagerPasswordResetEmail(email, token).catch((err) => {
+          console.warn("[manager-auth] Failed to send password reset email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-password lookup failed:", err);
+      // Still fall through to the generic response — never surface a 500 that
+      // could hint at whether the lookup itself found something.
+    }
+
+    res.json({ message: GENERIC_FORGOT_PASSWORD_MESSAGE });
+  });
+
+  // --- Reset password: redeem a token ---------------------------------------
+  app.post("/api/manager/reset-password", async (req, res) => {
+    if (!resetPasswordLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({
+      token: z.string().trim().min(1),
+      newPassword: z.string().min(8, "Password must be at least 8 characters"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const { token, newPassword } = parsed.data;
+
+    const account = await storage.getUserByPasswordResetToken(token);
+    if (!account || !account.passwordResetToken || !account.passwordResetExpiresAt) {
+      return res.status(400).json({ message: "This reset link is invalid. Please request a new one." });
+    }
+    const expiresAt = Date.parse(account.passwordResetExpiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      // Clear the stale token so it can never be redeemed later, even if the
+      // expiry check above is somehow bypassed by a future code change.
+      await storage.updateUser(account.id, { passwordResetToken: null, passwordResetExpiresAt: null });
+      return res.status(400).json({ message: "This reset link has expired. Please request a new one." });
+    }
+
+    // Same credential storage /api/login checks against via compareUserPassword
+    // (bcrypt-hashed, see the login handler above). Reset must hash with the
+    // same scheme login actually verifies against.
+    await storage.updateUser(account.id, {
+      password: await hashUserPassword(newPassword),
+      passwordResetToken: null,
+      passwordResetExpiresAt: null,
+    });
+
+    res.json({ message: "Your password has been reset. You can now sign in." });
+  });
+
+  // --- Forgot username: email the username(s) on file -----------------------
+  app.post("/api/manager/forgot-username", async (req, res) => {
+    if (!forgotUsernameLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again in a minute." });
+    }
+    const schema = z.object({ email: z.string().trim().min(1) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Please enter your email address." });
+    }
+    const email = normalizeEmail(parsed.data.email);
+
+    try {
+      const matches = email ? await storage.getUsersByEmail(email) : [];
+      if (matches.length > 0) {
+        const usernames = matches.map((u) => u.username);
+        sendManagerUsernameReminderEmail(email, usernames).catch((err) => {
+          console.warn("[manager-auth] Failed to send username reminder email:", err);
+        });
+      }
+    } catch (err) {
+      console.error("[manager-auth] forgot-username lookup failed:", err);
+    }
+
+    res.json({ message: GENERIC_FORGOT_USERNAME_MESSAGE });
+  });
+}
+
 // Authorize a manager-roster request: the requester must exist, be a manager or
 // QA, and belong to the office they're asking about. Mirrors the office-scoping
 // used by /api/offices/:id/seats/remove and the coaching manager-peer check.
@@ -3622,8 +3907,42 @@ const DISCOVERY_DIMENSIONS: { key: string; label: string }[] = [
   { key: "relationshipContinuity", label: "Relationship continuity" },
 ];
 
-// One trailing week of practice counts as "this period" for the KPI strip.
+// One trailing week of practice counts as "this period" for the KPI strip
+// when a manager has not selected a custom date range. This remains the
+// backward-compatible default when a dashboard request omits since/until.
 const DASHBOARD_PERIOD_DAYS = 7;
+
+// Resolved period boundaries the whole dashboard aggregation is scoped to.
+// `days` is only used for the prior-period comparison window (deltas), and
+// is computed from the actual since/until span rather than assumed to be 7.
+export type DashboardPeriod = { since: Date; until: Date; days: number; label: string };
+
+// Builds the period boundaries a dashboard request should use. When both
+// `sinceParam` and `untilParam` (ISO date strings) are provided, they define
+// the window exactly; otherwise falls back to the historical trailing
+// DASHBOARD_PERIOD_DAYS window ending at `now`, preserving old behavior for
+// any caller that does not pass the new params. `days` is derived from the
+// resolved span (at least 1) so prior-period deltas scale with whatever range
+// the manager picked, rather than always comparing against a 7-day baseline.
+export function resolveDashboardPeriod(
+  sinceParam: string | undefined,
+  untilParam: string | undefined,
+  now: Date = new Date(),
+): DashboardPeriod {
+  const parsedSince = sinceParam ? new Date(sinceParam) : null;
+  const parsedUntil = untilParam ? new Date(untilParam) : null;
+  const validSince = parsedSince && !Number.isNaN(parsedSince.getTime()) ? parsedSince : null;
+  const validUntil = parsedUntil && !Number.isNaN(parsedUntil.getTime()) ? parsedUntil : null;
+
+  if (validSince) {
+    const until = validUntil ?? now;
+    const days = Math.max(1, Math.ceil((until.getTime() - validSince.getTime()) / (24 * 60 * 60 * 1000)));
+    return { since: validSince, until, days, label: "Custom range" };
+  }
+
+  const since = new Date(now.getTime() - DASHBOARD_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  return { since, until: now, days: DASHBOARD_PERIOD_DAYS, label: "This week" };
+}
 
 function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -3804,13 +4123,16 @@ export function buildStreaksAndRankings(
 
 // Pure aggregation of the manager dashboard payload, split out from the route so
 // it can be unit-tested with in-memory fixtures. `now` is injectable so the
-// "this period" window is deterministic in tests.
+// "this period" window is deterministic in tests. `period` defaults to the
+// historical trailing 7-day window when omitted, so any existing caller that
+// does not pass one keeps the old behavior exactly.
 export function buildDashboardStats(
   officeUsers: User[],
   officeSessions: Session[],
   allScenarios: Scenario[],
   now: Date = new Date(),
   academyCredits: import("@shared/schema").AcademyCredit[] = [],
+  period: DashboardPeriod = resolveDashboardPeriod(undefined, undefined, now),
 ) {
   const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
   const consultants = officeUsers.filter((u) => u.role === "consultant");
@@ -3822,9 +4144,9 @@ export function buildDashboardStats(
     ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
     : null;
 
-  const periodSince = new Date(now.getTime() - DASHBOARD_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  const periodSince = period.since;
   const practiceSessionsThisPeriod = completed.filter(
-    (s) => s.completedAt && new Date(s.completedAt) >= periodSince,
+    (s) => s.completedAt && new Date(s.completedAt) >= periodSince && new Date(s.completedAt) <= period.until,
   ).length;
 
   const certificationsEarned = consultants.filter((u) => u.consultingCertified).length;
@@ -3931,7 +4253,7 @@ export function buildDashboardStats(
     .sort((a, b) => b.count - a.count);
 
   return {
-    period: { label: "This week", days: DASHBOARD_PERIOD_DAYS, since: periodSince.toISOString() },
+    period: { label: period.label, days: period.days, since: period.since.toISOString(), until: period.until.toISOString() },
     kpis: {
       teamAverageScore,
       practiceSessionsThisPeriod,
@@ -3960,9 +4282,693 @@ export function buildDashboardStats(
   };
 }
 
+// ===========================================================================
+// Command Center widget data — additive analytics for the redesigned manager
+// dashboard (mission-control style). Every value here is DERIVED from the
+// same real users/sessions/scenarios rows buildDashboardStats already reads;
+// nothing is mocked. Kept as its own pure builder (buildCommandCenterExtras)
+// so it is unit-testable exactly like buildDashboardStats, and so the
+// original function/tests above are untouched.
+// ===========================================================================
+
+// The full set of togglable widget keys, in their default display order. This
+// is the single source of truth for both the settings UI and the "missing key
+// defaults to visible" rule, so a newly shipped widget is never silently
+// hidden for an office that saved a config before that widget existed.
+export const DASHBOARD_WIDGET_KEYS = [
+  "teamHealth",
+  "conversations",
+  "completionRate",
+  "certifications",
+  "alerts",
+  "liveFeed",
+  "performanceOverTime",
+  "skillRadar",
+  "topPerformers",
+  "conversationOutcomes",
+  "scoreDistribution",
+  "achievements",
+  "popularScenarios",
+  "ctaPanel",
+  "summaryStrip",
+] as const;
+export type DashboardWidgetKey = (typeof DASHBOARD_WIDGET_KEYS)[number];
+export type DashboardWidgetConfig = Record<string, boolean>;
+
+// Every widget defaults to visible when an office has never saved a config —
+// matches the reference design's full layout, and the spec's "default state:
+// all widgets visible" requirement.
+export function defaultDashboardWidgetConfig(): DashboardWidgetConfig {
+  return Object.fromEntries(DASHBOARD_WIDGET_KEYS.map((k) => [k, true]));
+}
+
+// Parses the office's stored dashboardWidgetConfig JSON text into a full,
+// defaulted config: unknown/malformed JSON, a non-object, or a missing key all
+// fall back to "visible", so this function can never make a widget disappear
+// that the manager didn't explicitly turn off.
+export function resolveDashboardWidgetConfig(raw: string | null | undefined): DashboardWidgetConfig {
+  const defaults = defaultDashboardWidgetConfig();
+  if (!raw) return defaults;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return defaults;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults;
+  const merged: DashboardWidgetConfig = { ...defaults };
+  for (const key of DASHBOARD_WIDGET_KEYS) {
+    const value = (parsed as Record<string, unknown>)[key];
+    if (typeof value === "boolean") merged[key] = value;
+  }
+  return merged;
+}
+
+// Team Health Score: a single 0-100 composite so a manager can gauge "is my
+// office doing well" at a glance, built entirely from real signals already on
+// the dashboard — no separate/invented metric. Weighted: 50% team average
+// score (quality), 30% completion rate (follow-through), 20% activity rate
+// (share of consultants who are seat-active AND practiced in the period).
+// Any signal that has no data yet is excluded and the remaining weights are
+// re-normalized, so an office with zero sessions doesn't get unfairly zeroed
+// out on quality alone.
+export function computeTeamHealthScore(input: {
+  teamAverageScore: number | null;
+  completionRate: number | null; // 0-100
+  activityRate: number | null; // 0-100
+}): number | null {
+  const parts: { value: number; weight: number }[] = [];
+  if (input.teamAverageScore !== null) parts.push({ value: input.teamAverageScore, weight: 0.5 });
+  if (input.completionRate !== null) parts.push({ value: input.completionRate, weight: 0.3 });
+  if (input.activityRate !== null) parts.push({ value: input.activityRate, weight: 0.2 });
+  if (parts.length === 0) return null;
+  const totalWeight = parts.reduce((sum, p) => sum + p.weight, 0);
+  const weighted = parts.reduce((sum, p) => sum + p.value * p.weight, 0);
+  return Math.round(weighted / totalWeight);
+}
+
+// Score-band distribution across ALL scored completed sessions in the period
+// (not per-consultant), matching the reference "Score Distribution" bar chart.
+// Bands are fixed and always returned in order, even at zero, so the chart
+// never reflows.
+const SCORE_BANDS: { key: string; label: string; min: number; max: number }[] = [
+  { key: "0-59", label: "0-59", min: 0, max: 59 },
+  { key: "60-69", label: "60-69", min: 60, max: 69 },
+  { key: "70-79", label: "70-79", min: 70, max: 79 },
+  { key: "80-89", label: "80-89", min: 80, max: 89 },
+  { key: "90-100", label: "90-100", min: 90, max: 100 },
+];
+
+export function computeScoreDistribution(
+  scores: number[],
+): { band: string; count: number; percent: number }[] {
+  const total = scores.length;
+  return SCORE_BANDS.map(({ key, label, min, max }) => {
+    const count = scores.filter((s) => s >= min && s <= max).length;
+    return {
+      band: label,
+      count,
+      percent: total > 0 ? Math.round((count / total) * 100) : 0,
+    };
+  }).map(({ band, count, percent }) => ({ band, count, percent }));
+}
+
+// Conversation Outcomes donut: buckets every session in the period into one of
+// four REAL, derivable states (no invented "deal outcome" field exists on
+// sessions, so this reuses status + score, the only outcome signals that
+// actually exist):
+//   Successful  — completed AND scored >= SUCCESS_SCORE (strong session)
+//   Converted   — completed AND scored, below SUCCESS_SCORE but still scored
+//   In Progress — status 'in_progress' or 'saved' (not yet finished)
+//   No Outcome  — completed but never scored (scoring failed/unavailable)
+const OUTCOME_SUCCESS_SCORE = 85;
+
+export function computeConversationOutcomes(
+  sessionsInPeriod: Pick<Session, "status" | "score">[],
+): { outcome: string; count: number }[] {
+  let successful = 0;
+  let converted = 0;
+  let inProgress = 0;
+  let noOutcome = 0;
+  for (const s of sessionsInPeriod) {
+    if (s.status === "completed") {
+      if (s.score === null) noOutcome += 1;
+      else if (s.score >= OUTCOME_SUCCESS_SCORE) successful += 1;
+      else converted += 1;
+    } else {
+      inProgress += 1;
+    }
+  }
+  return [
+    { outcome: "Successful", count: successful },
+    { outcome: "Converted", count: converted },
+    { outcome: "In Progress", count: inProgress },
+    { outcome: "No Outcome", count: noOutcome },
+  ];
+}
+
+// Alerts: consultants who genuinely need a manager's attention right now.
+// Every reason is derived from real fields already on `users`/`sessions`:
+//   - inactive: seat-active consultant with no completed session in the
+//     lookback window (default 14 days) — going quiet.
+//   - lowScore: seat-active consultant whose average over their last few
+//     scored sessions has fallen below the streak-qualifying bar.
+// A consultant can trigger multiple reasons; the alert count is the number of
+// consultants with at least one reason (not the number of reasons), so the
+// KPI strip count matches "how many people need a look", not double-counted.
+const ALERT_INACTIVITY_DAYS = 14;
+const ALERT_RECENT_SESSION_SAMPLE = 3;
+
+export function computeAlerts(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  now: Date,
+): { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[] {
+  const cutoff = now.getTime() - ALERT_INACTIVITY_DAYS * ONE_DAY_MS;
+  const alerts: { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[] = [];
+  for (const u of consultants) {
+    if (!u.seatActive) continue;
+    const mine = sessionsByUser.get(u.id) ?? [];
+    const completed = mine.filter((s) => s.status === "completed");
+    const reasons: ("inactive" | "lowScore")[] = [];
+
+    const lastCompletedAt = completed
+      .map((s) => s.completedAt ?? s.createdAt)
+      .filter((d): d is string => Boolean(d))
+      .sort()
+      .at(-1);
+    if (!lastCompletedAt || new Date(lastCompletedAt).getTime() < cutoff) {
+      reasons.push("inactive");
+    }
+
+    const recentScored = completed
+      .filter((s) => s.score !== null)
+      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
+      .slice(0, ALERT_RECENT_SESSION_SAMPLE);
+    if (recentScored.length > 0) {
+      const avg = recentScored.reduce((sum, s) => sum + (s.score as number), 0) / recentScored.length;
+      if (avg < STREAK_QUALIFYING_SCORE) reasons.push("lowScore");
+    }
+
+    if (reasons.length > 0) alerts.push({ id: u.id, displayName: u.displayName, reasons });
+  }
+  return alerts;
+}
+
+// Live Feed: a chronological stream of real recent events a manager would
+// want to see at a glance — certifications earned, high-scoring completed
+// sessions, and any completed session in general — each with a real
+// timestamp. Built entirely from users/sessions rows already fetched for the
+// rest of the dashboard; nothing here is a separate event log.
+const LIVE_FEED_HIGH_SCORE = 90;
+
+export type LiveFeedEvent = {
+  id: string;
+  type: "certification" | "high_score" | "session_completed";
+  userId: number;
+  displayName: string;
+  detail: string;
+  occurredAt: string;
+  // The backing session id, so a manager can click through to full session
+  // detail (GET /api/manager/session/:id). Null for certification events,
+  // which have no single backing session.
+  sessionId: number | null;
+};
+
+export function buildLiveFeed(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  limit = 12,
+): LiveFeedEvent[] {
+  const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+  const userById = new Map(officeUsers.map((u) => [u.id, u]));
+  const events: LiveFeedEvent[] = [];
+
+  for (const u of officeUsers) {
+    if (u.consultingCertifiedAt) {
+      events.push({
+        id: `cert-consulting-${u.id}`,
+        type: "certification",
+        userId: u.id,
+        displayName: u.displayName,
+        detail: "Earned Consulting Certification",
+        occurredAt: u.consultingCertifiedAt,
+        sessionId: null,
+      });
+    }
+    if (u.leadershipCertifiedAt) {
+      events.push({
+        id: `cert-leadership-${u.id}`,
+        type: "certification",
+        userId: u.id,
+        displayName: u.displayName,
+        detail: "Earned Leadership Certification",
+        occurredAt: u.leadershipCertifiedAt,
+        sessionId: null,
+      });
+    }
+  }
+
+  for (const s of officeSessions) {
+    if (s.status !== "completed" || !s.completedAt) continue;
+    const user = userById.get(s.userId);
+    if (!user) continue;
+    const scenario = scenarioById.get(s.scenarioId);
+    const scenarioTitle = scenario?.title ?? "a scenario";
+    if (s.score !== null && s.score >= LIVE_FEED_HIGH_SCORE) {
+      events.push({
+        id: `score-${s.id}`,
+        type: "high_score",
+        userId: user.id,
+        displayName: user.displayName,
+        detail: `Scored ${s.score} on ${scenarioTitle}`,
+        occurredAt: s.completedAt,
+        sessionId: s.id,
+      });
+    } else {
+      events.push({
+        id: `session-${s.id}`,
+        type: "session_completed",
+        userId: user.id,
+        displayName: user.displayName,
+        detail: `Completed ${scenarioTitle}`,
+        occurredAt: s.completedAt,
+        sessionId: s.id,
+      });
+    }
+  }
+
+  return events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, limit);
+}
+
+// Popular Scenarios This Week: the scenarios with the most completed sessions
+// in the period, each with the office's average score on it and its session
+// count — matches the reference's card grid exactly, using only real
+// scenario/session rows.
+export function computePopularScenarios(
+  sessionsInPeriod: Session[],
+  allScenarios: Scenario[],
+  limit = 5,
+): { scenarioId: number; title: string; vertical: string; averageScore: number | null; sessionCount: number }[] {
+  const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
+  const byScenario = new Map<number, Session[]>();
+  for (const s of sessionsInPeriod) {
+    if (s.status !== "completed") continue;
+    const list = byScenario.get(s.scenarioId) ?? [];
+    list.push(s);
+    byScenario.set(s.scenarioId, list);
+  }
+  return Array.from(byScenario.entries())
+    .map(([scenarioId, list]) => {
+      const scenario = scenarioById.get(scenarioId);
+      const scored = list.filter((s) => s.score !== null);
+      const averageScore = scored.length
+        ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+        : null;
+      return {
+        scenarioId,
+        title: scenario?.title ?? "Unknown scenario",
+        vertical: scenario?.vertical ?? "unknown",
+        averageScore,
+        sessionCount: list.length,
+      };
+    })
+    .sort((a, b) => b.sessionCount - a.sessionCount)
+    .slice(0, limit);
+}
+
+// Recent Achievements: derived badges, NOT a new parallel badge system (there
+// is no existing badges/achievements table in shared/schema.ts — confirmed by
+// search before writing this). Every badge below is computed purely from
+// fields that already exist: certification flags, the leaderboard rank order,
+// individual session scores, and the real practice-streak calculation used
+// elsewhere on this dashboard (computeStreak). This keeps "Recent Achievements"
+// honest: it is a presentation layer over data the app already tracks, not a
+// second source of truth.
+export type Achievement = {
+  id: string;
+  userId: number;
+  displayName: string;
+  badge: "gold_achiever" | "silver_achiever" | "top_performer" | "role_play_master" | "streak_master";
+  label: string;
+  earnedAt: string | null;
+};
+
+const STREAK_MASTER_DAYS = 5;
+const ROLE_PLAY_MASTER_SESSIONS = 25;
+
+export function computeAchievements(
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  leaderboard: { id: number; displayName: string; averageScore: number | null }[],
+  now: Date,
+  limit = 8,
+): Achievement[] {
+  const achievements: Achievement[] = [];
+
+  for (const u of consultants) {
+    if (u.consultingCertifiedAt) {
+      achievements.push({
+        id: `gold-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "gold_achiever",
+        label: "Gold Achiever",
+        earnedAt: u.consultingCertifiedAt,
+      });
+    }
+    if (u.leadershipCertifiedAt) {
+      achievements.push({
+        id: `silver-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "silver_achiever",
+        label: "Silver Achiever",
+        earnedAt: u.leadershipCertifiedAt,
+      });
+    }
+
+    const mine = sessionsByUser.get(u.id) ?? [];
+    const completedCount = mine.filter((s) => s.status === "completed").length;
+    if (completedCount >= ROLE_PLAY_MASTER_SESSIONS) {
+      const lastCompletedAt = mine
+        .filter((s) => s.status === "completed")
+        .map((s) => s.completedAt)
+        .filter((d): d is string => Boolean(d))
+        .sort()
+        .at(-1) ?? null;
+      achievements.push({
+        id: `roleplay-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "role_play_master",
+        label: "Role Play Master",
+        earnedAt: lastCompletedAt,
+      });
+    }
+
+    const streak = computeStreak(mine, now);
+    if (streak >= STREAK_MASTER_DAYS) {
+      achievements.push({
+        id: `streak-${u.id}`,
+        userId: u.id,
+        displayName: u.displayName,
+        badge: "streak_master",
+        label: "Streak Master",
+        earnedAt: now.toISOString(),
+      });
+    }
+  }
+
+  // Top Performer: the #1 ranked consultant on the leaderboard (if any have a
+  // scored average) — exactly one badge, matching "Top Performer" being a
+  // single-holder title in the reference design.
+  const top = leaderboard.find((l) => l.averageScore !== null);
+  if (top) {
+    achievements.push({
+      id: `top-${top.id}`,
+      userId: top.id,
+      displayName: top.displayName,
+      badge: "top_performer",
+      label: "Top Performer",
+      earnedAt: now.toISOString(),
+    });
+  }
+
+  return achievements
+    .sort((a, b) => (b.earnedAt ?? "").localeCompare(a.earnedAt ?? ""))
+    .slice(0, limit);
+}
+
+// Trend delta helper: percentage change from a prior-period value to a current
+// value, matching the reference's "+14% vs last 7 days" style deltas. Returns
+// null when the prior value is 0 (division by zero / no baseline) so the UI
+// can render "—" instead of a misleading Infinity/NaN.
+export function percentDelta(current: number, previous: number): number | null {
+  if (previous === 0) return current === 0 ? 0 : null;
+  return Math.round(((current - previous) / previous) * 100);
+}
+
+// Pure aggregation of the additional Command Center widget data, split out
+// from buildDashboardStats so the original, already-tested function is never
+// touched. `now` and the office's saved widget config are both injectable for
+// deterministic tests. `period` defaults to the historical trailing 7-day
+// window when omitted, matching the old hardcoded behavior exactly.
+export function buildCommandCenterExtras(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  now: Date = new Date(),
+  period: DashboardPeriod = resolveDashboardPeriod(undefined, undefined, now),
+) {
+  const consultants = officeUsers.filter((u) => u.role === "consultant");
+  const sessionsByUser = groupSessionsByUser(officeSessions);
+
+  const periodDays = period.days;
+  const periodSince = period.since;
+  const periodUntil = period.until;
+  const priorPeriodSince = new Date(periodSince.getTime() - periodDays * ONE_DAY_MS);
+
+  const inPeriod = (iso: string | null) => !!iso && new Date(iso) >= periodSince && new Date(iso) <= periodUntil;
+  const inPriorPeriod = (iso: string | null) =>
+    !!iso && new Date(iso) >= priorPeriodSince && new Date(iso) < periodSince;
+
+  const sessionsThisPeriod = officeSessions.filter((s) => inPeriod(s.completedAt ?? (s.status !== "completed" ? s.createdAt : null)));
+  const completedThisPeriod = officeSessions.filter((s) => s.status === "completed" && inPeriod(s.completedAt));
+  const completedPriorPeriod = officeSessions.filter((s) => s.status === "completed" && inPriorPeriod(s.completedAt));
+  const startedThisPeriod = officeSessions.filter((s) => inPeriod(s.createdAt));
+  const startedPriorPeriod = officeSessions.filter((s) => inPriorPeriod(s.createdAt));
+
+  // --- Conversations (this week vs last week) ---
+  const conversationsThisPeriod = completedThisPeriod.length;
+  const conversationsPriorPeriod = completedPriorPeriod.length;
+  const conversationsDelta = percentDelta(conversationsThisPeriod, conversationsPriorPeriod);
+  const conversationsSparkline = sparklineByDay(completedThisPeriod, periodSince, periodUntil);
+
+  // --- Completion rate (completed / started, this week vs last week) ---
+  const completionRateFor = (started: Session[], completed: Session[]) =>
+    started.length > 0 ? Math.round((completed.length / started.length) * 100) : null;
+  const completionRateThisPeriod = completionRateFor(startedThisPeriod, completedThisPeriod);
+  const completionRatePriorPeriod = completionRateFor(startedPriorPeriod, completedPriorPeriod);
+  const completionRateDelta =
+    completionRateThisPeriod !== null && completionRatePriorPeriod !== null
+      ? percentDelta(completionRateThisPeriod, completionRatePriorPeriod)
+      : null;
+
+  // --- Certifications earned this period vs prior period ---
+  const certifiedThisPeriod = officeUsers.filter(
+    (u) => inPeriod(u.consultingCertifiedAt) || inPeriod(u.leadershipCertifiedAt),
+  ).length;
+  const certifiedPriorPeriod = officeUsers.filter(
+    (u) => inPriorPeriod(u.consultingCertifiedAt) || inPriorPeriod(u.leadershipCertifiedAt),
+  ).length;
+  const certificationsDelta = percentDelta(certifiedThisPeriod, certifiedPriorPeriod);
+
+  // --- Team average score, this week vs last week (for Team Health delta) ---
+  const avgScoreOf = (list: Session[]) => {
+    const scored = list.filter((s) => s.score !== null);
+    return scored.length
+      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+      : null;
+  };
+  const teamAverageThisPeriod = avgScoreOf(completedThisPeriod);
+  const teamAveragePriorPeriod = avgScoreOf(completedPriorPeriod);
+
+  const activeConsultantCount = consultants.filter((u) => u.seatActive).length;
+  const activityRateThisPeriod =
+    consultants.length > 0
+      ? Math.round(
+          (consultants.filter((u) => (sessionsByUser.get(u.id) ?? []).some((s) => s.status === "completed" && inPeriod(s.completedAt)))
+            .length /
+            consultants.length) *
+            100,
+        )
+      : null;
+  const activityRatePriorPeriod =
+    consultants.length > 0
+      ? Math.round(
+          (consultants.filter((u) => (sessionsByUser.get(u.id) ?? []).some((s) => s.status === "completed" && inPriorPeriod(s.completedAt)))
+            .length /
+            consultants.length) *
+            100,
+        )
+      : null;
+
+  const teamHealthScore = computeTeamHealthScore({
+    teamAverageScore: teamAverageThisPeriod,
+    completionRate: completionRateThisPeriod,
+    activityRate: activityRateThisPeriod,
+  });
+  const teamHealthPrior = computeTeamHealthScore({
+    teamAverageScore: teamAveragePriorPeriod,
+    completionRate: completionRatePriorPeriod,
+    activityRate: activityRatePriorPeriod,
+  });
+  const teamHealthDelta =
+    teamHealthScore !== null && teamHealthPrior !== null ? percentDelta(teamHealthScore, teamHealthPrior) : null;
+
+  // --- Performance over time: office avg vs the office's own top-20% cohort,
+  // by completion day. "Top 20%" and "office avg" are BOTH scoped to this
+  // office's own consultants only — never a cross-office/company comparison,
+  // since offices must never see another office's performance data (and no
+  // internal SOLVE Framework business data belongs on this screen either).
+  const performanceOverTime = buildPerformanceOverTime(officeSessions, consultants, sessionsByUser, periodSince, periodUntil);
+
+  // --- Score distribution + conversation outcomes, scoped to this period ---
+  const scoresThisPeriod = completedThisPeriod.filter((s) => s.score !== null).map((s) => s.score as number);
+  const scoreDistribution = computeScoreDistribution(scoresThisPeriod);
+  const conversationOutcomes = computeConversationOutcomes(sessionsThisPeriod);
+
+  // --- Alerts, live feed, popular scenarios, achievements ---
+  const alerts = computeAlerts(consultants, sessionsByUser, now);
+  const liveFeed = buildLiveFeed(officeUsers, officeSessions, allScenarios, 12);
+  const popularScenarios = computePopularScenarios(completedThisPeriod, allScenarios, 5);
+  const leaderboardForBadges = consultants.map((u) => {
+    const scored = (sessionsByUser.get(u.id) ?? []).filter((s) => s.status === "completed" && s.score !== null);
+    const averageScore = scored.length
+      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
+      : null;
+    return { id: u.id, displayName: u.displayName, averageScore };
+  }).sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1));
+  const achievements = computeAchievements(consultants, sessionsByUser, leaderboardForBadges, now, 8);
+
+  // --- Bottom summary strip ---
+  const totalSessionsAllTime = officeSessions.length;
+  const hoursTrainedThisPeriod = Math.round(
+    completedThisPeriod.reduce((sum, s) => sum + (s.durationSeconds ?? 0), 0) / 3600,
+  );
+  const goalProgress = teamHealthScore; // office's own composite health score doubles as "goal progress" (0-100); no separate goal-setting UI exists yet.
+
+  return {
+    teamHealth: { score: teamHealthScore, deltaPercent: teamHealthDelta },
+    conversations: {
+      count: conversationsThisPeriod,
+      deltaPercent: conversationsDelta,
+      sparkline: conversationsSparkline,
+    },
+    completionRate: { percent: completionRateThisPeriod, deltaPercent: completionRateDelta },
+    certifications: { count: certifiedThisPeriod, deltaPercent: certificationsDelta },
+    alerts,
+    liveFeed,
+    performanceOverTime,
+    scoreDistribution,
+    conversationOutcomes,
+    popularScenarios,
+    achievements,
+    summaryStrip: {
+      teamMembersActive: activeConsultantCount,
+      totalSessions: totalSessionsAllTime,
+      avgScore: teamAverageThisPeriod,
+      goalProgress,
+      certificationsTotal: officeUsers.filter((u) => u.consultingCertified || u.leadershipCertified).length,
+      hoursTrainedThisPeriod,
+    },
+  };
+}
+
+// Sparkline: an ordered array of daily completed-session counts across the
+// period window, oldest first, for tiny inline trend charts on KPI cards.
+function sparklineByDay(completed: Session[], since: Date, until: Date): number[] {
+  const byDay = new Map<string, number>();
+  const cursor = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate()));
+  const end = new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), until.getUTCDate()));
+  while (cursor <= end) {
+    byDay.set(utcDayKey(cursor), 0);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  for (const s of completed) {
+    const day = (s.completedAt ?? "").slice(0, 10);
+    if (byDay.has(day)) byDay.set(byDay.get(day) !== undefined ? day : day, (byDay.get(day) ?? 0) + 1);
+  }
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, count]) => count);
+}
+
+// Team Performance Over Time: by completion day within the period, the
+// office's overall average score vs the average of just its top-20% cohort
+// (ranked by all-time average score). Both series are scoped to this office
+// only. Days with no scored session in a series simply carry null so the
+// chart shows a gap rather than a misleading dip to zero.
+function buildPerformanceOverTime(
+  officeSessions: Session[],
+  consultants: User[],
+  sessionsByUser: Map<number, Session[]>,
+  since: Date,
+  until: Date,
+): { date: string; teamScore: number | null; top20: number | null }[] {
+  const ranking = rankConsultantsByAverageScore(consultants, sessionsByUser).filter((r) => r.averageScore !== null);
+  const top20Count = Math.max(1, Math.ceil(ranking.length * 0.2));
+  const top20Ids = new Set(ranking.slice(0, top20Count).map((r) => r.id));
+
+  const days: string[] = [];
+  const cursor = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate()));
+  const end = new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), until.getUTCDate()));
+  while (cursor <= end) {
+    days.push(utcDayKey(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  const byDayAll = new Map<string, { total: number; count: number }>();
+  const byDayTop = new Map<string, { total: number; count: number }>();
+  for (const s of officeSessions) {
+    if (s.status !== "completed" || s.score === null || !s.completedAt) continue;
+    const day = s.completedAt.slice(0, 10);
+    if (!days.includes(day)) continue;
+    const bucketAll = byDayAll.get(day) ?? { total: 0, count: 0 };
+    bucketAll.total += s.score;
+    bucketAll.count += 1;
+    byDayAll.set(day, bucketAll);
+    if (top20Ids.has(s.userId)) {
+      const bucketTop = byDayTop.get(day) ?? { total: 0, count: 0 };
+      bucketTop.total += s.score;
+      bucketTop.count += 1;
+      byDayTop.set(day, bucketTop);
+    }
+  }
+
+  return days.map((date) => ({
+    date,
+    teamScore: byDayAll.has(date) ? Math.round(byDayAll.get(date)!.total / byDayAll.get(date)!.count) : null,
+    top20: byDayTop.has(date) ? Math.round(byDayTop.get(date)!.total / byDayTop.get(date)!.count) : null,
+  }));
+}
+
+// Earliest session timestamp for an office (by createdAt, since that is set
+// the moment a session starts and is never null, unlike completedAt). This is
+// what "All time" resolves to on the client: from the office's very first
+// session up to now. Returns null when the office has no sessions yet, so the
+// caller can fall back to the default period instead of an invalid range.
+function earliestSessionDate(officeSessions: Session[]): Date | null {
+  let earliest: Date | null = null;
+  for (const s of officeSessions) {
+    const when = s.createdAt ? new Date(s.createdAt) : null;
+    if (!when || Number.isNaN(when.getTime())) continue;
+    if (!earliest || when < earliest) earliest = when;
+  }
+  return earliest;
+}
+
+// Reads the optional since/until ISO date-string query params shared by both
+// dashboard endpoints below. Both are optional; when either is missing (or
+// unparseable), resolveDashboardPeriod falls back to the historical trailing
+// 7-day default, preserving backward compatibility for any existing caller.
+function readPeriodParams(req: Request): { since?: string; until?: string } {
+  const since = typeof req.query.since === "string" ? req.query.since : undefined;
+  const until = typeof req.query.until === "string" ? req.query.until : undefined;
+  return { since, until };
+}
+
 export function registerManagerDashboardRoutes(app: Express): void {
   // Office-scoped aggregate analytics for the manager command center. Reuses the
   // same manager/QA + own-office authorization as the roster routes.
+  //
+  // Query params (both optional, ISO date strings):
+  //   since - start of the reporting window (inclusive)
+  //   until - end of the reporting window (inclusive); defaults to now
+  // When since is omitted, the endpoint falls back to the historical trailing
+  // 7-day window ending now, exactly matching the endpoint's old behavior.
   app.get("/api/manager/dashboard-stats", async (req, res) => {
     const requesterId = Number(req.query.requesterId);
     if (!requesterId) {
@@ -3992,7 +4998,172 @@ export function registerManagerDashboardRoutes(app: Express): void {
       storage.listAcademyCreditsByOffice(requester.officeId),
     ]);
 
-    res.json(buildDashboardStats(officeUsers, officeSessions, allScenarios, new Date(), officeCredits));
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+
+    res.json({
+      ...buildDashboardStats(officeUsers, officeSessions, allScenarios, now, officeCredits, period),
+      // The office's earliest session (createdAt), so the client can resolve
+      // its "All time" preset to a real start date without a separate request.
+      earliestSessionAt: earliestSessionDate(officeSessions)?.toISOString() ?? null,
+    });
+  });
+
+  // Additive Command Center widget data (team health, live feed, outcomes,
+  // score distribution, achievements, popular scenarios, etc.) — same
+  // manager/QA + own-office + paid-add-on gating as /dashboard-stats above,
+  // kept as a separate endpoint so the original dashboard-stats response
+  // shape (and its existing tests) are never touched.
+  //
+  // Accepts the same optional since/until ISO date-string query params as
+  // /api/manager/dashboard-stats, and resolves them the same way (see
+  // resolveDashboardPeriod), so both endpoints are always scoped to the same
+  // manager-selected range.
+  app.get("/api/manager/dashboard-command-center", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+
+    res.json({
+      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, now, period),
+      widgetConfig: resolveDashboardWidgetConfig(office?.dashboardWidgetConfig ?? null),
+    });
+  });
+
+  // Per-office widget visibility config: manager-only, own-office-only read
+  // and write of which Command Center widgets are shown. Missing keys always
+  // default to visible (see resolveDashboardWidgetConfig), and a PUT only
+  // ever touches the dashboardWidgetConfig column — no other office fields.
+  app.get("/api/manager/dashboard-widget-config", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view dashboard settings" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    res.json({ widgetConfig: resolveDashboardWidgetConfig(office.dashboardWidgetConfig ?? null) });
+  });
+
+  app.put("/api/manager/dashboard-widget-config", async (req, res) => {
+    const requesterId = Number(req.body?.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can change dashboard settings" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!office) return res.status(404).json({ message: "Office not found" });
+
+    const incoming = req.body?.widgetConfig;
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+      return res.status(400).json({ message: "widgetConfig must be an object of widget key -> boolean" });
+    }
+    // Merge onto the office's current saved config (not the request body raw)
+    // so a partial toggle payload can never accidentally reset unrelated
+    // widgets back to their defaults.
+    const current = resolveDashboardWidgetConfig(office.dashboardWidgetConfig ?? null);
+    const merged: DashboardWidgetConfig = { ...current };
+    for (const key of DASHBOARD_WIDGET_KEYS) {
+      const value = (incoming as Record<string, unknown>)[key];
+      if (typeof value === "boolean") merged[key] = value;
+    }
+
+    const updated = await storage.updateOffice(office.id, { dashboardWidgetConfig: JSON.stringify(merged) });
+    res.json({ widgetConfig: resolveDashboardWidgetConfig(updated?.dashboardWidgetConfig ?? null) });
+  });
+
+  // Live Feed session detail: a manager/QA clicks an entry in the Live Feed
+  // widget and needs the full picture (consultant, full scenario title, score,
+  // rubric breakdown, completion time). Scoped strictly to sessions belonging
+  // to a consultant in the requester's own office, same requesterId + role +
+  // office pattern as the rest of this file's manager routes. This is
+  // intentionally a separate route from the trainee-facing GET /api/sessions/:id
+  // (which has no office scoping, since a trainee only ever links to their own
+  // session) so manager access to any office's data never depends on that
+  // route accidentally staying unscoped.
+  app.get("/api/manager/session/:id", async (req, res) => {
+    const requesterId = Number(req.query.requesterId);
+    if (!requesterId) {
+      return res.status(400).json({ message: "requesterId is required" });
+    }
+    const requester = await storage.getUser(requesterId);
+    if (!requester) return res.status(401).json({ message: "Unknown user" });
+    if (requester.role !== "manager" && requester.role !== "qa") {
+      return res.status(403).json({ message: "Only a manager or QA can view session detail" });
+    }
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const session = await storage.getSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ message: "Not found" });
+
+    const consultant = await storage.getUser(session.userId);
+    // A manager may only view sessions belonging to a consultant in their own
+    // office. Returning 404 rather than 403 here avoids confirming to a
+    // cross-office requester that a given session id even exists.
+    if (!consultant || consultant.officeId !== requester.officeId) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    const scenario = await storage.getScenario(session.scenarioId);
+    let rubricScores: Record<string, number> | null = null;
+    if (session.rubricScores) {
+      try {
+        rubricScores = JSON.parse(session.rubricScores);
+      } catch {
+        rubricScores = null;
+      }
+    }
+
+    res.json({
+      id: session.id,
+      consultantId: consultant.id,
+      consultantName: consultant.displayName,
+      scenarioTitle: scenario?.title ?? "Unknown scenario",
+      vertical: scenario?.vertical ?? null,
+      status: session.status,
+      score: session.score,
+      rubricScores,
+      feedback: session.feedback,
+      createdAt: session.createdAt,
+      completedAt: session.completedAt,
+    });
   });
 }
 
@@ -4283,11 +5454,20 @@ async function computeSessionEscalationTier(session: Session, scenario: Scenario
 // Fills in a previously-created placeholder customer message with its final text
 // and audio status once the streamed reply has finished. Keeps replay working:
 // the persisted content is what /audio-stream re-synthesizes for later playback.
-async function updateSessionMsgContentAndStatus(
+//
+// `sessionEnded` is true only when the streamed reply was the second vulgar/
+// belligerent strike (see checkVulgarBaitStrike in server/llm.ts, threaded
+// through server/turnStream.ts's persist callback). When true this also ends
+// the session as a terminal state -- status + completedAt -- exactly like the
+// non-streaming /message branch does; the voice/streaming path must not be a
+// way to bypass that behavior just because the strike was detected mid-stream
+// instead of before the SSE hand-off.
+export async function updateSessionMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getSession(sessionId);
   if (!latest) return;
@@ -4295,16 +5475,22 @@ async function updateSessionMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateSession(sessionId, patch);
 }
 
 // The demo's counterpart to updateSessionMsgContentAndStatus, writing to
-// demo_sessions instead of sessions.
-async function updateDemoMsgContentAndStatus(
+// demo_sessions instead of sessions. Same sessionEnded handling as above.
+export async function updateDemoMsgContentAndStatus(
   sessionId: number,
   msgId: string,
   content: string,
   status: MsgAudioStatus,
+  sessionEnded = false,
 ): Promise<void> {
   const latest = await storage.getDemoSession(sessionId);
   if (!latest) return;
@@ -4312,7 +5498,12 @@ async function updateDemoMsgContentAndStatus(
   const idx = transcript.findIndex((m) => m.msgId === msgId);
   if (idx === -1) return;
   transcript[idx] = { ...transcript[idx], content, audioStatus: status };
-  await storage.updateDemoSession(sessionId, { transcript: JSON.stringify(transcript) });
+  const patch: Record<string, unknown> = { transcript: JSON.stringify(transcript) };
+  if (sessionEnded) {
+    patch.status = VULGAR_ENDED_STATUS;
+    patch.completedAt = new Date().toISOString();
+  }
+  await storage.updateDemoSession(sessionId, patch);
 }
 
 interface RunTurnStreamOptions {
@@ -4321,7 +5512,7 @@ interface RunTurnStreamOptions {
   scenario: Scenario;
   voice: string;
   instructions?: string;
-  persist: (content: string, status: MsgAudioStatus) => Promise<void>;
+  persist: (content: string, status: MsgAudioStatus, sessionEnded: boolean) => Promise<void>;
 }
 
 // One streamed customer turn for a real trainee session. Derives the inputs that

@@ -11,6 +11,19 @@ import {
   computeStreak,
   buildConsultantDashboard,
   STREAK_QUALIFYING_SCORE,
+  buildCommandCenterExtras,
+  computeTeamHealthScore,
+  computeScoreDistribution,
+  computeConversationOutcomes,
+  computeAlerts,
+  buildLiveFeed,
+  computePopularScenarios,
+  computeAchievements,
+  percentDelta,
+  defaultDashboardWidgetConfig,
+  resolveDashboardWidgetConfig,
+  DASHBOARD_WIDGET_KEYS,
+  resolveDashboardPeriod,
 } from "./routes";
 import type { User, Session, Scenario } from "@shared/schema";
 
@@ -276,6 +289,111 @@ describe("manager dashboard HTTP endpoint", () => {
     assert.equal(body.kpis.consultantCount, 3);
     assert.ok(Array.isArray(body.streaksAndRankings));
   });
+
+  test("omitting since/until falls back to the historical trailing 7-day window", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.days, 7);
+    assert.equal(body.period.label, "This week");
+    assert.ok(typeof body.period.since === "string");
+    assert.ok(typeof body.period.until === "string");
+  });
+
+  test("an explicit since/until narrows the period and scopes practiceSessionsThisPeriod", async () => {
+    // Fixtures' completed sessions land 2026-03-01..03. A since/until window
+    // covering only 2026-03-01 should see just Alice's first session (id 100).
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.label, "Custom range");
+    assert.equal(body.kpis.practiceSessionsThisPeriod, 1);
+  });
+
+  test("a wider since/until captures more sessions than the 7-day default", async () => {
+    const wide = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    );
+    const wideBody = await wide.json();
+    const narrow = await fetch(
+      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    );
+    const narrowBody = await narrow.json();
+    assert.ok(wideBody.kpis.practiceSessionsThisPeriod >= narrowBody.kpis.practiceSessionsThisPeriod);
+  });
+
+  test("an unparseable since falls back to the default 7-day window instead of erroring", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=not-a-date`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.period.days, 7);
+    assert.equal(body.period.label, "This week");
+  });
+
+  test("returns the office's earliest session timestamp for the client's all-time preset", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const body = await res.json();
+    // Fixtures' earliest session (by createdAt) is id 100 on 2026-03-01.
+    assert.equal(body.earliestSessionAt, "2026-03-01T00:00:00.000Z");
+  });
+
+  test("an office with no sessions yet returns a null earliestSessionAt", async () => {
+    sessions.length = 0;
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const body = await res.json();
+    assert.equal(body.earliestSessionAt, null);
+  });
+});
+
+describe("resolveDashboardPeriod", () => {
+  const now = new Date("2026-03-08T00:00:00.000Z");
+
+  test("defaults to a trailing 7-day window ending now when since/until are omitted", () => {
+    const period = resolveDashboardPeriod(undefined, undefined, now);
+    assert.equal(period.days, 7);
+    assert.equal(period.label, "This week");
+    assert.equal(period.until.getTime(), now.getTime());
+    assert.equal(period.since.getTime(), now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  });
+
+  test("an explicit since with no until defaults until to now", () => {
+    const since = "2026-01-01T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, undefined, now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.getTime(), now.getTime());
+    assert.equal(period.label, "Custom range");
+  });
+
+  test("an explicit since and until define the window exactly, and days spans the range", () => {
+    const since = "2026-02-01T00:00:00.000Z";
+    const until = "2026-03-03T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, until, now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.toISOString(), until);
+    assert.equal(period.days, 30); // Feb 1 -> Mar 3
+  });
+
+  test("all-time (an early since like an office's earliest session) resolves to a wide multi-month span", () => {
+    const since = "2026-01-05T00:00:00.000Z"; // e.g. office's earliest session
+    const period = resolveDashboardPeriod(since, undefined, now);
+    assert.ok(period.days >= 60);
+    assert.equal(period.since.toISOString(), since);
+  });
+
+  test("an unparseable since falls back to the default window", () => {
+    const period = resolveDashboardPeriod("not-a-date", undefined, now);
+    assert.equal(period.days, 7);
+    assert.equal(period.label, "This week");
+  });
+
+  test("an unparseable until is ignored in favor of now, while a valid since is kept", () => {
+    const since = "2026-01-01T00:00:00.000Z";
+    const period = resolveDashboardPeriod(since, "not-a-date", now);
+    assert.equal(period.since.toISOString(), since);
+    assert.equal(period.until.getTime(), now.getTime());
+  });
 });
 
 // ===========================================================================
@@ -440,5 +558,480 @@ describe("consultant dashboard HTTP endpoint", () => {
     const body = await res.json();
     assert.equal(body.entitled, true);
     assert.ok(body.streak);
+  });
+});
+
+// ===========================================================================
+// Command Center widgets: pure helpers (percentDelta, team health score,
+// score distribution, conversation outcomes, alerts, live feed, popular
+// scenarios, achievements) and the widget-config resolve/default helpers.
+// ===========================================================================
+
+describe("percentDelta", () => {
+  test("computes a rounded percent change", () => {
+    assert.equal(percentDelta(114, 100), 14);
+    assert.equal(percentDelta(86, 100), -14);
+  });
+
+  test("returns 0 when both current and previous are zero", () => {
+    assert.equal(percentDelta(0, 0), 0);
+  });
+
+  test("returns null when there is no baseline to compare against", () => {
+    assert.equal(percentDelta(5, 0), null);
+  });
+});
+
+describe("computeTeamHealthScore", () => {
+  test("weights quality 50%, completion 30%, activity 20%", () => {
+    const score = computeTeamHealthScore({ teamAverageScore: 80, completionRate: 80, activityRate: 80 });
+    assert.equal(score, 80);
+  });
+
+  test("re-normalizes weights when a signal is missing", () => {
+    // Only teamAverageScore (100) and completionRate (0) present -> weights 0.5/0.3
+    // renormalized to 5/8 and 3/8 -> (100*5 + 0*3)/8 = 62.5 -> rounds to 63.
+    const score = computeTeamHealthScore({ teamAverageScore: 100, completionRate: 0, activityRate: null });
+    assert.equal(score, 63);
+  });
+
+  test("returns null when every signal is missing", () => {
+    assert.equal(computeTeamHealthScore({ teamAverageScore: null, completionRate: null, activityRate: null }), null);
+  });
+});
+
+describe("computeScoreDistribution", () => {
+  test("buckets scores into fixed bands with percentages", () => {
+    const dist = computeScoreDistribution([55, 65, 65, 75, 85, 85, 85, 95]);
+    assert.deepEqual(dist.map((d) => d.band), ["0-59", "60-69", "70-79", "80-89", "90-100"]);
+    const byBand = Object.fromEntries(dist.map((d) => [d.band, d]));
+    assert.equal(byBand["0-59"].count, 1);
+    assert.equal(byBand["60-69"].count, 2);
+    assert.equal(byBand["80-89"].count, 3);
+    assert.equal(byBand["80-89"].percent, 38); // 3/8 -> 37.5 -> rounds to 38
+  });
+
+  test("returns zero counts and zero percentages for an empty score list", () => {
+    const dist = computeScoreDistribution([]);
+    assert.ok(dist.every((d) => d.count === 0 && d.percent === 0));
+    assert.equal(dist.length, 5);
+  });
+});
+
+describe("computeConversationOutcomes", () => {
+  test("buckets completed+high-score as Successful, completed+lower-score as Converted", () => {
+    const sessions = [
+      { status: "completed", score: 90 },
+      { status: "completed", score: 70 },
+      { status: "completed", score: null },
+      { status: "in_progress", score: null },
+      { status: "saved", score: null },
+    ] as any;
+    const outcomes = computeConversationOutcomes(sessions);
+    const byOutcome = Object.fromEntries(outcomes.map((o) => [o.outcome, o.count]));
+    assert.equal(byOutcome.Successful, 1);
+    assert.equal(byOutcome.Converted, 1);
+    assert.equal(byOutcome["No Outcome"], 1);
+    assert.equal(byOutcome["In Progress"], 2);
+  });
+});
+
+describe("computeAlerts", () => {
+  const now = new Date("2026-03-20T00:00:00.000Z");
+
+  test("flags a seat-active consultant who has gone quiet", () => {
+    const consultants = [mkUser({ id: 3, role: "consultant", seatActive: true })];
+    const sessionsByUser = new Map<number, Session[]>([
+      [3, [mkSession({ id: 1, userId: 3, scenarioId: 10, score: 90, completedAt: "2026-02-01T00:00:00.000Z" })]],
+    ]);
+    const alerts = computeAlerts(consultants, sessionsByUser, now);
+    assert.equal(alerts.length, 1);
+    assert.ok(alerts[0].reasons.includes("inactive"));
+  });
+
+  test("flags a consultant whose recent average has dropped below the qualifying bar", () => {
+    const consultants = [mkUser({ id: 3, role: "consultant", seatActive: true })];
+    const sessionsByUser = new Map<number, Session[]>([
+      [
+        3,
+        [
+          mkSession({ id: 1, userId: 3, scenarioId: 10, score: 50, completedAt: "2026-03-19T00:00:00.000Z" }),
+          mkSession({ id: 2, userId: 3, scenarioId: 10, score: 40, completedAt: "2026-03-18T00:00:00.000Z" }),
+        ],
+      ],
+    ]);
+    const alerts = computeAlerts(consultants, sessionsByUser, now);
+    assert.equal(alerts.length, 1);
+    assert.ok(alerts[0].reasons.includes("lowScore"));
+    assert.ok(!alerts[0].reasons.includes("inactive"));
+  });
+
+  test("does not flag a seatless consultant or a healthy active one", () => {
+    const consultants = [
+      mkUser({ id: 3, role: "consultant", seatActive: false }),
+      mkUser({ id: 4, role: "consultant", seatActive: true }),
+    ];
+    const sessionsByUser = new Map<number, Session[]>([
+      [4, [mkSession({ id: 1, userId: 4, scenarioId: 10, score: 95, completedAt: "2026-03-19T00:00:00.000Z" })]],
+    ]);
+    const alerts = computeAlerts(consultants, sessionsByUser, now);
+    assert.deepEqual(alerts, []);
+  });
+});
+
+describe("buildLiveFeed", () => {
+  test("includes certifications and completed sessions sorted newest first", () => {
+    const { scenarios } = fixtures();
+    const users = [
+      mkUser({ id: 3, role: "consultant", displayName: "Alice A", consultingCertifiedAt: "2026-03-04T00:00:00.000Z" }),
+    ];
+    const sessions = [
+      mkSession({ id: 100, userId: 3, scenarioId: 10, score: 95, completedAt: "2026-03-05T00:00:00.000Z" }),
+      mkSession({ id: 101, userId: 3, scenarioId: 10, score: 60, completedAt: "2026-03-01T00:00:00.000Z" }),
+    ];
+    const feed = buildLiveFeed(users, sessions, scenarios);
+    assert.equal(feed.length, 3);
+    assert.equal(feed[0].type, "high_score"); // 03-05, score 95
+    assert.equal(feed[0].sessionId, 100);
+    assert.equal(feed[1].type, "certification"); // 03-04
+    assert.equal(feed[1].sessionId, null); // certifications have no backing session
+    assert.equal(feed[2].type, "session_completed"); // 03-01
+    assert.equal(feed[2].sessionId, 101);
+  });
+
+  test("respects the limit", () => {
+    const { scenarios } = fixtures();
+    const users = [mkUser({ id: 3, role: "consultant", displayName: "Alice A" })];
+    const sessions = Array.from({ length: 20 }, (_, i) =>
+      mkSession({ id: 100 + i, userId: 3, scenarioId: 10, score: 50, completedAt: `2026-03-${(i % 28) + 1}T00:00:00.000Z` }),
+    );
+    const feed = buildLiveFeed(users, sessions, scenarios, 5);
+    assert.equal(feed.length, 5);
+  });
+});
+
+describe("computePopularScenarios", () => {
+  test("ranks by session count and reports the average score per scenario", () => {
+    const { scenarios } = fixtures();
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: 80, completedAt: "2026-03-01T00:00:00.000Z" }),
+      mkSession({ id: 2, userId: 4, scenarioId: 10, score: 90, completedAt: "2026-03-02T00:00:00.000Z" }),
+      mkSession({ id: 3, userId: 3, scenarioId: 11, score: 70, completedAt: "2026-03-03T00:00:00.000Z" }),
+    ];
+    const popular = computePopularScenarios(sessions, scenarios, 5);
+    assert.equal(popular[0].scenarioId, 10);
+    assert.equal(popular[0].sessionCount, 2);
+    assert.equal(popular[0].averageScore, 85);
+    assert.equal(popular[1].scenarioId, 11);
+  });
+
+  test("excludes in-progress sessions from both the count and the average", () => {
+    const { scenarios } = fixtures();
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: null, status: "in_progress", completedAt: null, createdAt: "2026-03-01T00:00:00.000Z" }),
+    ];
+    const popular = computePopularScenarios(sessions, scenarios, 5);
+    assert.deepEqual(popular, []);
+  });
+});
+
+describe("computeAchievements", () => {
+  const now = new Date("2026-03-20T00:00:00.000Z");
+
+  test("derives Gold/Silver Achiever badges from real certification timestamps", () => {
+    const consultants = [
+      mkUser({ id: 3, role: "consultant", displayName: "Alice A", consultingCertifiedAt: "2026-03-01T00:00:00.000Z" }),
+      mkUser({ id: 4, role: "consultant", displayName: "Bob B", leadershipCertifiedAt: "2026-03-02T00:00:00.000Z" }),
+    ];
+    const sessionsByUser = new Map<number, Session[]>();
+    const badges = computeAchievements(consultants, sessionsByUser, [], now);
+    const kinds = badges.map((b) => b.badge);
+    assert.ok(kinds.includes("gold_achiever"));
+    assert.ok(kinds.includes("silver_achiever"));
+  });
+
+  test("awards exactly one Top Performer badge to the #1 leaderboard entry", () => {
+    const consultants = [mkUser({ id: 3, role: "consultant", displayName: "Alice A" })];
+    const leaderboard = [
+      { id: 3, displayName: "Alice A", averageScore: 95 },
+      { id: 4, displayName: "Bob B", averageScore: 80 },
+    ];
+    const badges = computeAchievements(consultants, new Map(), leaderboard, now);
+    const topPerformers = badges.filter((b) => b.badge === "top_performer");
+    assert.equal(topPerformers.length, 1);
+    assert.equal(topPerformers[0].userId, 3);
+  });
+
+  test("awards Role Play Master only at or above the session threshold", () => {
+    const consultant = mkUser({ id: 3, role: "consultant", displayName: "Alice A" });
+    const sessions = Array.from({ length: 25 }, (_, i) =>
+      mkSession({ id: 100 + i, userId: 3, scenarioId: 10, score: 80, completedAt: "2026-03-01T00:00:00.000Z" }),
+    );
+    const sessionsByUser = new Map<number, Session[]>([[3, sessions]]);
+    const badges = computeAchievements([consultant], sessionsByUser, [], now);
+    assert.ok(badges.some((b) => b.badge === "role_play_master"));
+  });
+});
+
+describe("dashboard widget config helpers", () => {
+  test("the default config marks every known widget visible", () => {
+    const cfg = defaultDashboardWidgetConfig();
+    for (const key of DASHBOARD_WIDGET_KEYS) {
+      assert.equal(cfg[key], true);
+    }
+  });
+
+  test("null/unset saved config resolves to all-visible defaults", () => {
+    assert.deepEqual(resolveDashboardWidgetConfig(null), defaultDashboardWidgetConfig());
+    assert.deepEqual(resolveDashboardWidgetConfig(undefined), defaultDashboardWidgetConfig());
+  });
+
+  test("malformed JSON falls back to defaults rather than throwing", () => {
+    assert.deepEqual(resolveDashboardWidgetConfig("{not json"), defaultDashboardWidgetConfig());
+  });
+
+  test("a saved partial config overrides only the keys it specifies", () => {
+    const saved = JSON.stringify({ alerts: false, liveFeed: false });
+    const cfg = resolveDashboardWidgetConfig(saved);
+    assert.equal(cfg.alerts, false);
+    assert.equal(cfg.liveFeed, false);
+    assert.equal(cfg.teamHealth, true); // untouched key still defaults to visible
+  });
+
+  test("a widget key unknown at save time (future-proofing) is ignored, not crashed on", () => {
+    const saved = JSON.stringify({ someFutureWidget: false, alerts: false });
+    const cfg = resolveDashboardWidgetConfig(saved);
+    assert.equal(cfg.alerts, false);
+    assert.equal((cfg as any).someFutureWidget, undefined);
+  });
+});
+
+describe("buildCommandCenterExtras (pure aggregation)", () => {
+  const now = new Date("2026-03-08T00:00:00.000Z"); // one week after fixtures' data
+
+  test("returns all top-level widget sections", () => {
+    const { users, sessions, scenarios } = fixtures();
+    const extras = buildCommandCenterExtras(users, sessions, scenarios, now);
+    assert.ok(extras.teamHealth);
+    assert.ok(extras.conversations);
+    assert.ok(extras.completionRate);
+    assert.ok(extras.certifications);
+    assert.ok(Array.isArray(extras.alerts));
+    assert.ok(Array.isArray(extras.liveFeed));
+    assert.ok(Array.isArray(extras.performanceOverTime));
+    assert.ok(Array.isArray(extras.scoreDistribution));
+    assert.ok(Array.isArray(extras.conversationOutcomes));
+    assert.ok(Array.isArray(extras.popularScenarios));
+    assert.ok(Array.isArray(extras.achievements));
+    assert.ok(extras.summaryStrip);
+  });
+
+  test("team health score is a 0-100 composite with a defined shape", () => {
+    const { users, sessions, scenarios } = fixtures();
+    const extras = buildCommandCenterExtras(users, sessions, scenarios, now);
+    assert.ok(extras.teamHealth.score === null || (extras.teamHealth.score! >= 0 && extras.teamHealth.score! <= 100));
+  });
+
+  test("conversations count matches completed sessions within the trailing period", () => {
+    const { users, sessions, scenarios } = fixtures();
+    const extras = buildCommandCenterExtras(users, sessions, scenarios, now);
+    // now = 2026-03-08; fixtures' 4 completed sessions all fall 2026-03-01..03,
+    // which is within 7 days of 2026-03-08.
+    assert.equal(extras.conversations.count, 4);
+    assert.equal(extras.conversations.sparkline.length, 8); // periodSince..now inclusive, UTC days
+  });
+
+  test("summary strip reports real aggregates from the same fixtures", () => {
+    const { users, sessions, scenarios } = fixtures();
+    const extras = buildCommandCenterExtras(users, sessions, scenarios, now);
+    assert.equal(extras.summaryStrip.totalSessions, sessions.length);
+    assert.equal(extras.summaryStrip.teamMembersActive, 2); // Alice + Bob (Dave seatless)
+    assert.equal(extras.summaryStrip.certificationsTotal, 1); // Bob
+  });
+
+  test("an empty office yields honest empty/null aggregates, not crashes", () => {
+    const extras = buildCommandCenterExtras([], [], [], now);
+    assert.equal(extras.teamHealth.score, null);
+    assert.equal(extras.conversations.count, 0);
+    assert.deepEqual(extras.alerts, []);
+    assert.deepEqual(extras.liveFeed, []);
+    assert.deepEqual(extras.achievements, []);
+    assert.equal(extras.summaryStrip.totalSessions, 0);
+  });
+});
+
+describe("command center + widget-config HTTP endpoints", () => {
+  let server: Server;
+  let baseUrl: string;
+  let users: User[];
+  let sessions: Session[];
+  let scenarios: Scenario[];
+  let officeRecord: { id: number; managerItemId: string | null; dashboardWidgetConfig: string | null };
+
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    registerManagerDashboardRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  after(() => {
+    server?.close();
+  });
+
+  beforeEach(() => {
+    const f = fixtures();
+    users = f.users;
+    sessions = f.sessions;
+    scenarios = f.scenarios;
+    officeRecord = { id: OFFICE_ID, managerItemId: "si_dash", dashboardWidgetConfig: null };
+    (storage as any).getUser = async (id: number) => users.find((u) => u.id === id);
+    (storage as any).listScenarios = async () => scenarios;
+    (storage as any).listUsersByOffice = async (officeId: number) => users.filter((u) => u.officeId === officeId);
+    (storage as any).listSessionsByOffice = async (officeId: number) => {
+      const ids = users.filter((u) => u.officeId === officeId).map((u) => u.id);
+      return sessions.filter((s) => ids.includes(s.userId));
+    };
+    (storage as any).listAcademyCreditsByOffice = async () => [];
+    (storage as any).getOffice = async (id: number) => (id === officeRecord.id ? officeRecord : undefined);
+    (storage as any).updateOffice = async (id: number, patch: Partial<typeof officeRecord>) => {
+      if (id !== officeRecord.id) return undefined;
+      officeRecord = { ...officeRecord, ...patch };
+      return officeRecord;
+    };
+    (storage as any).getSession = async (id: number) => sessions.find((s) => s.id === id);
+    (storage as any).getScenario = async (id: number) => scenarios.find((s) => s.id === id);
+  });
+
+  test("GET dashboard-command-center requires manager/qa role", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=3`);
+    assert.equal(res.status, 403);
+  });
+
+  test("GET dashboard-command-center returns widget data plus the default widget config", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.teamHealth);
+    assert.deepEqual(body.widgetConfig, defaultDashboardWidgetConfig());
+  });
+
+  test("an explicit since/until makes the performance-over-time series span the full selected range, not just 7 days", async () => {
+    // Fixtures' sessions run 2026-03-01..04; a since/until spanning Jan-Apr
+    // must produce far more than the old hardcoded 8-day (7-day + today) series.
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.performanceOverTime.length > 8, "expected the day-by-day series to cover the full multi-month range");
+  });
+
+  test("a narrow since/until still returns a day-by-day series clipped to that exact range", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
+    );
+    const body = await res.json();
+    assert.equal(body.performanceOverTime.length, 2);
+  });
+
+  test("omitting since/until keeps the old 7-day-trailing conversations sparkline length", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=1`);
+    const body = await res.json();
+    assert.equal(body.conversations.sparkline.length, 8); // periodSince..now inclusive, UTC days
+  });
+
+  test("GET dashboard-widget-config returns saved defaults when nothing is stored", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.widgetConfig, defaultDashboardWidgetConfig());
+  });
+
+  test("PUT dashboard-widget-config persists a toggle and GET reflects it", async () => {
+    const putRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requesterId: 1, widgetConfig: { alerts: false, liveFeed: false } }),
+    });
+    assert.equal(putRes.status, 200);
+    const putBody = await putRes.json();
+    assert.equal(putBody.widgetConfig.alerts, false);
+    assert.equal(putBody.widgetConfig.liveFeed, false);
+    assert.equal(putBody.widgetConfig.teamHealth, true);
+
+    const getRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config?requesterId=1`);
+    const getBody = await getRes.json();
+    assert.equal(getBody.widgetConfig.alerts, false);
+    assert.equal(officeRecord.dashboardWidgetConfig, JSON.stringify(putBody.widgetConfig));
+  });
+
+  test("PUT dashboard-widget-config merges onto the existing saved config instead of overwriting it", async () => {
+    officeRecord.dashboardWidgetConfig = JSON.stringify({ ...defaultDashboardWidgetConfig(), alerts: false });
+    const putRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requesterId: 1, widgetConfig: { liveFeed: false } }),
+    });
+    const putBody = await putRes.json();
+    assert.equal(putBody.widgetConfig.alerts, false, "previously saved toggle survives an unrelated PUT");
+    assert.equal(putBody.widgetConfig.liveFeed, false);
+  });
+
+  test("PUT dashboard-widget-config rejects a non-manager", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requesterId: 3, widgetConfig: { alerts: false } }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test("PUT dashboard-widget-config rejects a malformed body", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requesterId: 1, widgetConfig: "nope" }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test("GET manager/session/:id requires manager/qa role", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=3`);
+    assert.equal(res.status, 403);
+  });
+
+  test("GET manager/session/:id returns full detail for a session in the requester's own office", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.consultantName, "Alice A");
+    assert.equal(body.scenarioTitle, "Kicking Tires");
+    assert.equal(body.score, 90);
+    assert.ok(body.rubricScores);
+    assert.equal(body.rubricScores.trustBuilding, 90);
+    assert.equal(body.completedAt, "2026-03-01T00:00:00.000Z");
+  });
+
+  test("GET manager/session/:id 404s for a session in a different office", async () => {
+    // Session 100 belongs to Alice (office 1). A manager from a different
+    // office must never be able to view it, even by guessing the id.
+    const otherManager = mkUser({ id: 900, role: "manager", officeId: OTHER_OFFICE_ID, username: "othermgr" });
+    users.push(otherManager);
+    (storage as any).getOffice = async (id: number) =>
+      id === officeRecord.id ? officeRecord : id === OTHER_OFFICE_ID ? { id: OTHER_OFFICE_ID, managerItemId: "si_dash_2" } : undefined;
+
+    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=900`);
+    assert.equal(res.status, 404);
+  });
+
+  test("GET manager/session/:id 404s for a session id that does not exist", async () => {
+    const res = await fetch(`${baseUrl}/api/manager/session/999999?requesterId=1`);
+    assert.equal(res.status, 404);
   });
 });

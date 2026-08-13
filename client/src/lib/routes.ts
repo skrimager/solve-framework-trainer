@@ -8,6 +8,13 @@ export const ROUTES = {
   demo: "/demo",
   scenarios: "/scenarios",
   register: "/register",
+  // Manager (Command Center) self-service account recovery. Request pages
+  // live under /command-center/... so they read as part of the manager login
+  // area; the redemption landing page is top-level (/reset-password) since
+  // that's the URL emailed out and doesn't need the same nesting.
+  managerForgotPassword: "/command-center/forgot-password",
+  managerResetPassword: "/reset-password",
+  managerForgotUsername: "/command-center/forgot-username",
 } as const;
 
 // Old paths kept working so existing bookmarks, welcome-email links, and

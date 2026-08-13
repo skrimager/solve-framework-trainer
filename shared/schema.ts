@@ -25,6 +25,15 @@ export const offices = pgTable("offices", {
   // Null = active; a value = archived (hidden from the default Sales list but
   // reversible via unarchive). Never touches Stripe or dependent rows.
   archivedAt: text("archived_at"),
+  // Per-office Command Center widget visibility, JSON text (same convention as
+  // sessions.rubricScores/transcript): { [widgetKey: string]: boolean }. NULL
+  // means "no preferences saved yet" -> every widget defaults to visible (see
+  // DEFAULT_DASHBOARD_WIDGET_CONFIG in server/routes.ts). A widget key missing
+  // from a saved config also defaults to visible, so shipping a brand new
+  // widget in a later release never silently hides it for offices that
+  // customized their dashboard before that widget existed. Full drag-and-drop
+  // ordering is a future phase; this only ever stores on/off booleans.
+  dashboardWidgetConfig: text("dashboard_widget_config"),
 });
 
 export const insertOfficeSchema = createInsertSchema(offices).omit({
@@ -43,6 +52,20 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   role: text("role").notNull(), // 'manager' | 'consultant' | 'qa'
   displayName: text("display_name").notNull(),
+  // Owner/contact email for manager (and, incidentally, office) accounts. Nullable:
+  // most existing accounts were provisioned before self-service recovery existed and
+  // have no email on file, in which case forgot-password/forgot-username simply find
+  // no match (still returns the generic anti-enumeration response). Not unique because
+  // multiple manager/qa accounts in the same office may legitimately share one inbox.
+  email: text("email"),
+  // Self-service password recovery (manager/office accounts only today, but lives on
+  // the shared users table alongside consultant/qa rows since they all authenticate
+  // through the same POST /api/login). A single-use, random, expiring token — see
+  // POST /api/manager/forgot-password and POST /api/manager/reset-password in routes.ts.
+  // Null when no reset is in flight. Cleared immediately on successful redemption so a
+  // token can never be replayed.
+  passwordResetToken: text("password_reset_token").unique(),
+  passwordResetExpiresAt: text("password_reset_expires_at"), // ISO timestamp; token invalid at/after this
   currentLevel: text("current_level").notNull().default("beginner"), // Consulting-track level: 'beginner' | 'intermediate' | 'advanced' (advanced is the ceiling) — auto-advances after 5 sessions that EACH individually score >= 85 at the current level (not an average; see REQUIRED_QUALIFYING_SESSIONS/ADVANCE_THRESHOLD in server/llm.ts)
   leadershipLevel: text("leadership_level").notNull().default("beginner"), // Leadership/Conflict-Management track level, tracked independently from currentLevel so a user can be Advanced in one track and Beginner in the other
   // A paid, occupied consultant seat. Set true only after the office's Stripe seat
@@ -73,6 +96,9 @@ export const insertUserSchema = createInsertSchema(users).pick({
   password: true,
   role: true,
   displayName: true,
+  email: true,
+  passwordResetToken: true,
+  passwordResetExpiresAt: true,
   currentLevel: true,
   leadershipLevel: true,
   seatActive: true,
@@ -86,6 +112,19 @@ export const insertUserSchema = createInsertSchema(users).pick({
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+// Internal product categories for SaaS discovery scenarios. These values are
+// intentionally never rendered as labels in the trainee UI: they give the
+// opening-line prompt enough context for the prospect's own first words to
+// establish the category naturally.
+export const SAAS_PRODUCT_TAGS = [
+  "crm",
+  "website_builder",
+  "ai_sales_automation",
+  "ai_roleplay_platform",
+  "email_drip_automation",
+] as const;
+export type SaasProductTag = (typeof SAAS_PRODUCT_TAGS)[number];
 
 // A discovery-training scenario (e.g. Manufactured Housing customer persona)
 export const scenarios = pgTable("scenarios", {
@@ -102,6 +141,11 @@ export const scenarios = pgTable("scenarios", {
   // 'manufactured_community' | 'manufactured_dealer' | 're_listing_agent' | 're_buyer_agent';
   // null for every non-real-estate / non-manufactured-housing scenario.
   transactionType: text("transaction_type"),
+  // Internal-only SaaS product-category tag. Null for every non-SaaS scenario;
+  // it is fed into opening-line generation and is never rendered as a UI label.
+  product: text("product"),
+  // Internal-only Stall & Excuse Handling classifier. Null for every existing scenario; used only to rotate the dedicated practice module without repeating a stall pattern.
+  stallType: text("stall_type"),
   description: text("description").notNull(), // internal-only summary shown to managers/QA, never to the consultant before/during a session
   customerPersona: text("customer_persona").notNull(), // LEGACY freeform system prompt. Retained for rollback; no longer used to build prompts once personaCore is populated (see server/persona.ts).
   // Structured persona fields (replace the single freeform customerPersona for
@@ -118,6 +162,7 @@ export const scenarios = pgTable("scenarios", {
   difficulty: text("difficulty").notNull(), // 'beginner' | 'intermediate' | 'advanced'
   briefing: text("briefing").notNull().default(""), // consultant-facing setup: the setting + any technical terms shown before the role-play starts
   active: boolean("active").notNull().default(true),
+  version: integer("version").notNull().default(1),
 });
 
 export const insertScenarioSchema = createInsertSchema(scenarios).omit({
@@ -132,7 +177,7 @@ export const sessions = pgTable("sessions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'saved' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   // The per-session persona variant chosen when this session started (JSON:
   // {personality, motivation, objections[]}). Stored resolved so every turn of
   // this session reconstructs the exact same customer, while a different session
@@ -142,7 +187,12 @@ export const sessions = pgTable("sessions", {
   transcript: text("transcript").notNull().default("[]"), // JSON array of {role, content, audioUrl?}
   score: integer("score"), // 0-100 overall, set on completion
   rubricScores: text("rubric_scores"), // JSON: per-dimension scores, set on completion
+  stallEvidence: text("stall_evidence"), // JSON: { questionTypesUsed: string[], redFlagsTriggered: string[], rewardedBehaviorsObserved: string[] } — null except for stall-type sessions
   feedback: text("feedback"), // narrative feedback, set on completion
+  // Versions are stamped at completion. They intentionally remain null for
+  // sessions completed before version tracking existed.
+  scenarioVersion: integer("scenario_version"),
+  rubricVersion: integer("rubric_version"),
   createdAt: text("created_at").notNull(),
   completedAt: text("completed_at"),
   savedAt: text("saved_at"), // set when the consultant chooses "Save for Later" on an incomplete session
@@ -366,7 +416,10 @@ export const contacts = pgTable("contacts", {
   // 'speaking' | 'consulting' | 'book' | 'training' | 'role_play' | 'general'.
   type: text("type").notNull().default("general"),
   // Where the contact originated: 'website' | 'book' | 'speaking' | 'referral'
-  // | 'role_play' | 'manual' (extensible). Existing/marketing rows -> 'website'.
+  // | 'role_play' | 'manual' | 'voice_demo' (extensible). Existing/marketing
+  // rows -> 'website'. 'voice_demo' = auto-created on demo email verification
+  // (POST /api/demo/verify), distinct from 'role_play' (the optional post-demo
+  // CTA form) so the two lead sources stay separately filterable.
   source: text("source").notNull().default("website"),
   priority: text("priority").notNull().default("medium"), // 'high' | 'medium' | 'low'
   owner: text("owner"), // team member handling it (nullable; one admin today, designed for many)
@@ -465,7 +518,7 @@ export const demoSessions = pgTable("demo_sessions", {
   signupId: integer("signup_id").notNull().references(() => demoSignups.id),
   email: text("email").notNull(), // denormalized for simple admin listing/filtering
   scenarioId: integer("scenario_id").notNull(),
-  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed'
+  status: text("status").notNull().default("in_progress"), // 'in_progress' | 'completed' | 'ended_conduct' (see server/vulgarBait.ts)
   transcript: text("transcript").notNull().default("[]"), // same JSON shape as sessions.transcript
   score: integer("score"),
   rubricScores: text("rubric_scores"),
@@ -786,10 +839,11 @@ export type OfficeSignup = typeof officeSignups.$inferSelect;
 // temperature 0, so the same transcript can score differently on repeat runs.
 // We guarantee determinism by construction: a sha256 hash over everything that
 // affects the score (transcript role+content in order, difficulty, track,
-// transactionType) keys a stored result. Identical input -> identical stored
-// output, with no API call on a hit. `rubric` is JSON text (same convention as
-// sessions.rubricScores). `transcript`/`transactionType` are kept for
-// debuggability; they are not read on lookup (the hash is the key).
+// transactionType, and the versioned scoring prompt/grounding rules) keys a
+// stored result. Identical input -> identical stored output, with no API call on
+// a hit. `rubric` is JSON text (same convention as sessions.rubricScores).
+// `transcript`/`transactionType` are kept for debuggability; they are not read
+// on lookup (the hash is the key).
 export const scoreCache = pgTable("score_cache", {
   id: serial("id").primaryKey(),
   contentHash: text("content_hash").notNull().unique(), // sha256 over normalized transcript + params
@@ -828,3 +882,95 @@ export const leadershipRubricScoresSchema = z.object({
   blamelessResolution: z.number(), // resolution offered without blaming the client/customer OR the company/coworker
 });
 export type LeadershipRubricScores = z.infer<typeof leadershipRubricScoresSchema>;
+
+// ===========================================================================
+// Message Coach — a public lead-magnet tool that scores, diagnoses and rewrites
+// a single outreach message. Entirely additive: three new tables, no change to
+// any existing one. The whole surface is dark unless MESSAGE_COACH_ENABLED is
+// "true" (see server/messageCoachRoutes.ts).
+//
+// These rows are deliberately NOT joined to demo_signups. A Message Coach
+// visitor is anonymous in exactly the way a demo visitor is (email only, no
+// login, no office, no seat), but the two funnels meter different things and
+// share no quota, so mixing them into one signup row would make either limit
+// depend on the other.
+// ===========================================================================
+
+// One row per email that has used the free tool. `freeScoreUsedAt` is the whole
+// enforcement mechanism for "one free score per email": null means the free
+// score is still available, any timestamp means it is spent forever.
+export const messageCoachSignups = pgTable("message_coach_signups", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name"),
+  createdAt: text("created_at").notNull(),
+  freeScoreUsedAt: text("free_score_used_at"), // ISO timestamp; null until the free score is spent
+  // ISO timestamp; null until the email is successfully added to the Resend
+  // "Message Coach Leads" audience. Never set for a suppressed email. Sync is
+  // best-effort and this column lets a later job retry anyone still null.
+  resendSyncedAt: text("resend_synced_at"),
+  // Email-verification gate for anonymous scoring, same shape as demoSignups:
+  // code is the current 6-digit code (nullable once consumed/expired),
+  // codeExpiresAt is the ISO timestamp past which it is invalid, verified
+  // flips true once any code is confirmed. This gates ACCESS to the free/paid
+  // scoring flow; it does not add a new usage cap on top of freeScoreUsedAt.
+  code: text("code"),
+  codeExpiresAt: text("code_expires_at"),
+  verified: boolean("verified").notNull().default(false),
+  lastSentAt: text("last_sent_at"), // ISO timestamp of the most recent code email
+});
+
+export const insertMessageCoachSignupSchema = createInsertSchema(messageCoachSignups).omit({ id: true });
+export type InsertMessageCoachSignup = z.infer<typeof insertMessageCoachSignupSchema>;
+export type MessageCoachSignup = typeof messageCoachSignups.$inferSelect;
+
+// One row per scored message, whichever path paid for it. Both foreign keys are
+// nullable because the three sources populate different ones: a free/paid score
+// has a signupId and no officeId, a member score has an officeId and no
+// signupId. officeId is the only forward-looking field here — it exists so
+// usage-by-office can be reported later without a backfill.
+export const messageCoachScores = pgTable("message_coach_scores", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").references(() => messageCoachSignups.id),
+  officeId: integer("office_id").references(() => offices.id),
+  industry: text("industry"), // dropdown value, or null when not supplied
+  messageText: text("message_text").notNull(),
+  score: integer("score").notNull(), // 0-100
+  stalledStep: text("stalled_step").notNull(),
+  coaching: text("coaching").notNull(),
+  rewrite: text("rewrite").notNull(),
+  source: text("source").notNull(), // 'free' | 'paid' | 'member'
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertMessageCoachScoreSchema = createInsertSchema(messageCoachScores).omit({ id: true });
+export type InsertMessageCoachScore = z.infer<typeof insertMessageCoachScoreSchema>;
+export type MessageCoachScore = typeof messageCoachScores.$inferSelect;
+
+// One row per $4.99 additional-score purchase. This mirrors demo_paid_sessions
+// field for field (see that table's comment for why a row per purchase rather
+// than a counter); only the consumed_by_* target differs, because what a Message
+// Coach credit buys is a score row rather than a practice session.
+//
+// status lifecycle:
+//   'pending'  Checkout Session created; payment not yet confirmed.
+//   'paid'     webhook confirmed payment; one unconsumed score credit exists.
+//   'consumed' the credit has been spent; consumed_by_score_id links to the
+//              message_coach_scores row it funded.
+export const messageCoachPaidPurchases = pgTable("message_coach_paid_purchases", {
+  id: serial("id").primaryKey(),
+  signupId: integer("signup_id").notNull().references(() => messageCoachSignups.id),
+  email: text("email").notNull(), // denormalized, matches messageCoachSignups.email at purchase time
+  stripeCheckoutSessionId: text("stripe_checkout_session_id").notNull().unique(),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  amountTotal: integer("amount_total").notNull(), // cents
+  status: text("status").notNull().default("pending"), // 'pending' | 'paid' | 'consumed'
+  createdAt: text("created_at").notNull(),
+  paidAt: text("paid_at"),
+  consumedAt: text("consumed_at"),
+  consumedByScoreId: integer("consumed_by_score_id").references((): AnyPgColumn => messageCoachScores.id),
+});
+
+export const insertMessageCoachPaidPurchaseSchema = createInsertSchema(messageCoachPaidPurchases).omit({ id: true });
+export type InsertMessageCoachPaidPurchase = z.infer<typeof insertMessageCoachPaidPurchaseSchema>;
+export type MessageCoachPaidPurchase = typeof messageCoachPaidPurchases.$inferSelect;

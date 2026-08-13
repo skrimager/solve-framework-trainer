@@ -1,7 +1,7 @@
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { GraduationCap, LayoutDashboard, PlayCircle, Building2, ArrowLeft } from "lucide-react";
+import { GraduationCap, LayoutDashboard, PlayCircle, Building2, ArrowLeft, MessageSquareText } from "lucide-react";
 
 // Root chooser. Minimal, on-brand entry point that routes each kind of visitor to
 // the right place: consultants to practice, managers to the command center, and
@@ -38,6 +38,13 @@ export default function Home() {
       title: "Try the free demo",
       description: "A guided taste of a live discovery conversation.",
       testId: "link-choose-demo",
+    },
+    {
+      to: "/message-coach",
+      icon: MessageSquareText,
+      title: "Score a message",
+      description: "Paste outreach and get it scored, diagnosed, and rewritten.",
+      testId: "link-choose-message-coach",
     },
   ] as const;
 

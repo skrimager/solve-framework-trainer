@@ -2,6 +2,12 @@ import { storage } from "./storage";
 import { hashPassword } from "./admin";
 import { healUnlimitedDemoUsage } from "./demo";
 import { personaVariantSeed } from "./personaVariants";
+import {
+  INTERNAL_TEST_ACCOUNT_USERNAME,
+  INTERNAL_TEST_SUV_SLUG,
+  INTERNAL_TEST_SUV_SOURCE_SLUG,
+} from "./internalTestScenario";
+import { generateUniqueInviteCode } from "./invite";
 import type { InsertScenario, InsertUser, Office, Scenario } from "@shared/schema";
 import { DEMO_USER_ACCOUNTS, hashUserPassword } from "./userPasswords";
 
@@ -46,6 +52,65 @@ async function ensureDemoOffice(): Promise<Office> {
   });
 }
 
+const INTERNAL_TEST_OFFICE_NAME = "Internal Test Office";
+
+// Hashed at seed time with hashUserPassword, same bcrypt scheme every users-table
+// password now goes through (registration, the Stripe webhook path, password
+// reset, and this seed). The separate admins table uses its own scrypt scheme via
+// hashPassword above; the two are unrelated.
+const INTERNAL_TEST_ACCOUNT_PASSWORD = "TestDummy@Solve";
+
+// The account INTERNAL_TEST_USERNAME is meant to point at, so the internal test
+// scenario can be piloted by a real login rather than by one of the shared demo
+// accounts whose credentials are published.
+//
+// It is a normal consultant (isDemoAccount: false) on purpose. A demo account
+// would bypass checkSeatAccess and the practice cap, so a pilot run through it
+// would not exercise the same path a paying customer's session takes, which is
+// the entire point of piloting against real content.
+//
+// Idempotent on the username, so it is safe on every boot of an already-populated
+// production database. It deliberately sits OUTSIDE the
+// `existingUsers.length === 0` demo-user block: that block never runs again once a
+// database has any users, which would have left live environments without the
+// account forever.
+export async function ensureInternalTestAccount(): Promise<void> {
+  const existing = await storage.getUserByUsername(INTERNAL_TEST_ACCOUNT_USERNAME);
+  if (existing) return;
+
+  // Its own office rather than the Demo Office, because the Demo Office roster is
+  // published by the UNAUTHENTICATED /api/public/demo-dashboard route, which would
+  // broadcast the internal account's username to the whole internet. Keyed on the
+  // office name so re-seeding reuses it; the invite code is minted randomly rather
+  // than hardcoded so no committed code can be used to join this office.
+  const offices = await storage.listOffices();
+  const office =
+    offices.find((o) => o.name === INTERNAL_TEST_OFFICE_NAME) ??
+    (await storage.createOffice({
+      name: INTERNAL_TEST_OFFICE_NAME,
+      inviteCode: await generateUniqueInviteCode(),
+      createdAt: new Date().toISOString(),
+      status: "active",
+      subscriptionStatus: "active",
+    }));
+
+  // seatActive with an active office is what lets the account actually start a
+  // session; without it checkSeatAccess would block the very pilot runs this
+  // account exists for.
+  await storage.createUser({
+    officeId: office.id,
+    username: INTERNAL_TEST_ACCOUNT_USERNAME,
+    password: await hashUserPassword(INTERNAL_TEST_ACCOUNT_PASSWORD),
+    role: "consultant",
+    displayName: INTERNAL_TEST_ACCOUNT_USERNAME,
+    currentLevel: "beginner",
+    seatActive: true,
+    seatActivatedAt: new Date().toISOString(),
+    isDemoAccount: false,
+  });
+  console.log(`Seeded internal test account ${INTERNAL_TEST_ACCOUNT_USERNAME}.`);
+}
+
 // The six public demo scenarios, listed literally rather than derived from a
 // broader "which rows disagree with the source data" scan. The seed loop below
 // is insert-only, so these rows kept the active:false they were first deployed
@@ -64,6 +129,93 @@ const DEMO_V2_RECONCILE_SLUGS = [
 type ScenarioActiveWriter = {
   updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
 };
+
+const SAAS_SCENARIO_CONTEXT_FIELDS = [
+  "product",
+  "customerPersona",
+  "personaCore",
+  "personalityVariants",
+  "motivationVariants",
+  "objectionPool",
+] as const;
+
+const AUDIT_PERSONA_CONTEXT_FIELDS = [
+  "customerPersona",
+  "personaCore",
+  "personalityVariants",
+  "motivationVariants",
+  "objectionPool",
+] as const;
+
+// This one existing resident scenario was the sole cold-opening exception found
+// in the all-vertical audit. Keep its persisted structured persona synchronized
+// with the corrected source instead of waiting for a blank-persona backfill.
+const AUDIT_PERSONA_CONTEXT_SLUGS = new Set([
+  "manufactured-housing-community-existing-resident-renewal",
+]);
+
+type ScenarioSaasContextWriter = {
+  updateScenario(id: number, patch: Partial<InsertScenario>): Promise<Scenario | undefined>;
+};
+
+export async function reconcileAuditPersonaContext(
+  existingScenarios: Scenario[],
+  store: ScenarioSaasContextWriter,
+): Promise<string[]> {
+  const sourceBySlug = new Map(
+    scenarios
+      .filter((scenario) => AUDIT_PERSONA_CONTEXT_SLUGS.has(scenario.slug))
+      .map((scenario) => [scenario.slug, scenario]),
+  );
+  const reconciled: string[] = [];
+  for (const row of existingScenarios) {
+    const source = sourceBySlug.get(row.slug);
+    if (!source) continue;
+
+    const patch: Partial<InsertScenario> = {};
+    for (const field of AUDIT_PERSONA_CONTEXT_FIELDS) {
+      if (row[field] !== source[field]) {
+        (patch as Record<string, unknown>)[field] = source[field];
+      }
+    }
+    if (Object.keys(patch).length === 0) continue;
+
+    await store.updateScenario(row.id, patch);
+    reconciled.push(row.slug);
+  }
+  return reconciled;
+}
+
+// The initial seed loop is intentionally insert-only, but these original SaaS
+// rows already exist in production. Reconcile their product tags and structured
+// persona copy so a deploy repairs opening context without recreating scenarios.
+export async function reconcileSaasScenarioContext(
+  existingScenarios: Scenario[],
+  store: ScenarioSaasContextWriter,
+): Promise<string[]> {
+  const sourceBySlug = new Map(
+    scenarios
+      .filter((scenario) => scenario.vertical === "saas")
+      .map((scenario) => [scenario.slug, scenario]),
+  );
+  const reconciled: string[] = [];
+  for (const row of existingScenarios) {
+    const source = sourceBySlug.get(row.slug);
+    if (!source) continue;
+
+    const patch: Partial<InsertScenario> = {};
+    for (const field of SAAS_SCENARIO_CONTEXT_FIELDS) {
+      if (row[field] !== source[field]) {
+        (patch as Record<string, unknown>)[field] = source[field];
+      }
+    }
+    if (Object.keys(patch).length === 0) continue;
+
+    await store.updateScenario(row.id, patch);
+    reconciled.push(row.slug);
+  }
+  return reconciled;
+}
 
 // Flips any already-persisted demo scenario back to active:true. Pass the
 // pre-insert snapshot of the table: rows the insert loop creates this boot
@@ -124,6 +276,8 @@ export async function seed() {
     console.log("Seeded demo users into Demo Office.");
   }
 
+  await ensureInternalTestAccount();
+
   // Add any scenario whose slug doesn't exist yet — keeps a live, already-seeded
   // database in sync with new scenarios added to this file without wiping data.
   const existingScenarios = await storage.listScenarios();
@@ -137,6 +291,14 @@ export async function seed() {
   }
 
   await reconcileDemoV2Active(existingScenarios, storage);
+  const reconciledSaas = await reconcileSaasScenarioContext(existingScenarios, storage);
+  if (reconciledSaas.length > 0) {
+    console.log(`Reconciled SaaS product context for ${reconciledSaas.length} scenario(s).`);
+  }
+  const reconciledAuditPersonas = await reconcileAuditPersonaContext(existingScenarios, storage);
+  if (reconciledAuditPersonas.length > 0) {
+    console.log(`Reconciled audit persona context for ${reconciledAuditPersonas.length} scenario(s).`);
+  }
 
   // Backfill the structured persona fields onto rows seeded before the persona
   // variation rewrite. Keyed off an empty personaCore so it runs once per row and
@@ -345,7 +507,7 @@ Stay terse and matter-of-fact at first, like a man not used to talking about fee
       "A longtime resident calls the community office frustrated about a maintenance issue and mentions offhand that she's 'thinking about not renewing.' She frames it as a maintenance complaint, but the real issue is she no longer feels valued as a long-term resident and is testing whether anyone will actually respond. Practice discovery and retention conversations with an at-risk existing resident, not just new-sale scenarios.",
     customerPersona: `You are Marisol, 58, a resident of nine years at the community, calling the office about a drainage issue near your lot that's been reported twice with no follow-up. You are the CUSTOMER in a discovery conversation with community staff — never break character, never mention you are an AI.
 
-Your opening stance: "This drainage problem still hasn't been fixed. Honestly I'm starting to think about not renewing my lease this year."
+Your opening stance: "Hi, I'm Marisol. I'm calling about a drainage issue near my lot that I've reported twice and still needs attention. I'm starting to wonder whether I should renew my lease this year."
 
 Your real underlying needs (reveal only through good discovery questions):
 - The drainage issue itself is real and does need fixing, but it's become a symbol of a bigger feeling: after nine years as a resident in good standing, you feel invisible to management compared to how you were treated when you first moved in and they were still trying to fill lots.
@@ -508,7 +670,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant caves instantly and just undercuts the other offers without addressing why you're really wary, you'll technically "win" but stay suspicious and may still buy elsewhere because nothing earned your trust.
 - If asked what your last buying experience was like, or what would make you confident you're not going to get burned again, you drop the combative posture briefly and admit the price war is partly armor from being stung before.
 - You respect a consultant who holds firm on a fair number while transparently walking you through each line item, the real rate, and what service and support look like after the sale — that moves you far more than capitulation does.
-- You push back hard at least twice even after warming up, as deliberate tests; calm, specific, non-defensive answers win you over, while any dodge or scripted pitch snaps you back to "then we're done here."
+- When the consultant's current message addresses a price, fee, or trust concern, you react to that message with the same high standards: calm, specific, non-defensive answers win you over, while a dodge or scripted pitch makes you less forthcoming. Do not independently re-raise a concern once it has been answered or the consultant has moved on.
 
 Stay aggressive, fast-talking, and price-anchored, revealing the trust wound only when genuinely drawn out — reward transparency and firmness, punish capitulation and evasion. One to three sentences per turn. No stage directions.`,
   },
@@ -1304,6 +1466,195 @@ Stay conversational, natural, and realistic — like a real person, not a script
     customerPersona: personaVariantSeed["demo-v2-re-3"].core,
   },
 
+  // Fifteen single-scenario public-demo industries. Their persona prose lives in
+  // personaVariantSeed, so both the legacy and structured persona fields share
+  // one exact source. SaaS and pest control reuse existing production rows and
+  // are deliberately listed only in server/demoV2.ts.
+  {
+    slug: "demo-v2-apartment-rental-1",
+    gender: "female",
+    title: "Demo: Just Wants Something Cheap and Close to Work",
+    vertical: "apartment_rental",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a leasing consultant. A caller says she just wants the cheapest one-bedroom you have that's close to downtown. Practice a warm discovery conversation: find out why location and price are the only things she's mentioned before you start listing units.",
+    description: "Public demo scenario. A caller opens on price and proximity alone. The real driver is a recent breakup that forced a sudden move and a tight one-month timeline she hasn't mentioned, so what she needs is confidence she can actually get in fast and start over quietly, not just the lowest rent. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-apartment-rental-1"].core,
+  },
+
+  {
+    slug: "demo-v2-employee-grievance-1",
+    gender: "male",
+    title: "Demo: Annoyed About a Last-Minute Schedule Change",
+    vertical: "employee_grievance",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manager meeting with an employee who's upset about a schedule change. Practice a warm discovery conversation: find out what's really behind the frustration before responding to the schedule complaint on the surface.",
+    description: "Public demo scenario. An employee opens annoyed about a last-minute shift swap. The real driver is a missed childcare pickup that put them in a bad spot with their kid's school, which they're embarrassed to bring up unprompted. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-employee-grievance-1"].core,
+  },
+
+  {
+    slug: "demo-v2-financial-advisor-1",
+    gender: "male",
+    title: "Demo: Just Wants to Know Where to Put Some Savings",
+    vertical: "financial_advisor",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a financial advisor meeting a new client. He says he just wants to know where to put some savings. Practice a warm discovery conversation: find out what the money is actually for before recommending anything.",
+    description: "Public demo scenario. A client opens with a generic request to invest some savings. The real driver is a plan to help his daughter with a house down payment in about two years, which changes the entire risk and timeline picture, and he hasn't mentioned it because he doesn't think it's relevant to \"where should I put my money.\" Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-financial-advisor-1"].core,
+  },
+
+  {
+    slug: "demo-v2-home-improvement-1",
+    gender: "female",
+    title: "Demo: Just Wants New Countertops",
+    vertical: "home_improvement",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a remodeling consultant meeting a homeowner who says she just wants new countertops. Practice a warm discovery conversation: find out what's actually driving the request before quoting materials.",
+    description: "Public demo scenario. A homeowner opens asking only about countertop materials. The real driver is that she's planning to sell within the next year and a realtor told her the kitchen looks dated, so this is really about resale value on a budget, not a forever-kitchen upgrade. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-home-improvement-1"].core,
+  },
+
+  {
+    slug: "demo-v2-hvac-sales-1",
+    gender: "male",
+    title: "Demo: Wants the Cheapest Unit That Will Work",
+    vertical: "hvac_sales",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an HVAC sales consultant meeting a homeowner about a new system. He says he just wants the cheapest unit that'll do the job. Practice a warm discovery conversation: find out what's driving the request before quoting equipment.",
+    description: "Public demo scenario. A homeowner opens asking for the cheapest available system. The real driver is that his upstairs bedrooms run noticeably hotter than the rest of the house and he's been dealing with it for years, assuming that's just how the house is, so this is really about a comfort problem he doesn't know has a fix, not just price. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-hvac-sales-1"].core,
+  },
+
+  {
+    slug: "demo-v2-hvac-service-1",
+    gender: "female",
+    title: "Demo: Just Wants the AC Running Again",
+    vertical: "hvac_service",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an HVAC service technician meeting a homeowner whose AC stopped working. She just wants it running again as fast as possible. Practice a warm discovery conversation: find out the full picture before quoting a quick fix.",
+    description: "Public demo scenario. A homeowner opens wanting the fastest possible fix during a heat wave. The real driver is that she has a newborn at home and is genuinely worried about the heat affecting the baby, which she hasn't said outright because she doesn't want to sound overly anxious. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-hvac-service-1"].core,
+  },
+
+  {
+    slug: "demo-v2-insurance-auto-1",
+    gender: "male",
+    title: "Demo: Just Comparing Prices",
+    vertical: "insurance_auto",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're an auto insurance agent talking with a caller who says he's just comparing prices. Practice a warm discovery conversation: find out what's actually prompting the shopping before quoting a rate.",
+    description: "Public demo scenario. A caller opens asking only for a quote to compare against his current policy. The real driver is that he was just in a minor fender-bender that wasn't his fault and is worried his current insurer is going to raise his rate anyway, so he's shopping out of frustration and fear, not routine comparison. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-insurance-auto-1"].core,
+  },
+
+  {
+    slug: "demo-v2-manufactured-housing-1",
+    gender: "male",
+    title: "Demo: Just Wants the Cheapest Home Available",
+    vertical: "manufactured_housing",
+    transactionType: "manufactured_dealer",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manufactured housing sales consultant. A caller says he just wants the cheapest home you have. Practice a warm discovery conversation: find out what's actually driving the budget focus before showing floor plans.",
+    description: "Public demo scenario. A caller opens asking only about the cheapest available home. The real driver is that he's supporting his elderly mother's move and is anxious about handling the cost alone without involving his siblings, who he doesn't get along with financially, so budget pressure is really about independence, not the home itself. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-manufactured-housing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-manufactured-housing-community-1",
+    gender: "female",
+    title: "Demo: Sticker-Shocked by the Lot Rent",
+    vertical: "manufactured_housing_community",
+    transactionType: "manufactured_community",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a community manager meeting a prospective resident who's reacting to the lot rent price. Practice a warm discovery conversation: find out what's actually behind the sticker shock before defending the number.",
+    description: "Public demo scenario. A prospective resident opens reacting negatively to the lot rent. The real driver is that she's comparing it to a much older lease from years ago at a different community and doesn't yet understand what's actually included here, so the real gap is information, not just price. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-manufactured-housing-community-1"].core,
+  },
+
+  {
+    slug: "demo-v2-peer-conflict-1",
+    gender: "female",
+    title: "Demo: Annoyed About a Coworker Not Pulling Their Weight",
+    vertical: "peer_conflict",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a manager meeting with an employee who's frustrated with a coworker. Practice a warm discovery conversation: find out what's really going on before responding to the surface complaint.",
+    description: "Public demo scenario. An employee opens complaining that a coworker isn't pulling their weight on a shared project. The real driver is that the employee is worried they'll be blamed if the project is late, and that fear, not just resentment, is driving the complaint. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-peer-conflict-1"].core,
+  },
+
+  {
+    slug: "demo-v2-plumbing-1",
+    gender: "male",
+    title: "Demo: Just Wants the Drain Fixed",
+    vertical: "plumbing",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a plumbing service consultant talking with a homeowner about a slow drain. Practice a warm discovery conversation: find out the real scope before quoting a quick fix.",
+    description: "Public demo scenario. A homeowner opens treating a slow drain as a minor annoyance needing a quick snake job. The real driver is that this is the third time in six months and he's starting to worry it's a bigger pipe issue he can't afford to deal with, which he hasn't said because he's hoping it isn't true. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-plumbing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-pool-landscaping-1",
+    gender: "female",
+    title: "Demo: Just Wants a Small Pool for the Backyard",
+    vertical: "pool_landscaping",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a pool and landscaping consultant meeting a homeowner about a backyard pool. She says she just wants something small. Practice a warm discovery conversation: find out what's actually driving the request before talking size and price.",
+    description: "Public demo scenario. A homeowner opens asking for something small and simple. The real driver is chronic joint pain that's made her doctor recommend low-impact swimming for therapy, which she hasn't mentioned because she doesn't want the conversation to become about her health. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-pool-landscaping-1"].core,
+  },
+
+  {
+    slug: "demo-v2-roofing-1",
+    gender: "male",
+    title: "Demo: Just Wants a Quote to Compare",
+    vertical: "roofing",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a roofing consultant meeting a homeowner who says he just wants a quote to compare against others. Practice a warm discovery conversation: find out what's driving the roof replacement before quoting materials.",
+    description: "Public demo scenario. A homeowner opens asking only for a comparison quote. The real driver is a small ceiling stain he noticed a few weeks ago that he hasn't mentioned to anyone, including his spouse, because he's worried about what it might mean and how much it could cost to fix. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-roofing-1"].core,
+  },
+
+  {
+    slug: "demo-v2-solar-1",
+    gender: "male",
+    title: "Demo: Skeptical This Actually Pays Off",
+    vertical: "solar",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a solar sales consultant meeting a homeowner who's skeptical about payback. Practice a warm discovery conversation: find out what's actually driving the skepticism before pitching numbers.",
+    description: "Public demo scenario. A homeowner opens skeptical that solar ever really pays for itself. The real driver is that a neighbor had a bad experience with a different solar company and he's worried about being locked into a similar situation, not just doubtful about the math. Beginner-level discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-solar-1"].core,
+  },
+
+  {
+    slug: "demo-v2-upset-customer-service-1",
+    gender: "female",
+    title: "Demo: Upset About a Late Delivery",
+    vertical: "upset_customer_service",
+    track: "leadership",
+    difficulty: "beginner",
+    active: true,
+    briefing: "You're a customer service rep talking with a customer whose order arrived late. Practice a warm discovery conversation: find out what's really at stake before responding to the surface complaint.",
+    description: "Public demo scenario. A customer opens upset about a late delivery and wants a refund. The real driver is that the item was a birthday gift that arrived after the birthday already happened, which is the actual source of the frustration, not just the lateness itself. Beginner-level leadership discovery practice.",
+    customerPersona: personaVariantSeed["demo-v2-upset-customer-service-1"].core,
+  },
+
   // ─────────────────────────────────────────────────────────────
   // APARTMENT RENTAL
   // ─────────────────────────────────────────────────────────────
@@ -1428,7 +1779,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If an agent just caves and matches the competitor's number without addressing renewal terms, maintenance response, or what actually differs between the communities, you stay skeptical and may lease elsewhere anyway because nothing earned your confidence.
 - If asked what went wrong at your last place, or what would make you feel secure signing for a full year, you drop the hard-bargaining posture briefly and admit the price fight is really about not getting burned by another surprise hike or ignored repair.
 - You respond well to an agent who holds firm on a fair, transparent number while walking you through the real renewal policy, average maintenance response time, and effective-rent comparison against the competitor — that moves you far more than a straight price match.
-- You push back at least twice even after warming up, as deliberate tests; calm, specific, honest answers win you over, while any vague reassurance or pushy close snaps you back to "then I'll go with the cheaper place."
+- When the agent's current message addresses price, fees, renewal terms, or maintenance, respond to that specific message: calm, specific, honest answers win you over, while vague reassurance or a pushy close makes you less forthcoming. Do not independently revive a concern after it has been answered or the agent has moved on.
 
 Stay demanding, comparison-focused, and skeptical of any upsell, revealing the trust concern only when genuinely drawn out — reward transparency and firmness, punish capitulation and vague sales talk. One to three sentences per turn. No stage directions.`,
   },
@@ -1534,7 +1885,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant just caves and undercuts the competitor's number to win you, you'll stay suspicious — a cheap quote is exactly what burned you last time, so capitulation actually loses your trust.
 - If asked what happened on your last project, or what would make you feel protected from a repeat, you drop the combativeness briefly and admit the change-order spiral is the real wound and you're scared of getting taken again.
 - You respect a consultant who holds a fair, transparent number while walking you line-by-line through the scope, realistic allowances, and exactly how and when change orders can arise — that earns trust far more than a discount does.
-- You push back hard at least twice even after softening, as deliberate tests; calm, specific, non-defensive answers win you over, while any vague reassurance or slick pitch snaps you back to "then I'll go with the cheaper guys."
+- When the consultant's current message addresses price, scope, allowances, or change orders, respond to that specific message: calm, specific, non-defensive answers win you over, while vague reassurance or a slick pitch makes you less forthcoming. Do not independently revive a concern after it has been answered or the consultant has moved on.
 
 Stay guarded, blunt, and price-anchored, revealing the change-order wound only when genuinely drawn out — reward transparency and a firmly-defined scope, punish capitulation and evasion. One to three sentences per turn. No stage directions.`,
   },
@@ -1638,7 +1989,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant just agrees to patch over the existing work to win the job and keep you happy, they're setting you up for leaks and mold later — a serious trap the evaluator should catch, because pure order-taking here does real harm.
 - If asked what happened with the last contractor, or what would make you feel safe trusting someone again, you drop some of the hostility and admit how burned and embarrassed you feel.
 - You respond — cautiously — to a consultant who is transparent about what's actually safe to keep versus what has to be redone and why, shows rather than tells, and doesn't flinch from delivering the honest bigger picture without pressure.
-- You push back and accuse them of upselling at least twice; calm, evidence-based, non-defensive explanations slowly earn your trust, while any vague or salesy answer confirms your worst fears and shuts you down.
+- When the consultant's current message makes the scope or cost relevant, you may express concern about upselling as a reaction to that message. Calm, evidence-based, non-defensive explanations slowly earn your trust, while vague or salesy answers make you less forthcoming. Do not independently return to the accusation after the consultant has answered it or moved on.
 
 Stay guarded, sharp, and quick to suspect a sales angle, revealing the hurt and the real fear only when genuinely drawn out — reward honesty and proof, punish anything that sounds like a pitch. One to three sentences per turn. No stage directions.`,
   },
@@ -1747,7 +2098,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant simply caves and competes on price alone, you'll 'win' a number but potentially buy a pool that bleeds you on energy and repairs — and the consultant will have taught you nothing, which the evaluator should flag as getting steamrolled.
 - If asked how long you plan to keep the home, what your current utility bills are like, or whether the three bids cover identical scope and warranties, you pause and admit you hadn't dug into any of that.
 - You respect a consultant who doesn't grovel on price but instead calmly earns a few minutes to show, concretely, how equipment and warranty differences change what you actually pay over years — data and specifics move you, sales adjectives do not.
-- You push back and try to force it back to 'just the price' at least twice; if the consultant holds their ground with concrete, non-defensive value evidence, you genuinely start to reconsider what 'lowest' means.
+- When the consultant's current message is about price, scope, equipment, or warranty, respond with the guarded, price-conscious reaction that message earns. If they provide concrete, non-defensive value evidence, you genuinely start to reconsider what "lowest" means. Do not independently force the conversation back to price after the consultant has moved on.
 
 Stay dismissive, fast, and price-anchored, granting real consideration only when the consultant earns it with concrete lifetime-cost evidence — punish groveling and vague quality claims alike. One to three sentences per turn. No stage directions.`,
   },
@@ -1853,7 +2204,7 @@ Your real underlying needs (reveal only through good discovery questions):
 - If a consultant simply agrees to swap the dead plants to keep you happy, the underlying drainage and prep problems remain and it'll fail again — a trap the evaluator should catch, since flattering order-taking does you no favors.
 - If asked what you're most proud of, what you'd most like to keep, and what's been frustrating you, you soften and start admitting which parts haven't worked out.
 - You respond — carefully — to a consultant who credits your effort and taste genuinely, then explains the root causes (drainage, plant placement, base prep) as things almost everyone gets wrong, framing a redo as building on your vision rather than erasing it.
-- You push back and defend your work at least twice; respectful, specific, ego-preserving explanations move you, while anything that feels condescending makes you insist on just salvaging it all.
+- When the consultant's current message discusses the prior work or a proposed change, respond protectively but to that specific message. Respectful, specific, ego-preserving explanations move you, while anything condescending makes you less forthcoming. Do not independently restart a defense of the prior work after the consultant has moved on.
 
 Stay proud and a little prickly/defensive early, opening to honest redo recommendations only once your effort is respected and the criticism is framed with care. One to three sentences per turn. No stage directions.`,
   },
@@ -2028,15 +2379,16 @@ Stay price-focused early, warming as the forever-home and durability priorities 
     gender: "female",
     title: "Weighing a Switch From Spreadsheets",
     vertical: "saas",
+    product: "crm",
     difficulty: "intermediate",
     briefing:
       "You're a B2B SaaS consultant meeting an operations lead evaluating your platform. Key terms: 'incumbent / status quo' (the current way of working — here, spreadsheets — which is the real competitor), 'implementation / onboarding' (the effort to get set up and migrate data), 'ROI / time-to-value' (how quickly the tool pays for itself), 'switching cost' (the disruption and retraining of moving off the current process).",
     active: true,
     description:
       "An operations lead is evaluating the platform but keeps comparing it to 'just keeping our spreadsheets.' Her stated hesitation is price, but the real blocker is fear that a messy migration and team retraining will blow up in her face and reflect badly on her. Practice discovery that surfaces the switching-risk and reputational concern behind a price objection, with the status quo as the true competitor.",
-    customerPersona: `You are Rebecca, 41, an operations lead at a 60-person company, evaluating whether to adopt this SaaS tool. A consultant is walking you through it. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+    customerPersona: `You are Rebecca, 41, an operations lead at a 60-person company, evaluating a CRM to replace the spreadsheets her team uses to track customer and prospect relationships. A consultant is walking you through it. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
 
-Your opening stance: "Honestly, our spreadsheets mostly work and this isn't cheap. I'm not sure the price is justified when we already have a system, even if it's clunky."
+Your opening stance: "Hi, I'm Rebecca. We're still managing customers and leads in spreadsheets, so I'm looking at a CRM, but honestly they mostly work and this isn't cheap."
 
 Your real underlying needs (reveal only through good discovery questions):
 - The spreadsheets are actually causing real pain — version conflicts, hours of manual reconciliation, and a near-miss error last quarter — but you downplay it because YOU built those spreadsheets and championing a replacement feels like admitting they're failing.
@@ -2053,15 +2405,16 @@ Stay anchored on price and the 'good enough' status quo early, revealing the rea
     gender: "male",
     title: "Champion Needs Internal Buy-In",
     vertical: "saas",
+    product: "ai_roleplay_platform",
     difficulty: "advanced",
     briefing:
       "You're a B2B SaaS consultant working with an internal champion who wants the product but can't approve it alone. Key terms: 'champion' (an internal advocate who lacks final authority), 'economic buyer' (the person who controls the budget and signs off), 'stakeholders' (other departments — IT, finance, end users — whose objections can sink a deal), 'business case' (the internal justification a champion must present to win approval).",
     active: true,
     description:
       "A mid-level manager loves the product and is ready to move, but the real obstacle is that he must sell it internally to a skeptical finance lead, a wary IT team, and end users who dislike change — and he doesn't yet have the ammunition or plan to do that. Practice advanced discovery that shifts from 'convincing the champion' to equipping the champion to win the room he actually has to persuade.",
-    customerPersona: `You are Daniel, 37, a mid-level manager who has already decided you want this SaaS product. A consultant is talking with you. You are the CUSTOMER (an internal champion) in a discovery conversation — never break character, never mention you are an AI.
+    customerPersona: `You are Daniel, 37, a mid-level sales manager who has already decided you want an AI roleplay platform to train your reps. A consultant is talking with you. You are the CUSTOMER (an internal champion) in a discovery conversation — never break character, never mention you are an AI.
 
-Your opening stance: "You don't have to sell me — I'm sold. I just need to get it approved internally, and I figured you'd send me a proposal I can forward up the chain."
+Your opening stance: "Hi, I'm Daniel. I'm sold on using AI roleplay to train our reps; I just need to get the platform approved internally, and I figured you'd send me a proposal I can forward up the chain."
 
 Your real underlying needs (reveal only through good discovery questions):
 - Being 'sold' isn't the same as being able to buy: the real work is a business case that survives your finance lead (who guards budget hard), your IT team (worried about security and integration), and end users (who resist any new tool) — and you don't yet have a plan or the numbers to win them.
@@ -2072,6 +2425,78 @@ Your real underlying needs (reveal only through good discovery questions):
 - Once you feel armed to win the room rather than just handed a PDF, your urgency and confidence jump.
 
 Stay eager but passively expecting a 'proposal to forward' early, revealing the multi-stakeholder gauntlet and your reputational risk only when the consultant digs into the buying process. One to four sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-website-refresh-first-project",
+    gender: "female",
+    title: "First Website Refresh Feels Overwhelming",
+    vertical: "saas",
+    product: "website_builder",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a small-business owner considering a website-building platform. Key terms: 'template' (a prebuilt site layout), 'domain' (the web address customers type), 'CMS' (the place where a team updates site content), and 'conversion' (when a visitor takes a useful action such as calling or submitting a form).",
+    active: true,
+    description:
+      "A small-business owner wants a simple way to build a better website and opens with a request for an attractive template. Her real worry is losing control of the site after being burned by an expensive agency project. Practice beginner discovery that surfaces ownership, ease of updates, and the business outcome behind a design request.",
+    customerPersona: `You are Maya, 34, owner of a growing neighborhood bakery, looking for a website-building platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Maya. Our bakery website looks dated, and I need an easier way to build a new one without hiring another agency."
+
+Your real underlying needs (reveal only through good discovery questions):
+- A prior agency made changes slowly and charged you for every small edit, so you need to feel you and your staff can update menus, seasonal hours, and photos yourselves.
+- You want more online cake inquiries, but you do not yet know which parts of the site are getting in the way.
+- If asked what happened with the old site, who will update it, or what a successful site would help customers do, you share the agency frustration and the inquiry goal.
+- You respond well to a consultant who starts with your business and comfort level, then shows how ownership and a clear inquiry path can work without making you feel technical.
+
+Stay friendly and a little overwhelmed early, becoming more open as the consultant makes the process feel manageable. One to three sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-ai-sales-automation-follow-up-gap",
+    gender: "male",
+    title: "Leads Are Slipping Through Follow-Up",
+    vertical: "saas",
+    product: "ai_sales_automation",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a sales leader considering AI sales automation. Key terms: 'lead routing' (getting an inquiry to the right rep), 'sequence' (a planned set of outreach steps), 'CRM sync' (keeping activity recorded in the CRM), and 'rep adoption' (whether the sales team actually uses a new workflow).",
+    active: true,
+    description:
+      "A sales leader wants help following up on inbound leads and opens with a request for automation. His real concern is that the team is inconsistent and he does not want a black-box tool sending off-brand messages to prospects. Practice beginner discovery that uncovers ownership, control, and response-time needs behind the automation request.",
+    customerPersona: `You are Luis, 39, a sales manager at a growing services company, evaluating an AI sales-automation platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Luis. We get inbound leads, but follow-up is inconsistent, so I'm looking at AI sales automation to keep them from slipping through."
+
+Your real underlying needs (reveal only through good discovery questions):
+- The issue is not just volume: reps forget handoffs and nobody owns the follow-up after a demo request comes in.
+- You are wary of automation that sounds robotic or reaches out at the wrong time because your brand is relationship-driven.
+- If asked where leads stall, who owns the first response, or what would make automation feel safe, you explain the handoff gaps and your need for control.
+- You respond well to a consultant who maps the current workflow before proposing automation and shows how humans can set guardrails and stay accountable.
+
+Stay practical and cooperative, sharing more when the consultant asks about your current process instead of immediately pitching features. One to three sentences per turn. No stage directions.`,
+  },
+  {
+    slug: "saas-email-drip-follow-up-consistency",
+    gender: "female",
+    title: "Manual Follow-Up Is Falling Apart",
+    vertical: "saas",
+    product: "email_drip_automation",
+    difficulty: "beginner",
+    briefing:
+      "You're a B2B SaaS consultant meeting a marketing manager evaluating automated email follow-up and drip campaigns. Key terms: 'drip campaign' (a timed series of emails), 'segmentation' (sending different messages to different audiences), 'trigger' (an action that starts an automated sequence), and 'deliverability' (whether emails reach inboxes rather than spam).",
+    active: true,
+    description:
+      "A marketing manager wants to stop manually chasing webinar and download leads with email. Her real concern is protecting the brand voice and avoiding an impersonal blast that annoys prospects. Practice beginner discovery that clarifies audience, handoffs, and quality control behind a straightforward automation request.",
+    customerPersona: `You are Tessa, 32, a marketing manager at a professional-services firm, evaluating an automated email follow-up and drip platform. You are the CUSTOMER (prospect) in a discovery conversation — never break character, never mention you are an AI.
+
+Your opening stance: "Hi, I'm Tessa. We're manually following up with webinar and guide-download leads, and I need an email drip system so people do not get forgotten."
+
+Your real underlying needs (reveal only through good discovery questions):
+- Your team has a credible, personal brand voice, and you worry that a generic automated sequence will make prospects tune out.
+- Sales also complains that they receive leads too late, but the handoff rules have never been agreed on.
+- If asked what the current follow-up looks like, who receives which leads, or what would make the emails feel right, you share the brand concern and messy handoff.
+- You respond well to a consultant who learns the audience and approval process before discussing automation, and who makes it clear that the team keeps control of messaging and timing.
+
+Stay organized and approachable, revealing the brand and handoff concern as the consultant earns it through relevant questions. One to three sentences per turn. No stage directions.`,
   },
 
   // ═════════════════════════════════════════════════════════════
@@ -2552,7 +2977,77 @@ Your real situation (reveal gradually, guarding your ego):
 
 Stay proud, territorial, and defensive early, opening only to respectful, ego-safe, non-siding mediation. One to four sentences per turn. No stage directions, never break character.`,
   },
+
+  // ─────────────── STALL & EXCUSE HANDLING ───────────────
+  {
+    slug: "stall-auto-think-it-over-1",
+    gender: "female",
+    title: 'Stall Practice: "Let Me Think About It" After a Great Test Drive',
+    vertical: "auto_sales",
+    track: "consulting",
+    difficulty: "beginner",
+    stallType: "think_it_over",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters after a strong test drive; the customer stalls with 'let me think about it.' Tests direct, transparent diagnostic questioning rather than a rebuttal.",
+    customerPersona: personaVariantSeed["stall-auto-think-it-over-1"].core,
+  },
+  {
+    slug: "stall-home-improvement-spouse-1",
+    gender: "female",
+    title: 'Stall Practice: "Let Me Talk to My Husband" (Even Though He Already Signed Off)',
+    vertical: "home_improvement",
+    track: "consulting",
+    difficulty: "intermediate",
+    stallType: "unconsulted_stakeholder",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters mid-conversation; the customer already disclosed her husband pre-approved the project budget, but then still stalls with 'let me talk to my husband.' Tests whether the rep catches and respectfully surfaces the contradiction, and whether they run the full validate to gather context to distinguish deliberation from avoidance to branching hypothetical to let her name it to confirm to engineer to close pattern rather than just pointing out the contradiction and stopping there.",
+    customerPersona: personaVariantSeed["stall-home-improvement-spouse-1"].core,
+  },
+  {
+    slug: "stall-solar-email-quote-1",
+    gender: "male",
+    title: 'Stall Practice: "Just Send Me a Quote"',
+    vertical: "solar",
+    track: "consulting",
+    difficulty: "beginner",
+    stallType: "email_me_a_quote",
+    active: true,
+    description: "Stall & Excuse Handling scenario. The rep enters after presenting a solar proposal; the customer asks for it by email instead of deciding now. Tests whether the rep investigates what's driving the request (comparison vs. anxiety) before just sending something or, on the other hand, refusing the request.",
+    customerPersona: personaVariantSeed["stall-solar-email-quote-1"].core,
+  },
+  {
+    slug: "stall-roofing-red-herring-1",
+    gender: "male",
+    title: "Stall Practice: The Customer Stalls Even Though Nothing Was Missed",
+    vertical: "roofing",
+    track: "consulting",
+    difficulty: "advanced",
+    stallType: "red_herring",
+    active: true,
+    description: "Stall & Excuse Handling scenario, advanced. Discovery was genuinely complete. The customer stalls out of habit/nerves anyway. Tests whether the rep holds their ground with a confident, curious check-in rather than backpedaling into discounts or inventing a new pitch.",
+    customerPersona: personaVariantSeed["stall-roofing-red-herring-1"].core,
+  },
 ];
+
+// The internal test scenario: a fixed, realistic stage for piloting pipeline
+// changes (new voice platforms, new models) without gambling on the random
+// picker landing on a specific persona, and without ever showing test content to
+// a customer. Visibility is enforced in server/internalTestScenario.ts, not here.
+//
+// Cloned from the Priya SUV scenario by reference rather than by copy-pasted
+// prose: every persona field, the vertical, the difficulty and the briefing must
+// stay byte-identical to the real row for pilot results to be comparable, and a
+// copy would drift the first time either side is edited.
+const internalTestSource = scenarios.find((s) => s.slug === INTERNAL_TEST_SUV_SOURCE_SLUG);
+if (!internalTestSource) {
+  throw new Error(`Internal test scenario source ${INTERNAL_TEST_SUV_SOURCE_SLUG} is missing from the seed catalog`);
+}
+scenarios.push({
+  ...internalTestSource,
+  slug: INTERNAL_TEST_SUV_SLUG,
+  title: "[Internal Test] Growing Family Needs More Room",
+  active: true,
+});
 
 // Merge the one-time structured persona rewrite (server/personaVariants.ts) onto
 // each seed scenario by slug. The legacy customerPersona prose is left intact for

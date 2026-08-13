@@ -30,7 +30,12 @@ export interface ReplyStreamOptions {
   variantSection: string;
   voice: string;
   instructions?: string;
-  persist: (content: string, status: MsgAudioStatus) => Promise<void>;
+  // `sessionEnded` is true only on the second vulgar/belligerent strike (see
+  // checkVulgarBaitStrike in server/llm.ts). Callers must persist that as a
+  // terminal session status themselves — this streamer only tells them it
+  // happened, the same way it hands back content/status for the transcript
+  // message itself.
+  persist: (content: string, status: MsgAudioStatus, sessionEnded: boolean) => Promise<void>;
 }
 
 // The two external effects of a streamed turn (generate text, synthesize a
@@ -106,8 +111,9 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
   };
 
   let fullText = "";
+  let sessionEnded = false;
   try {
-    fullText = await deps.streamReply(
+    const result = await deps.streamReply(
       personaCoreFor(scenario),
       history,
       scenario.difficulty,
@@ -115,14 +121,16 @@ export async function runReplyStream(res: Response, opts: ReplyStreamOptions): P
       variantSection,
       handleSentence,
     );
+    fullText = result.text;
+    sessionEnded = result.sessionEnded;
     await emitChain;
-    await persist(fullText, anyAudio ? "ready" : "failed");
-    sse("done", { msgId, text: fullText });
+    await persist(fullText, anyAudio ? "ready" : "failed", sessionEnded);
+    sse("done", { msgId, text: fullText, sessionEnded });
   } catch (err) {
     console.error("Turn stream failed:", err);
     await emitChain.catch(() => {});
     // Persist whatever text was generated so the transcript is never left blank.
-    await persist(fullText, "failed").catch(() => {});
+    await persist(fullText, "failed", false).catch(() => {});
     sse("error", { message: "reply_failed" });
   } finally {
     if (!res.writableEnded) res.end();

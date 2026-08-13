@@ -5,6 +5,7 @@ import {
   ACCEPTED_SOLUTION_RULES,
   GRACEFUL_RELEASE_RULES,
   SPEAKER_ATTRIBUTION_RULES,
+  STALL_DIAGNOSIS_RULES,
   TIMING_FEEDBACK_RULES,
   TRANSCRIPT_FIDELITY_RULES,
   renderTranscriptForScoring,
@@ -65,6 +66,10 @@ ${TIMING_FEEDBACK_RULES}
 ${ACCEPTED_SOLUTION_RULES}
 
 ${GRACEFUL_RELEASE_RULES}
+
+${STALL_DIAGNOSIS_RULES}
+
+STALL AND OBJECTION DEBRIEFS: When a trainee asks about a stall, excuse, objection, price comparison, or unconsulted stakeholder, coach the diagnostic process from the shared rule above. Ground the advice in the actual transcript and the exact SOLVE moment where it appeared, whether that was during discovery or near an ending. Help the trainee make the customer a better decision-maker, not simply push for agreement.
 
 Using the transcript (important, be judgment-based):
 - You have the trainee's actual scenario transcript available below. Use it CONDITIONALLY. When the trainee's question is about what they actually said or how they could have phrased something ("what did I say", "how could I have asked that", "give me a better way to word X", before/after rewrites), quote or closely paraphrase the specific lines from their transcript and offer a concrete rewrite.

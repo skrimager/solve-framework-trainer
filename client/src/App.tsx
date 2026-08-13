@@ -8,6 +8,9 @@ import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import Login from "@/pages/login";
 import ManagerLogin from "@/pages/manager-login";
+import ManagerForgotPassword from "@/pages/manager-forgot-password";
+import ManagerResetPassword from "@/pages/manager-reset-password";
+import ManagerForgotUsername from "@/pages/manager-forgot-username";
 import Register from "@/pages/register";
 import Signup from "@/pages/signup";
 import Scenarios from "@/pages/scenarios";
@@ -19,6 +22,7 @@ import Certification from "@/pages/certification";
 import AdminLogin from "@/pages/admin-login";
 import AdminDashboard from "@/pages/admin-dashboard";
 import DemoV2 from "@/pages/demo-v2";
+import MessageCoach from "@/pages/message-coach";
 import DemoDashboard from "@/pages/dashboard-demo";
 import OfficeSetup, { OfficeSetupComplete } from "@/pages/office-setup";
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -53,6 +57,13 @@ function AppRouter() {
           when signed in. Rendered by a different component from the consultant
           login so browser password managers treat the two as separate contexts. */}
       <Route path="/command-center" component={CommandCenter} />
+      {/* Manager self-service account recovery: request pages nested under
+          /command-center/..., plus the top-level /reset-password landing page
+          that the emailed link points at (see notifications.ts). Public, no
+          auth — a locked-out manager has no session to gate behind. */}
+      <Route path="/command-center/forgot-password" component={ManagerForgotPassword} />
+      <Route path="/command-center/forgot-username" component={ManagerForgotUsername} />
+      <Route path="/reset-password" component={ManagerResetPassword} />
       <Route path="/register" component={Register} />
       {/* Self-serve manager signup: email capture, verify, office setup, then
           Stripe checkout. Payment is the sole activation trigger. Public, no auth. */}
@@ -65,6 +76,10 @@ function AppRouter() {
           stays /demo; the earlier single-scenario page it replaced has been
           removed. There is deliberately no parallel /demo-v2 route. */}
       <Route path="/demo" component={DemoV2} />
+      {/* Public Message Coach: no auth. Every server route behind it 404s while
+          MESSAGE_COACH_ENABLED is not "true", so the page renders its own "not
+          available" state rather than a broken form when the flag is off. */}
+      <Route path="/message-coach" component={MessageCoach} />
       {/* Public, read-only demo of the manager dashboard: no auth, seeded
           sample data only. Served by the no-auth GET /api/public/demo-dashboard
           endpoint; intentionally outside RequireAuth and with no path into the

@@ -243,6 +243,13 @@
     pointer-events: none;
   }
 
+  /* The prior manager Command Center login's browser-autofill fix
+   * (.manager-login-input) lived here. That page has since been rebuilt from
+   * an exact reference spec with its own CSS module
+   * (manager-login.module.css), which includes an equivalent autofill rule
+   * scoped to its own input class, so the global rule that used to live here
+   * has been removed to avoid dead/duplicated CSS. */
+
   /* .no-default-hover-elevate/no-default-active-elevate is an escape hatch so consumers of
    * buttons/badges can remove the automatic brightness adjustment on interactions
    * and program their own. */

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Contact, InsertContactEvent } from "@shared/schema";
+import type { Contact, InsertContactEvent, InsertContact } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
 // CRM domain constants + validation. Shared by the admin API routes and the
@@ -8,7 +8,10 @@ import type { Contact, InsertContactEvent } from "@shared/schema";
 // ---------------------------------------------------------------------------
 
 export const CONTACT_TYPES = ["speaking", "consulting", "book", "training", "role_play", "general"] as const;
-export const CONTACT_SOURCES = ["website", "book", "speaking", "referral", "role_play", "manual"] as const;
+// "voice_demo" = auto-created the moment a demo visitor verifies their email
+// code (POST /api/demo/verify), kept distinct from "role_play" (the optional
+// post-demo CTA form) so the two lead sources stay separately filterable.
+export const CONTACT_SOURCES = ["website", "book", "speaking", "referral", "role_play", "manual", "voice_demo"] as const;
 export const CONTACT_PRIORITIES = ["high", "medium", "low"] as const;
 export const CONTACT_STATUSES = ["new", "contacted", "converted"] as const;
 
@@ -17,6 +20,12 @@ export const DEFAULT_TYPE = "general";
 export const DEFAULT_SOURCE = "website";
 export const DEFAULT_PRIORITY = "medium";
 export const DEFAULT_STATUS = "new";
+
+// Source tag for Contacts auto-created from a verified voice-demo signup (see
+// enrollDemoVoiceContact below), and the type they're filed under (an existing
+// enum value — demo/practice sessions fit "role_play" best).
+export const VOICE_DEMO_SOURCE = "voice_demo";
+export const VOICE_DEMO_TYPE = "role_play";
 
 export type ContactType = (typeof CONTACT_TYPES)[number];
 export type ContactSource = (typeof CONTACT_SOURCES)[number];
@@ -188,4 +197,79 @@ export function sortByFollowUp(contacts: Contact[], direction: "asc" | "desc" = 
     if (!bv) return -1;
     return av < bv ? -1 * sign : av > bv ? 1 * sign : 0;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Voice-demo Contact auto-creation. A demo visitor only ever gives an email
+// (no name), so we derive a simple display name from the local-part. Kept
+// intentionally simple: split on common separators, capitalize each word.
+// Not meant to be a real name parser — just friendlier than a bare email in
+// the admin Contacts list.
+// ---------------------------------------------------------------------------
+export function humanizeEmailLocalPart(email: string): string {
+  const local = email.split("@")[0] ?? email;
+  const words = local
+    .split(/[.\-_+]+/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+  if (words.length === 0) return email;
+  return words
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+// Field mapping for a Contact created from a verified voice-demo signup.
+// Shared by the live /api/demo/verify handler (Part 1) and the one-off
+// backfill script (Part 2) so the two never drift apart. `createdAt` is
+// supplied by the caller: "now" for a live verification, or the original
+// demo_signups.created_at value when backfilling a past signup.
+export function buildVoiceDemoContact(email: string, createdAt: string): InsertContact {
+  return {
+    name: humanizeEmailLocalPart(email),
+    email,
+    company: null,
+    message: "Signed up for the SOLVE voice demo.",
+    referredBy: null,
+    source: VOICE_DEMO_SOURCE,
+    type: VOICE_DEMO_TYPE,
+    priority: DEFAULT_PRIORITY,
+    status: DEFAULT_STATUS,
+    createdAt,
+    archivedAt: null,
+  };
+}
+
+// True if any contact in the list is already a "voice_demo"-sourced row for
+// this email (case-insensitive). Deliberately narrow: a visitor filling the
+// separate CTA form (source "role_play") should NOT block this check — both
+// are legitimate, distinct interactions worth tracking separately.
+export function hasVoiceDemoContact(contacts: Pick<Contact, "email" | "source">[], email: string): boolean {
+  const target = email.trim().toLowerCase();
+  return contacts.some((c) => c.source === VOICE_DEMO_SOURCE && c.email.trim().toLowerCase() === target);
+}
+
+export interface DemoVoiceContactDeps {
+  storage: {
+    listContacts(filters?: ContactFilters, sort?: "followUp"): Promise<Contact[]>;
+    createLead(lead: InsertContact): Promise<Contact>;
+  };
+  now?: () => Date;
+}
+
+// Auto-create a Contact for a demo signup on its FIRST verification. Additive
+// and best-effort: mirrors the reliability posture of enrollDemoDrip — never
+// throws, so it can be fired-and-forgotten (`void enrollDemoVoiceContact(...)`)
+// from the verify handler without ever blocking or changing its response.
+// Idempotency: checks for an existing "voice_demo"-sourced contact for this
+// email first (across archived + active, so an archived duplicate can never
+// slip through) and skips creation if one already exists.
+export async function enrollDemoVoiceContact(deps: DemoVoiceContactDeps, signup: { email: string }): Promise<void> {
+  try {
+    const existing = await deps.storage.listContacts({ archived: "all" });
+    if (hasVoiceDemoContact(existing, signup.email)) return;
+    const now = deps.now ? deps.now() : new Date();
+    await deps.storage.createLead(buildVoiceDemoContact(signup.email, now.toISOString()));
+  } catch (err) {
+    console.warn(`[contacts] Failed to auto-create voice-demo contact for ${signup.email}:`, err);
+  }
 }

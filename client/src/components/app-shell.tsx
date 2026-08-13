@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { useLocation, Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
-import { LogOut, ArrowLeft, ClipboardCheck, Award } from "lucide-react";
+import { LogOut, ArrowLeft, ClipboardCheck, Award, MessageSquareText } from "lucide-react";
 
 export function AppShell({
   title,
@@ -60,6 +60,21 @@ export function AppShell({
             >
               <ClipboardCheck className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Real Conversations</span>
+            </Button>
+            {/* Message Coach is a public, no-auth page (/message-coach) but is
+                also useful mid-session for a consultant drafting a follow-up
+                message, so it's surfaced here in the persistent nav rather
+                than only on the pre-login chooser page. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/message-coach")}
+              className="gap-1.5"
+              style={{ borderColor: "#0A1A30", color: "#0A1A30" }}
+              data-testid="link-nav-message-coach"
+            >
+              <MessageSquareText className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Message Coach</span>
             </Button>
             <a
               href="https://solveframework.com"

@@ -1,199 +1,301 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth";
-import { apiRequest } from "@/lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
-import { wrongCredentialTypeRedirect } from "@/lib/routes";
+import { wrongCredentialTypeRedirect, ROUTES } from "@/lib/routes";
+import styles from "./manager-login.module.css";
 
-// Manager command-center login. Same backend flow as the consultant login
-// (single POST /api/login; role is backend-derived), but deliberately styled to
-// look nothing like the dark orange consultant screen: a bright, light "control
-// room" with blue and orange accents. Signing in swaps this route to the manager
-// dashboard (see CommandCenter in App.tsx), so this component never navigates on
-// its own success.
-const BLUE = "#2563EB";
-const ORANGE = "#E06D00";
+// Manager command-center login. Cinematic command-room overhaul v2.
+//
+// The background is a generated photographic image of an empty command
+// room (ceiling ring, world map wall, analytics monitor wall, console
+// desks and chairs) set as the page background in manager-login.module.css.
+// The header text, logo mark, and login card below render as live DOM
+// elements on top of that image for accessibility, real functionality, and
+// responsiveness - none of the visible text or the login form is baked
+// into the image itself.
+//
+// Real functionality is unchanged from the previous version: same backend
+// flow as the consultant login (single POST /api/login; role is
+// backend-derived). Signing in swaps this route to the manager dashboard
+// (see CommandCenter in App.tsx), so this component never navigates on its
+// own success - it just updates auth state and CommandCenter re-renders into
+// the dashboard.
+
+// Logo mark: an orange/blue gradient bordered rounded square with an orange
+// dot in the middle and a speech-bubble tail. The outline (rounded square
+// plus tail) is one continuous filled shape - an outer boundary (square
+// corners plus a tail) and an inner boundary (the same square corners,
+// inset by the border thickness, no tail) combined with fill-rule evenodd
+// so the ring between them is the gradient border. A plain rounded rect
+// fill sits on top for the dark interior. The tail itself is a crisp
+// triangular pennant made of straight line segments (matching the
+// reference art direction, which is geometric and angular rather than a
+// soft rounded teardrop), and it is part of the same outer-boundary path
+// as the rounded corners rather than a separate pseudo-element, so the
+// join has no kink or seam and is filled with the same single gradient
+// in the same pass as the rest of the border.
+function LogoMark() {
+  return (
+    <div className={styles.logoIcon} aria-hidden="true">
+      <svg className={styles.logoOutline} viewBox="0 0 140 150">
+        <defs>
+          <linearGradient id="logoGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#ff5d00" />
+            <stop offset="38%" stopColor="#ffac22" />
+            <stop offset="100%" stopColor="#1fa9ff" />
+          </linearGradient>
+        </defs>
+        <path
+          fillRule="evenodd"
+          fill="url(#logoGradient)"
+          d="M 11,33
+             A 24,24 0 0 1 35,9
+             L 105,9
+             A 24,24 0 0 1 129,33
+             L 129,75
+             A 24,24 0 0 1 105,99
+             L 49,99
+             L 19,126
+             L 32,99.4
+             A 24,24 0 0 1 11,75
+             Z
+             M 21,33
+             A 14,14 0 0 1 35,19
+             L 105,19
+             A 14,14 0 0 1 119,33
+             L 119,75
+             A 14,14 0 0 1 105,89
+             L 33,89
+             A 14,14 0 0 1 21,75
+             Z"
+        />
+        <rect x={21} y={19} width={98} height={70} rx={14} fill="#071223" />
+      </svg>
+      <span className={styles.logoDot} />
+    </div>
+  );
+}
 
 export default function ManagerLogin() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
   const [wrongType, setWrongType] = useState<{ redirectTo: string; message: string } | null>(null);
   const { setUser } = useAuth();
   const [, navigate] = useLocation();
-  const { toast } = useToast();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setIsSubmitting(true);
+    setStatusMessage("");
     setWrongType(null);
     try {
-      const res = await apiRequest("POST", "/api/login", { username, password });
-      const loggedInUser = await res.json();
-      // Credentials are valid; if they belong to a consultant account, don't sign
-      // them in here. Point them at Practice to sign in there (no cross-form
-      // auto-submit of credentials).
-      const mismatch = wrongCredentialTypeRedirect("manager", loggedInUser.role);
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatusMessage(result.message || "Incorrect username or password.");
+        return;
+      }
+      // Credentials are valid; if they belong to a consultant account, don't
+      // sign them in here. Point them at Practice to sign in there (no
+      // cross-form auto-submit of credentials).
+      const mismatch = wrongCredentialTypeRedirect("manager", result.role);
       if (mismatch) {
         setWrongType(mismatch);
         return;
       }
-      setUser(loggedInUser);
-    } catch (err: any) {
-      toast({
-        title: "Access denied",
-        description: "Check your username and password and try again.",
-        variant: "destructive",
-      });
+      setUser(result);
+    } catch (err) {
+      setStatusMessage("Incorrect username or password.");
     } finally {
       setIsSubmitting(false);
     }
   }
 
   return (
-    <div
-      className="relative min-h-dvh flex items-center justify-center px-4 py-10 overflow-hidden"
-      style={{ backgroundColor: "#F5F8FF" }}
-    >
-      {/* Light command-center grid overlay in blue */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(37,99,235,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(37,99,235,0.06) 1px, transparent 1px)",
-          backgroundSize: "44px 44px",
-          maskImage: "radial-gradient(ellipse at center, black 40%, transparent 85%)",
-          WebkitMaskImage: "radial-gradient(ellipse at center, black 40%, transparent 85%)",
-        }}
-      />
-      <div className="relative w-full max-w-md space-y-6">
-        <div className="text-center space-y-3">
-          <img
-            src="/solve-logo-square.png"
-            alt="SOLVE Framework"
-            className="mx-auto h-[72px] w-auto max-w-full rounded-xl"
-            data-testid="img-solve-logo"
-          />
-          <div className="flex items-center justify-center gap-2">
-            <span
-              className="w-2 h-2 rounded-full animate-pulse"
-              style={{ backgroundColor: ORANGE, boxShadow: "0 0 8px rgba(224,109,0,0.6)" }}
-              aria-hidden="true"
-            />
-            <span
-              className="font-mono text-[11px] uppercase tracking-[0.25em]"
-              style={{ color: BLUE }}
-              data-testid="text-command-status"
-            >
-              Office Command · Live
-            </span>
+    <main className={styles.page}>
+      <div className={styles.pageContent}>
+        <header className={styles.brand}>
+          <div className={styles.brandLockup}>
+            <LogoMark />
+            <div className={styles.brandName}>
+              <div className={styles.solve}>
+                SOLVE<span className={styles.period}>.</span>
+              </div>
+              <span className={styles.framework}>FRAMEWORK</span>
+            </div>
           </div>
-          <h1
-            className="text-2xl font-bold tracking-tight"
-            style={{ color: "#0A1A30" }}
-            data-testid="text-manager-title"
-          >
-            Command Center · Manager Login
+          <h1 className={styles.headline} data-testid="text-manager-title">
+            COMMAND CENTER
           </h1>
-          <p className="text-sm text-muted-foreground" data-testid="text-manager-hero">
-            See who's practicing, who's improving, who's ready.
+          <div className={styles.loginHeading} data-testid="text-manager-subtitle">
+            MANAGER LOGIN
+          </div>
+          <p className={styles.tagline} data-testid="text-manager-tagline">
+            Practice. Performance. Period.
           </p>
-        </div>
-        <Card
-          className="border-2 bg-white"
-          style={{
-            borderColor: BLUE,
-            boxShadow: "0 8px 40px rgba(37,99,235,0.12)",
-          }}
-        >
-          <CardHeader>
-            <CardTitle className="font-mono text-sm uppercase tracking-[0.2em]" style={{ color: "#0A1A30" }}>
-              Manager Access
-            </CardTitle>
-            <CardDescription>Sign in to your office command center.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-2">
-                <Label
-                  htmlFor="manager-username"
-                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
-                >
-                  Username
-                </Label>
-                <Input
+        </header>
+
+        <section className={styles.loginCard} aria-labelledby="manager-access-heading">
+          <div className={styles.cardCorners} />
+          <div className={styles.cardTitleRow}>
+            <span className={styles.lockSymbol} aria-hidden="true" />
+            <div>
+              <h2 id="manager-access-heading">MANAGER ACCESS</h2>
+              <p>Sign in to your Command Center</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSubmit} noValidate>
+            <div className={styles.formGroup}>
+              <label htmlFor="manager-username">User Name</label>
+              <div className={styles.inputWrapper}>
+                <span className={styles.fieldIcon} aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <circle cx="12" cy="7" r="4"></circle>
+                    <path d="M4 21v-2.5A6.5 6.5 0 0 1 10.5 12h3A6.5 6.5 0 0 1 20 18.5V21"></path>
+                  </svg>
+                </span>
+                <input
                   id="manager-username"
+                  name="username"
+                  type="text"
+                  placeholder="Username"
+                  autoComplete="username"
+                  required
                   data-testid="input-manager-username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  autoComplete="username"
-                  required
                 />
               </div>
-              <div className="space-y-2">
-                <Label
-                  htmlFor="manager-password"
-                  className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
-                >
-                  Password
-                </Label>
-                <Input
+            </div>
+
+            <div className={styles.formGroup}>
+              <label htmlFor="manager-password">Password</label>
+              <div className={styles.inputWrapper}>
+                <span className={styles.fieldIcon} aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <rect x="5" y="10" width="14" height="11" rx="2"></rect>
+                    <path d="M8 10V7a4 4 0 0 1 8 0v3"></path>
+                    <path d="M12 14v3"></path>
+                  </svg>
+                </span>
+                <input
                   id="manager-password"
-                  type="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Password"
+                  autoComplete="current-password"
+                  required
                   data-testid="input-manager-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  autoComplete="current-password"
-                  required
                 />
+                <button
+                  className={styles.passwordToggle}
+                  type="button"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  data-testid="button-toggle-password-visibility"
+                  onClick={() => setShowPassword((v) => !v)}
+                >
+                  {showPassword ? (
+                    <svg viewBox="0 0 24 24">
+                      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                      <circle cx="12" cy="12" r="2.5"></circle>
+                      <path d="M4 4l16 16"></path>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24">
+                      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                      <circle cx="12" cy="12" r="2.5"></circle>
+                    </svg>
+                  )}
+                </button>
               </div>
-              <Button
-                type="submit"
-                className="w-full font-mono uppercase tracking-[0.18em]"
-                style={{ backgroundColor: BLUE, color: "white" }}
-                disabled={isSubmitting}
-                data-testid="button-manager-login"
+            </div>
+
+            <button
+              className={styles.submitButton}
+              type="submit"
+              disabled={isSubmitting}
+              data-testid="button-manager-login"
+            >
+              {isSubmitting ? "Authorizing..." : "Enter Command Center"}
+            </button>
+
+            <div className={styles.formLinks}>
+              <button
+                type="button"
+                onClick={() => navigate(ROUTES.managerForgotPassword)}
+                data-testid="link-forgot-password"
               >
-                {isSubmitting ? "Authorizing..." : "Enter command center"}
-              </Button>
-            </form>
+                Forgot password?
+              </button>
+              <span className={styles.formDivider} aria-hidden="true" />
+              <button
+                type="button"
+                onClick={() => navigate(ROUTES.managerForgotUsername)}
+                data-testid="link-forgot-username"
+              >
+                Forgot username?
+              </button>
+            </div>
+
+            <p
+              className={`${styles.statusMessage} ${statusMessage ? styles.statusMessageVisible : ""}`}
+              role="status"
+              aria-live="polite"
+              data-testid="text-status-message"
+            >
+              {statusMessage}
+            </p>
+
             {wrongType && (
-              <div
-                className="mt-4 rounded-md border p-3 text-sm"
-                style={{ borderColor: ORANGE, backgroundColor: "rgba(224,109,0,0.08)" }}
+              <p
+                className={`${styles.statusMessage} ${styles.statusMessageVisible} ${styles.wrongTypeMessage}`}
+                role="status"
+                aria-live="polite"
                 data-testid="text-wrong-credential-type"
               >
-                <p className="text-foreground">{wrongType.message}</p>
+                <span>{wrongType.message}</span>
                 <button
                   type="button"
+                  className={styles.wrongTypeLink}
                   onClick={() => navigate(wrongType.redirectTo)}
-                  className="mt-2 font-medium hover:underline"
-                  style={{ color: ORANGE }}
                   data-testid="button-go-practice"
                 >
                   Go to Practice
                 </button>
-              </div>
+              </p>
             )}
-          </CardContent>
-        </Card>
-        <p className="text-center text-xs text-muted-foreground">
-          <button
-            type="button"
-            onClick={() => navigate("/practice")}
-            className="font-medium hover:underline"
-            style={{ color: ORANGE }}
-            data-testid="link-consultant-login"
-          >
-            Looking for the consultant practice login? →
+          </form>
+        </section>
+
+        <p className={styles.consultantLink}>
+          <button type="button" onClick={() => navigate("/practice")} data-testid="link-consultant-login">
+            Looking for the consultant practice login?
           </button>
         </p>
+
+        <nav className={styles.bottomNavigation} aria-label="SOLVE process">
+          <ul>
+            <li>Train</li>
+            <li className={styles.separator} aria-hidden="true" />
+            <li>Practice</li>
+            <li className={styles.separator} aria-hidden="true" />
+            <li>Improve</li>
+            <li className={styles.separator} aria-hidden="true" />
+            <li>Achieve</li>
+          </ul>
+        </nav>
       </div>
-    </div>
+    </main>
   );
 }
