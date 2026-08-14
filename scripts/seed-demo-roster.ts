@@ -347,8 +347,8 @@ export function buildTranscript(session: Pick<Session, "score" | "completedAt">,
 
   if (score < 65) {
     return JSON.stringify(turnsWithTimestamps([
-      ["customer", `I'm ${name}. ${opening} That is why I wanted to talk about ${title}.`],
-      ["consultant", `We have a proven approach for ${title}. I can walk you through the standard options and get this moving today.`],
+      ["customer", `I'm ${name}. ${opening}`],
+      ["consultant", `We have a proven approach for this. I can walk you through the standard options and get this moving today.`],
       ["customer", `I was hoping you would ask a little more first. ${need}`],
       ["consultant", "I hear you, but the next step is choosing a direction. Most people in this situation start there."],
       ["customer", "That does not really address what I said. I need to think about whether this conversation is useful."],
