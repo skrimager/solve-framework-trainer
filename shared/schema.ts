@@ -235,6 +235,25 @@ export const insertCoachingMessageSchema = createInsertSchema(coachingMessages).
 export type InsertCoachingMessage = z.infer<typeof insertCoachingMessageSchema>;
 export type CoachingMessage = typeof coachingMessages.$inferSelect;
 
+// A manager or QA member can acknowledge a currently-derived Command Center
+// alert. Acknowledgements are scoped to the office, consultant, and alert
+// reason so an acknowledgement never leaks across tenants or alert types.
+export const alertAcknowledgements = pgTable("alert_acknowledgements", {
+  id: serial("id").primaryKey(),
+  officeId: integer("office_id").notNull().references(() => offices.id, { onDelete: "cascade" }),
+  consultantId: integer("consultant_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  reason: text("reason").notNull(), // 'inactive' | 'lowScore'
+  acknowledgedBy: integer("acknowledged_by").notNull().references(() => users.id, { onDelete: "cascade" }),
+  acknowledgedAt: text("acknowledged_at").notNull(),
+});
+
+export const insertAlertAcknowledgementSchema = createInsertSchema(alertAcknowledgements).omit({
+  id: true,
+});
+
+export type InsertAlertAcknowledgement = z.infer<typeof insertAlertAcknowledgementSchema>;
+export type AlertAcknowledgement = typeof alertAcknowledgements.$inferSelect;
+
 // A single certification-exam attempt for one track. The two-part exam (written
 // test + final expert scenario) is tracked here start-to-finish. `overallPassed`
 // is only true once BOTH parts pass; that is the event that flips the user's

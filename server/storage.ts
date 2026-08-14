@@ -1,8 +1,8 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, coinAwards, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, CoinAward, InsertCoinAward, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, alertAcknowledgements, industryCertifications, academyCredits, coinAwards, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, AlertAcknowledgement, InsertAlertAcknowledgement, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, CoinAward, InsertCoinAward, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, inArray, and, or, desc, lte, isNull } from "drizzle-orm";
+import { eq, inArray, and, or, desc, lte, isNull, sql } from "drizzle-orm";
 import { filterContacts, sortByFollowUp, runContactCascade, type ContactFilters } from "./contacts";
 import { runUserCascade, checkUserDeletable, userIsPaying, UserDeleteBlockedError, type UserCascade } from "./users";
 import { runOfficeCascade, officeIsPayingCustomer, OfficeDeleteBlockedError } from "./offices";
@@ -285,6 +285,12 @@ export interface IStorage {
   listCoachingMessagesBySession(sessionId: number): Promise<CoachingMessage[]>;
   // Soft-clear every still-active thread a trainee owns (called when they start a new attempt).
   clearCoachingMessagesForUser(userId: number): Promise<void>;
+
+  // Command Center alert acknowledgement lifecycle. "Active" means the
+  // acknowledgement has not been superseded by the consultant completing a
+  // newer relevant session.
+  createAlertAcknowledgement(acknowledgement: InsertAlertAcknowledgement): Promise<AlertAcknowledgement>;
+  listActiveAlertAcknowledgements(officeId: number): Promise<AlertAcknowledgement[]>;
 
   // --- Real Conversation Scoring (Phase 1): rep-submitted real discovery conversations. ---
   createRealConversation(rc: InsertRealConversation): Promise<RealConversation>;
@@ -1147,6 +1153,35 @@ export class DatabaseStorage implements IStorage {
       .update(coachingMessages)
       .set({ cleared: true })
       .where(and(eq(coachingMessages.userId, userId), eq(coachingMessages.cleared, false)));
+  }
+
+  // --- Command Center alert acknowledgements ---
+  async createAlertAcknowledgement(acknowledgement: InsertAlertAcknowledgement): Promise<AlertAcknowledgement> {
+    const rows = await db.insert(alertAcknowledgements).values(acknowledgement).returning();
+    return rows[0];
+  }
+
+  async listActiveAlertAcknowledgements(officeId: number): Promise<AlertAcknowledgement[]> {
+    // An inactive alert is renewed by any newer completed session. A low-score
+    // alert is renewed only by a newer scored completed session. Timestamps are
+    // stored as ISO text across the application, so the comparison is ordered.
+    return db
+      .select()
+      .from(alertAcknowledgements)
+      .where(sql`
+        ${alertAcknowledgements.officeId} = ${officeId}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${sessions}
+          WHERE ${sessions.userId} = ${alertAcknowledgements.consultantId}
+            AND ${sessions.status} = 'completed'
+            AND ${sessions.completedAt} > ${alertAcknowledgements.acknowledgedAt}
+            AND (
+              ${alertAcknowledgements.reason} = 'inactive'
+              OR (${alertAcknowledgements.reason} = 'lowScore' AND ${sessions.score} IS NOT NULL)
+            )
+        )
+      `);
   }
 
   // --- Real Conversation Scoring (Phase 1) ---

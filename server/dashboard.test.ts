@@ -16,6 +16,7 @@ import {
   computeScoreDistribution,
   computeConversationOutcomes,
   computeAlerts,
+  filterAcknowledgedAlerts,
   buildLiveFeed,
   computePopularScenarios,
   computeAchievements,
@@ -684,6 +685,67 @@ describe("computeAlerts", () => {
     const alerts = computeAlerts(consultants, sessionsByUser, now);
     assert.deepEqual(alerts, []);
   });
+
+  test("suppresses an acknowledged alert until a newer relevant completed session supersedes it", () => {
+    const alerts = [{ id: 3, displayName: "Alice A", reasons: ["inactive", "lowScore"] as const }];
+    const acknowledgement = {
+      id: 1,
+      officeId: OFFICE_ID,
+      consultantId: 3,
+      reason: "lowScore",
+      acknowledgedBy: 1,
+      acknowledgedAt: "2026-03-10T00:00:00.000Z",
+    } as any;
+    const beforeNewScore = new Map<number, Session[]>([[
+      3,
+      [mkSession({ id: 1, userId: 3, scenarioId: 10, score: 40, completedAt: "2026-03-09T00:00:00.000Z" })],
+    ]]);
+    assert.deepEqual(filterAcknowledgedAlerts(alerts, beforeNewScore, [acknowledgement]), [
+      { id: 3, displayName: "Alice A", reasons: ["inactive"] },
+    ]);
+
+    const afterNewScore = new Map<number, Session[]>([[
+      3,
+      [mkSession({ id: 2, userId: 3, scenarioId: 10, score: 40, completedAt: "2026-03-11T00:00:00.000Z" })],
+    ]]);
+    assert.deepEqual(filterAcknowledgedAlerts(alerts, afterNewScore, [acknowledgement]), alerts);
+  });
+
+  test("keeps a low-score acknowledgement active after a newer unscored completed session", () => {
+    const alerts = [{ id: 3, displayName: "Alice A", reasons: ["lowScore"] as const }];
+    const acknowledgement = {
+      id: 1,
+      officeId: OFFICE_ID,
+      consultantId: 3,
+      reason: "lowScore",
+      acknowledgedBy: 1,
+      acknowledgedAt: "2026-03-10T00:00:00.000Z",
+    } as any;
+    const sessionsByUser = new Map<number, Session[]>([[
+      3,
+      [mkSession({ id: 2, userId: 3, scenarioId: 10, score: null, completedAt: "2026-03-11T00:00:00.000Z" })],
+    ]]);
+
+    assert.deepEqual(filterAcknowledgedAlerts(alerts, sessionsByUser, [acknowledgement]), []);
+  });
+
+  test("supersedes an inactive acknowledgement after any newer completed session", () => {
+    const alerts = [{ id: 3, displayName: "Alice A", reasons: ["inactive"] as const }];
+    const acknowledgement = {
+      id: 1,
+      officeId: OFFICE_ID,
+      consultantId: 3,
+      reason: "inactive",
+      acknowledgedBy: 1,
+      acknowledgedAt: "2026-03-10T00:00:00.000Z",
+    } as any;
+    const sessionsByUser = new Map<number, Session[]>([[
+      3,
+      [mkSession({ id: 2, userId: 3, scenarioId: 10, score: null, completedAt: "2026-03-11T00:00:00.000Z" })],
+    ]]);
+
+    assert.deepEqual(filterAcknowledgedAlerts(alerts, sessionsByUser, [acknowledgement]), alerts);
+  });
 });
 
 describe("buildLiveFeed", () => {
@@ -913,6 +975,8 @@ describe("command center + widget-config HTTP endpoints", () => {
     };
     (storage as any).getSession = async (id: number) => sessions.find((s) => s.id === id);
     (storage as any).getScenario = async (id: number) => scenarios.find((s) => s.id === id);
+    (storage as any).listActiveAlertAcknowledgements = async () => [];
+    (storage as any).listCoachingMessagesBySession = async () => [];
   });
 
   function dashboardFetch(url: string, init?: RequestInit, userId = 1) {
@@ -936,6 +1000,74 @@ describe("command center + widget-config HTTP endpoints", () => {
     const body = await res.json();
     assert.ok(body.teamHealth);
     assert.deepEqual(body.widgetConfig, defaultDashboardWidgetConfig());
+  });
+
+  test("GET dashboard-command-center hides an active acknowledged alert", async () => {
+    (storage as any).listActiveAlertAcknowledgements = async () => [{
+      id: 1,
+      officeId: OFFICE_ID,
+      consultantId: 3,
+      reason: "lowScore",
+      acknowledgedBy: 1,
+      acknowledgedAt: "2026-03-03T00:00:00.000Z",
+    }];
+    sessions = [
+      mkSession({ id: 100, userId: 3, scenarioId: 10, score: 40, completedAt: "2026-03-02T00:00:00.000Z" }),
+    ];
+
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-command-center`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const alice = body.alerts.find((alert: any) => alert.id === 3);
+    assert.deepEqual(alice?.reasons, ["inactive"]);
+  });
+
+  test("POST alerts/acknowledge writes a manager-scoped acknowledgement", async () => {
+    let created: any;
+    (storage as any).createAlertAcknowledgement = async (acknowledgement: any) => {
+      created = { id: 11, ...acknowledgement };
+      return created;
+    };
+
+    const res = await dashboardFetch(`${baseUrl}/api/manager/alerts/acknowledge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ consultantId: 3, reason: "inactive" }),
+    });
+    assert.equal(res.status, 201);
+    assert.equal(created.officeId, OFFICE_ID);
+    assert.equal(created.consultantId, 3);
+    assert.equal(created.acknowledgedBy, 1);
+    assert.equal(created.reason, "inactive");
+  });
+
+  test("GET conversations returns the completed-session list for the selected range", async () => {
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center/conversations?since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.sessions.length, 1);
+    assert.deepEqual(body.sessions[0], {
+      consultantName: "Alice A",
+      scenarioTitle: "Kicking Tires",
+      score: 90,
+      completedAt: "2026-03-01T00:00:00.000Z",
+      sessionId: 100,
+    });
+  });
+
+  test("GET certifications returns earned tracks for the selected range", async () => {
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center/certifications?since=2026-02-01T00:00:00.000Z&until=2026-02-03T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.certifications, [{
+      consultantName: "Bob B",
+      track: "consulting",
+      certifiedAt: "2026-02-02T00:00:00.000Z",
+    }]);
   });
 
   test("an explicit since/until makes the performance-over-time series span the full selected range, not just 7 days", async () => {
@@ -1033,6 +1165,27 @@ describe("command center + widget-config HTTP endpoints", () => {
     assert.ok(body.rubricScores);
     assert.equal(body.rubricScores.trustBuilding, 90);
     assert.equal(body.completedAt, "2026-03-01T00:00:00.000Z");
+  });
+
+  test("GET manager/session/:id includes parsed transcript and active coaching messages", async () => {
+    const session = sessions.find((item) => item.id === 100)!;
+    session.transcript = JSON.stringify([
+      { role: "customer", content: "I need help with a vehicle.", timestamp: "2026-03-01T00:00:00.000Z" },
+      { role: "consultant", content: "What matters most to you?", timestamp: "2026-03-01T00:00:30.000Z" },
+    ]);
+    (storage as any).listCoachingMessagesBySession = async (sessionId: number) => [
+      { id: 50, sessionId, userId: 3, role: "coach", content: "Ask one more discovery question.", cleared: false, createdAt: "2026-03-01T00:01:00.000Z" },
+    ];
+
+    const res = await dashboardFetch(`${baseUrl}/api/manager/session/100`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.transcript, [
+      { role: "customer", content: "I need help with a vehicle.", timestamp: "2026-03-01T00:00:00.000Z" },
+      { role: "consultant", content: "What matters most to you?", timestamp: "2026-03-01T00:00:30.000Z" },
+    ]);
+    assert.equal(body.coachingMessages.length, 1);
+    assert.equal(body.coachingMessages[0].content, "Ask one more discovery question.");
   });
 
   test("GET manager/session/:id 404s for a session in a different office", async () => {

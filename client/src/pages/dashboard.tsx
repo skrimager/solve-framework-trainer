@@ -34,6 +34,7 @@ import {
   Mail,
   Settings,
   Bell,
+  Check,
   Radio,
   Medal,
   Award,
@@ -760,13 +761,11 @@ function DeltaBadge({ value, testId }: { value: number | null; testId?: string }
 // Turns a raw alert record (id/displayName/reasons) into the human-readable
 // sentences a manager actually needs, e.g. "Jordan Reyes hasn't practiced in
 // 15+ days." A consultant with multiple reasons gets one line per reason.
-function alertMessages(alert: CommandCenterExtras["alerts"][number]): string[] {
-  return alert.reasons.map((reason) => {
-    if (reason === "inactive") {
-      return `${alert.displayName} hasn't practiced in 14+ days.`;
-    }
-    return `${alert.displayName}'s recent scores have dropped below the qualifying bar.`;
-  });
+function alertMessage(alert: CommandCenterExtras["alerts"][number], reason: "inactive" | "lowScore"): string {
+  if (reason === "inactive") {
+    return `${alert.displayName} hasn't practiced in 14+ days.`;
+  }
+  return `${alert.displayName}'s recent scores have dropped below the qualifying bar.`;
 }
 
 // The ALERTS KPI card. Clicking it opens a modal listing what the alerts
@@ -774,7 +773,28 @@ function alertMessages(alert: CommandCenterExtras["alerts"][number]): string[] {
 // trend) already computed server-side in computeAlerts.
 function AlertsCard({ alerts }: { alerts: CommandCenterExtras["alerts"] }) {
   const [open, setOpen] = useState(false);
-  const rows = alerts.flatMap((a) => alertMessages(a).map((text, i) => ({ key: `${a.id}-${i}`, text })));
+  const queryClient = useQueryClient();
+  const rows = alerts.flatMap((alert) =>
+    alert.reasons.map((reason) => ({
+      key: `${alert.id}-${reason}`,
+      consultantId: alert.id,
+      reason,
+      text: alertMessage(alert, reason),
+    })),
+  );
+  const acknowledgeAlert = useMutation({
+    mutationFn: async ({ consultantId, reason }: { consultantId: number; reason: "inactive" | "lowScore" }) => {
+      await apiRequest("POST", "/api/manager/alerts/acknowledge", { consultantId, reason });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        predicate: (query) => {
+          const key = query.queryKey[0];
+          return typeof key === "string" && key.startsWith("/api/manager/dashboard-command-center?");
+        },
+      });
+    },
+  });
   return (
     <>
       <button
@@ -815,11 +835,22 @@ function AlertsCard({ alerts }: { alerts: CommandCenterExtras["alerts"] }) {
               {rows.map((r) => (
                 <li
                   key={r.key}
-                  className="rounded-lg px-3 py-2.5 text-sm text-white/85"
+                  className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-white/85"
                   style={{ backgroundColor: PANEL }}
                   data-testid={`alert-row-${r.key}`}
                 >
-                  {r.text}
+                  <span className="flex-1">{r.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => acknowledgeAlert.mutate({ consultantId: r.consultantId, reason: r.reason })}
+                    disabled={acknowledgeAlert.isPending}
+                    className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors disabled:opacity-60"
+                    style={{ borderColor: `${ORANGE_LIGHT}80`, color: ORANGE_LIGHT }}
+                    data-testid={`button-clear-alert-${r.consultantId}-${r.reason}`}
+                  >
+                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                    Clear
+                  </button>
                 </li>
               ))}
             </ul>
@@ -922,6 +953,8 @@ function CommandCenterSection({
   onDateRangeChange: (next: DateRangeValue) => void;
   earliestSessionAt?: string | null;
 }) {
+  const [drilldown, setDrilldown] = useState<"conversations" | "certifications" | null>(null);
+  const [openSessionId, setOpenSessionId] = useState<number | null>(null);
   const rangeControl = (
     <DateRangePicker range={dateRange} onChange={onDateRangeChange} earliestSessionAt={earliestSessionAt} />
   );
@@ -975,7 +1008,13 @@ function CommandCenterSection({
               </div>
             )}
             {show("conversations") && (
-              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${BLUE}30` }} data-testid="kpi-conversations">
+              <button
+                type="button"
+                onClick={() => setDrilldown("conversations")}
+                className="rounded-xl border p-4 text-left transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2"
+                style={{ backgroundColor: NAVY, borderColor: `${BLUE}30` }}
+                data-testid="button-kpi-conversations"
+              >
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Conversations</p>
                 <p className="mt-2 text-2xl font-bold text-white">{extras.conversations.count}</p>
                 <div className="mt-1">
@@ -984,7 +1023,7 @@ function CommandCenterSection({
                 <div className="mt-2">
                   <Sparkline data={extras.conversations.sparkline} color={BLUE_LIGHT} />
                 </div>
-              </div>
+              </button>
             )}
             {show("completionRate") && (
               <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${PURPLE}30` }} data-testid="kpi-completion-rate">
@@ -998,13 +1037,19 @@ function CommandCenterSection({
               </div>
             )}
             {show("certifications") && (
-              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${GOLD}30` }} data-testid="kpi-certifications-earned">
+              <button
+                type="button"
+                onClick={() => setDrilldown("certifications")}
+                className="rounded-xl border p-4 text-left transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2"
+                style={{ backgroundColor: NAVY, borderColor: `${GOLD}30` }}
+                data-testid="button-kpi-certifications"
+              >
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Certifications Earned</p>
                 <p className="mt-2 text-2xl font-bold text-white">{extras.certifications.count}</p>
                 <div className="mt-1">
                   <DeltaBadge value={extras.certifications.deltaPercent} testId="delta-certifications" />
                 </div>
-              </div>
+              </button>
             )}
           </div>
           {show("alerts") && <AlertsCard alerts={extras.alerts} />}
@@ -1142,6 +1187,21 @@ function CommandCenterSection({
 
       {/* Row 6: Bottom summary strip */}
       {show("summaryStrip") && <SummaryStrip data={extras.summaryStrip} label={label} />}
+      <ConversationListModal
+        open={drilldown === "conversations"}
+        dateRange={dateRange}
+        onClose={() => setDrilldown(null)}
+        onSelectSession={(sessionId) => {
+          setDrilldown(null);
+          setOpenSessionId(sessionId);
+        }}
+      />
+      <CertificationListModal
+        open={drilldown === "certifications"}
+        dateRange={dateRange}
+        onClose={() => setDrilldown(null)}
+      />
+      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
     </div>
   );
 }
@@ -1196,6 +1256,143 @@ function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
   );
 }
 
+type ConversationDrilldownItem = {
+  consultantName: string;
+  scenarioTitle: string;
+  score: number | null;
+  completedAt: string;
+  sessionId: number;
+};
+
+type CertificationDrilldownItem = {
+  consultantName: string;
+  track: "consulting" | "leadership";
+  certifiedAt: string;
+};
+
+function commandCenterRangeQuery(dateRange: DateRangeValue): string {
+  return `since=${encodeURIComponent(dateRange.since.toISOString())}&until=${encodeURIComponent(dateRange.until.toISOString())}`;
+}
+
+function ConversationListModal({
+  open,
+  dateRange,
+  onClose,
+  onSelectSession,
+}: {
+  open: boolean;
+  dateRange: DateRangeValue;
+  onClose: () => void;
+  onSelectSession: (sessionId: number) => void;
+}) {
+  const query = commandCenterRangeQuery(dateRange);
+  const { data, isLoading, isError } = useQuery<{ sessions: ConversationDrilldownItem[] }>({
+    queryKey: [`/api/manager/dashboard-command-center/conversations?${query}`],
+    enabled: open,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
+      <DialogContent
+        className="border max-h-[85vh] overflow-y-auto"
+        style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+        data-testid="modal-kpi-conversations"
+      >
+        <DialogHeader>
+          <DialogTitle className="text-white">Completed conversations</DialogTitle>
+          <DialogDescription className="text-white/55">
+            Completed practice conversations in the selected date range.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <Skeleton className="h-40 rounded-lg" />}
+        {isError && <p className="text-sm text-white/60">Couldn&apos;t load completed conversations.</p>}
+        {data && (data.sessions.length === 0 ? (
+          <EmptyState message="No completed conversations in this date range." testId="empty-kpi-conversations" />
+        ) : (
+          <ul className="space-y-2" data-testid="list-kpi-conversations">
+            {data.sessions.map((session) => (
+              <li key={session.sessionId}>
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(session.sessionId)}
+                  className="flex w-full items-center justify-between gap-4 rounded-lg px-3 py-3 text-left transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2"
+                  style={{ backgroundColor: PANEL }}
+                  data-testid={`button-kpi-conversation-${session.sessionId}`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-white">{session.consultantName}</span>
+                    <span className="block truncate text-xs text-white/55">{session.scenarioTitle}</span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-sm font-semibold" style={{ color: ORANGE_LIGHT }}>
+                      {session.score ?? "Unscored"}
+                    </span>
+                    <span className="block text-xs text-white/45">{fmtFullDate(session.completedAt)}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ))}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CertificationListModal({
+  open,
+  dateRange,
+  onClose,
+}: {
+  open: boolean;
+  dateRange: DateRangeValue;
+  onClose: () => void;
+}) {
+  const query = commandCenterRangeQuery(dateRange);
+  const { data, isLoading, isError } = useQuery<{ certifications: CertificationDrilldownItem[] }>({
+    queryKey: [`/api/manager/dashboard-command-center/certifications?${query}`],
+    enabled: open,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
+      <DialogContent
+        className="border max-h-[85vh] overflow-y-auto"
+        style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+        data-testid="modal-kpi-certifications"
+      >
+        <DialogHeader>
+          <DialogTitle className="text-white">Certifications earned</DialogTitle>
+          <DialogDescription className="text-white/55">
+            Certifications earned in the selected date range.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <Skeleton className="h-40 rounded-lg" />}
+        {isError && <p className="text-sm text-white/60">Couldn&apos;t load certifications.</p>}
+        {data && (data.certifications.length === 0 ? (
+          <EmptyState message="No certifications earned in this date range." testId="empty-kpi-certifications" />
+        ) : (
+          <ul className="space-y-2" data-testid="list-kpi-certifications">
+            {data.certifications.map((certification) => (
+              <li
+                key={`${certification.consultantName}-${certification.track}-${certification.certifiedAt}`}
+                className="flex items-center justify-between gap-4 rounded-lg px-3 py-3"
+                style={{ backgroundColor: PANEL }}
+              >
+                <span>
+                  <span className="block text-sm font-semibold text-white">{certification.consultantName}</span>
+                  <span className="block text-xs capitalize text-white/55">{certification.track}</span>
+                </span>
+                <span className="shrink-0 text-xs text-white/45">{fmtFullDate(certification.certifiedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        ))}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 type ManagerSessionDetail = {
   id: number;
   consultantId: number;
@@ -1208,6 +1405,20 @@ type ManagerSessionDetail = {
   feedback: string | null;
   createdAt: string;
   completedAt: string | null;
+  transcript: {
+    role: "consultant" | "customer";
+    content: string;
+    timestamp: string;
+    audioUrl?: string;
+    audioStatus?: "none" | "pending" | "ready" | "failed";
+    msgId?: string;
+  }[];
+  coachingMessages: {
+    id: number;
+    role: "trainee" | "coach";
+    content: string;
+    createdAt: string;
+  }[];
 };
 
 const ALL_RUBRIC_LABELS: Record<string, string> = {
@@ -1302,6 +1513,52 @@ function SessionDetailModal({ sessionId, onClose }: { sessionId: number | null; 
                 <p className="text-sm text-white/70 whitespace-pre-wrap">{data.feedback}</p>
               </div>
             )}
+            <details className="rounded-lg" style={{ backgroundColor: PANEL }}>
+              <summary className="cursor-pointer px-3 py-3 text-sm font-semibold text-white">
+                Conversation Transcript
+              </summary>
+              {data.transcript.length === 0 ? (
+                <p className="px-3 pb-3 text-sm text-white/60" data-testid="text-session-detail-no-transcript">
+                  No transcript is available for this session.
+                </p>
+              ) : (
+                <ul className="max-h-72 space-y-2 overflow-y-auto px-3 pb-3 pr-2" data-testid="list-session-detail-transcript">
+                  {data.transcript.map((message, index) => (
+                    <li
+                      key={`${message.timestamp}-${index}`}
+                      className="rounded-md px-3 py-2"
+                      style={{ backgroundColor: NAVY }}
+                    >
+                      <p className="text-xs font-semibold" style={{ color: message.role === "consultant" ? ORANGE_LIGHT : "rgba(255,255,255,0.72)" }}>
+                        {message.role === "consultant" ? "Consultant" : "Customer"}
+                      </p>
+                      <p className="mt-1 text-sm text-white/80 whitespace-pre-wrap">{message.content}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
+            <details className="rounded-lg" style={{ backgroundColor: PANEL }}>
+              <summary className="cursor-pointer px-3 py-3 text-sm font-semibold text-white">
+                Coaching Notes
+              </summary>
+              {data.coachingMessages.length === 0 ? (
+                <p className="px-3 pb-3 text-sm text-white/60" data-testid="text-session-detail-no-coaching">
+                  No coaching notes for this session
+                </p>
+              ) : (
+                <ul className="max-h-72 space-y-2 overflow-y-auto px-3 pb-3 pr-2" data-testid="list-session-detail-coaching">
+                  {data.coachingMessages.map((message) => (
+                    <li key={message.id} className="rounded-md px-3 py-2" style={{ backgroundColor: NAVY }}>
+                      <p className="text-xs font-semibold" style={{ color: message.role === "coach" ? ORANGE_LIGHT : "rgba(255,255,255,0.72)" }}>
+                        {message.role === "coach" ? "Coach" : "Consultant"}
+                      </p>
+                      <p className="mt-1 text-sm text-white/80 whitespace-pre-wrap">{message.content}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
           </div>
         )}
       </DialogContent>
