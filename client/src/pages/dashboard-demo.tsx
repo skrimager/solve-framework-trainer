@@ -108,7 +108,6 @@ export default function DemoDashboard() {
 
             <ConsultantRoster
               officeId={0}
-              requesterId={0}
               readOnlyData={{ consultants: data.consultants, details: data.details }}
             />
           </div>

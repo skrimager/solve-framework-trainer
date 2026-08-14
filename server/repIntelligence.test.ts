@@ -34,6 +34,7 @@ describe("rep intelligence rolling window", () => {
         // The five oldest sessions are low scores that must fall out.
         score: index < 5 ? 0 : 100,
         createdAt: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+        completedAt: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
       }),
     );
     assert.equal(rollingAverageScore(sessions), 100);

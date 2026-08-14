@@ -45,7 +45,7 @@ export function verifyUserSession(token: string | undefined, now = Date.now()): 
 
   try {
     const payload = JSON.parse(Buffer.from(body, "base64url").toString()) as UserSessionPayload;
-    if (!Number.isInteger(payload.userId) || typeof payload.exp !== "number" || payload.exp < now) return null;
+    if (!Number.isInteger(payload.userId) || typeof payload.exp !== "number" || payload.exp <= now) return null;
     return payload;
   } catch {
     return null;

@@ -258,11 +258,9 @@ export type RosterReadOnlyData = {
 
 export function ConsultantRoster({
   officeId,
-  requesterId,
   readOnlyData,
 }: {
   officeId: number;
-  requesterId: number;
   // When provided, the roster is fully read-only: it uses this data and makes
   // no network calls at all (the authenticated queries below are disabled).
   readOnlyData?: RosterReadOnlyData;
@@ -272,7 +270,7 @@ export function ConsultantRoster({
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantSummary[]>({
-    queryKey: [`/api/offices/${officeId}/consultants?requesterId=${requesterId}`],
+    queryKey: [`/api/offices/${officeId}/consultants`],
     enabled: !readOnlyData,
   });
   const consultants = readOnlyData ? readOnlyData.consultants : fetched;
@@ -369,7 +367,6 @@ export function ConsultantRoster({
         {selectedId !== null && (
           <ConsultantDetailPanel
             officeId={officeId}
-            requesterId={requesterId}
             userId={selectedId}
             readOnlyDetail={readOnlyData?.details[selectedId]}
             onClose={() => setSelectedId(null)}
@@ -539,13 +536,11 @@ function SessionDetailModal({
 
 function ConsultantDetailPanel({
   officeId,
-  requesterId,
   userId,
   readOnlyDetail,
   onClose,
 }: {
   officeId: number;
-  requesterId: number;
   userId: number;
   // When provided (public demo), render from this and make no network call.
   readOnlyDetail?: ConsultantDetail;
@@ -558,7 +553,7 @@ function ConsultantDetailPanel({
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
 
   const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantDetail>({
-    queryKey: [`/api/offices/${officeId}/consultants/${userId}?requesterId=${requesterId}`],
+    queryKey: [`/api/offices/${officeId}/consultants/${userId}`],
     enabled: !readOnlyDetail,
   });
   const data = readOnlyDetail ?? fetched;
@@ -567,28 +562,28 @@ function ConsultantDetailPanel({
   // Field submissions load lazily the first time the manager opens that tab, and
   // never in the read-only public demo.
   const { data: fieldRows, isLoading: fieldLoading } = useQuery<FieldConversation[]>({
-    queryKey: [`/api/offices/${officeId}/consultants/${userId}/real-conversations?requesterId=${requesterId}`],
+    queryKey: [`/api/offices/${officeId}/consultants/${userId}/real-conversations`],
     enabled: !readOnlyDetail && view === "field",
   });
 
   const { data: intelligence, isLoading: intelligenceLoading } = useQuery<ConsultantIntelligence>({
-    queryKey: ["consultant-intelligence", officeId, userId, requesterId],
+    queryKey: ["consultant-intelligence", officeId, userId],
     enabled: !readOnlyDetail,
     queryFn: async () => {
       const res = await apiRequest(
         "GET",
-        `/api/offices/${officeId}/consultants/${userId}/intelligence?requesterId=${requesterId}`,
+        `/api/offices/${officeId}/consultants/${userId}/intelligence`,
       );
       return res.json();
     },
   });
   const { data: sessionDetail, isLoading: sessionDetailLoading } = useQuery<SessionIntelligence>({
-    queryKey: ["consultant-session-intelligence", officeId, userId, selectedSessionId, requesterId],
+    queryKey: ["consultant-session-intelligence", officeId, userId, selectedSessionId],
     enabled: !readOnlyDetail && selectedSessionId !== null,
     queryFn: async () => {
       const res = await apiRequest(
         "GET",
-        `/api/offices/${officeId}/consultants/${userId}/sessions/${selectedSessionId}?requesterId=${requesterId}`,
+        `/api/offices/${officeId}/consultants/${userId}/sessions/${selectedSessionId}`,
       );
       return res.json();
     },

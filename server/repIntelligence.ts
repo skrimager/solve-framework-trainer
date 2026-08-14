@@ -28,8 +28,8 @@ const TIER_FOR_LEVEL: Record<string, CoinTier> = {
   advanced: "gold",
 };
 
-function sessionDate(session: Pick<Session, "createdAt">): string {
-  return session.createdAt;
+function sessionDate(session: Pick<Session, "createdAt" | "completedAt">): string {
+  return session.completedAt ?? session.createdAt;
 }
 
 export function latestCompletedScoredSessions(sessions: Session[]): Session[] {

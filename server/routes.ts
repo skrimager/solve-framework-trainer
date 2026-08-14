@@ -161,11 +161,17 @@ import {
   summarizeSales,
   RateLimiter,
 } from "./admin";
-import { USER_SESSION_COOKIE, signUserSession, verifyUserSession } from "./userSession";
+import {
+  USER_SESSION_COOKIE,
+  USER_SESSION_TTL_MS,
+  signUserSession,
+  verifyUserSession,
+} from "./userSession";
 import {
   ROLLING_SESSION_LIMIT,
   awardCoinForAdvancement,
   deriveStrengthsAndWeaknesses,
+  latestCompletedScoredSessions,
   rollingAverageScore,
 } from "./repIntelligence";
 
@@ -195,7 +201,12 @@ function readCookie(req: Request, name: string): string | undefined {
     const idx = part.indexOf("=");
     if (idx === -1) continue;
     if (part.slice(0, idx).trim() === name) {
-      return decodeURIComponent(part.slice(idx + 1).trim());
+      try {
+        return decodeURIComponent(part.slice(idx + 1).trim());
+      } catch {
+        // A malformed Cookie header is unauthenticated input, not a server error.
+        return undefined;
+      }
     }
   }
   return undefined;
@@ -857,14 +868,15 @@ export async function registerRoutes(
   // directly keeps working exactly as before. Best-effort per recipient.
   app.post("/api/manager/enroll-consultants", async (req, res) => {
     const schema = z.object({
-      userId: z.coerce.number().int(),
       emails: z.array(z.string().trim().email()).min(1, "Add at least one email").max(100),
     });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
-    const manager = await storage.getUser(parsed.data.userId);
+    const session = verifyUserSession(readCookie(req, USER_SESSION_COOKIE));
+    if (!session) return res.status(401).json({ message: "Authentication is required" });
+    const manager = await storage.getUser(session.userId);
     if (!manager || manager.role !== "manager") {
       return res.status(403).json({ message: "Only a manager can enroll consultants" });
     }
@@ -1559,10 +1571,23 @@ export function registerUserAuthRoutes(app: Express): void {
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
-      maxAge: 1000 * 60 * 60 * 12,
+      maxAge: USER_SESSION_TTL_MS,
       path: "/",
     });
     res.json(publicUser(user));
+  });
+
+  // Command Center sign-out invalidates the browser's signed user-session cookie.
+  // The token also carries an expiry, so a browser that never explicitly signs
+  // out will stop authorizing roster reads after the bounded TTL.
+  app.post("/api/logout", (_req, res) => {
+    res.clearCookie(USER_SESSION_COOKIE, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+    });
+    res.status(204).end();
   });
 
   // --- Registration (self-serve office sign-up) ---
@@ -3533,7 +3558,9 @@ function buildConsultantSummary(
   realConversationRows: RealConversation[] = [],
 ) {
   const completed = userSessions.filter((s) => s.status === "completed");
-  const scored = completed.filter((s) => s.score !== null);
+  // Keep every manager-facing score in the command center on the same
+  // rolling-20 definition as the leaderboard and intelligence profile.
+  const scored = latestCompletedScoredSessions(userSessions);
   const averageScore = scored.length
     ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
     : null;
@@ -3781,29 +3808,25 @@ async function authorizeRosterRequest(
   return { ok: true };
 }
 
-// Authenticated command-center gate for intelligence/roster reads. It retains
-// the existing office-role check above and adds a signed login-session check, so
-// a guessed manager id cannot authorize a sensitive read by itself.
+// Authenticated command-center gate for intelligence/roster reads. The verified
+// signed cookie is the sole source of caller identity; requesterId-style query
+// parameters are deliberately not read here, so they cannot authorize data.
+// The existing manager/QA role and same-office checks remain centralized in
+// authorizeRosterRequest.
 async function requireManagerOrQaForOffice(
   req: Request,
-  requesterId: number,
   officeId: number,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  if (!requesterId) return { ok: false, status: 400, message: "requesterId is required" };
   const session = verifyUserSession(readCookie(req, USER_SESSION_COOKIE));
   if (!session) return { ok: false, status: 401, message: "Authentication is required" };
-  if (session.userId !== requesterId) {
-    return { ok: false, status: 403, message: "Authenticated user does not match requesterId" };
-  }
-  return authorizeRosterRequest(requesterId, officeId);
+  return authorizeRosterRequest(session.userId, officeId);
 }
 
 export function registerManagerRosterRoutes(app: Express): void {
   // Roster: one summary row per consultant in the office.
   app.get("/api/offices/:officeId/consultants", async (req, res) => {
     const officeId = Number(req.params.officeId);
-    const requesterId = Number(req.query.requesterId);
-    const auth = await requireManagerOrQaForOffice(req, requesterId, officeId);
+    const auth = await requireManagerOrQaForOffice(req, officeId);
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
 
     const [officeUsers, officeSessions, allScenarios] = await Promise.all([
@@ -3846,13 +3869,12 @@ export function registerManagerRosterRoutes(app: Express): void {
     res.json(consultants);
   });
 
-  // Detail: one consultant's full session history (newest first) so a manager can
-  // click into an employee and review their actual practice attempts.
+  // Detail: the consultant's newest rolling-20 completed sessions so a manager
+  // can click into an employee and review their actual practice attempts.
   app.get("/api/offices/:officeId/consultants/:userId", async (req, res) => {
     const officeId = Number(req.params.officeId);
     const userId = Number(req.params.userId);
-    const requesterId = Number(req.query.requesterId);
-    const auth = await requireManagerOrQaForOffice(req, requesterId, officeId);
+    const auth = await requireManagerOrQaForOffice(req, officeId);
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
 
     const target = await storage.getUser(userId);
@@ -3894,7 +3916,7 @@ export function registerManagerRosterRoutes(app: Express): void {
           completedAt: s.completedAt,
         };
       })
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt))
       .slice(0, ROLLING_SESSION_LIMIT);
 
     res.json({
@@ -3916,8 +3938,7 @@ export function registerManagerRosterRoutes(app: Express): void {
   app.get("/api/offices/:officeId/consultants/:userId/intelligence", async (req, res) => {
     const officeId = Number(req.params.officeId);
     const userId = Number(req.params.userId);
-    const requesterId = Number(req.query.requesterId);
-    const auth = await requireManagerOrQaForOffice(req, requesterId, officeId);
+    const auth = await requireManagerOrQaForOffice(req, officeId);
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
 
     const target = await storage.getUser(userId);
@@ -3968,8 +3989,7 @@ export function registerManagerRosterRoutes(app: Express): void {
     const officeId = Number(req.params.officeId);
     const userId = Number(req.params.userId);
     const sessionId = Number(req.params.sessionId);
-    const requesterId = Number(req.query.requesterId);
-    const auth = await requireManagerOrQaForOffice(req, requesterId, officeId);
+    const auth = await requireManagerOrQaForOffice(req, officeId);
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
 
     const target = await storage.getUser(userId);
@@ -4020,8 +4040,7 @@ export function registerManagerRosterRoutes(app: Express): void {
   app.get("/api/offices/:officeId/consultants/:userId/real-conversations", async (req, res) => {
     const officeId = Number(req.params.officeId);
     const userId = Number(req.params.userId);
-    const requesterId = Number(req.query.requesterId);
-    const auth = await authorizeRosterRequest(requesterId, officeId);
+    const auth = await requireManagerOrQaForOffice(req, officeId);
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
 
     const target = await storage.getUser(userId);
@@ -4181,20 +4200,17 @@ function groupSessionsByUser(sessions: Session[]): Map<number, Session[]> {
 
 // Peer ranking metric (documented once, used by BOTH the consultant mini
 // dashboard and the manager Streaks & Rankings block so they always agree):
-// consultants are ranked by their AVERAGE score across completed, scored
-// sessions, highest first. A consultant with no scored sessions has a null
-// average and sorts to the bottom, but is still assigned a rank so "#12 of 12"
-// stays meaningful.
+// Consultants are ranked by their average across the most recent 20 completed,
+// scored sessions, highest first. A consultant with no scored sessions has a
+// null average and sorts to the bottom, but is still assigned a rank so
+// "#12 of 12" stays meaningful.
 export function getOfficeRankings(
   consultants: User[],
   sessionsByUser: Map<number, Session[]>,
 ): { id: number; averageScore: number | null; sampleSize: number }[] {
   return consultants
     .map((u) => {
-      const latest = (sessionsByUser.get(u.id) ?? [])
-        .filter((s) => s.status === "completed" && s.score !== null)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, ROLLING_SESSION_LIMIT);
+      const latest = latestCompletedScoredSessions(sessionsByUser.get(u.id) ?? []);
       return {
         id: u.id,
         averageScore: rollingAverageScore(latest),
@@ -5036,7 +5052,7 @@ function sparklineByDay(completed: Session[], since: Date, until: Date): number[
 
 // Team Performance Over Time: by completion day within the period, the
 // office's overall average score vs the average of just its top-20% cohort
-// (ranked by all-time average score). Both series are scoped to this office
+// (ranked by rolling-last-20 average score). Both series are scoped to this office
 // only. Days with no scored session in a series simply carry null so the
 // chart shows a gap rather than a misleading dip to zero.
 function buildPerformanceOverTime(
@@ -5046,7 +5062,7 @@ function buildPerformanceOverTime(
   since: Date,
   until: Date,
 ): { date: string; teamScore: number | null; top20: number | null }[] {
-  const ranking = rankConsultantsByAverageScore(consultants, sessionsByUser).filter((r) => r.averageScore !== null);
+  const ranking = getOfficeRankings(consultants, sessionsByUser).filter((r) => r.averageScore !== null);
   const top20Count = Math.max(1, Math.ceil(ranking.length * 0.2));
   const top20Ids = new Set(ranking.slice(0, top20Count).map((r) => r.id));
 
@@ -5108,6 +5124,21 @@ function readPeriodParams(req: Request): { since?: string; until?: string } {
   return { since, until };
 }
 
+async function requireManagerOrQaDashboardUser(
+  req: Request,
+  message: string,
+): Promise<{ ok: true; user: User } | { ok: false; status: number; message: string }> {
+  const session = verifyUserSession(readCookie(req, USER_SESSION_COOKIE));
+  if (!session) return { ok: false, status: 401, message: "Authentication is required" };
+
+  const user = await storage.getUser(session.userId);
+  if (!user) return { ok: false, status: 401, message: "Unknown user" };
+  if (user.role !== "manager" && user.role !== "qa") {
+    return { ok: false, status: 403, message };
+  }
+  return { ok: true, user };
+}
+
 export function registerManagerDashboardRoutes(app: Express): void {
   // Office-scoped aggregate analytics for the manager command center. Reuses the
   // same manager/QA + own-office authorization as the roster routes.
@@ -5118,15 +5149,9 @@ export function registerManagerDashboardRoutes(app: Express): void {
   // When since is omitted, the endpoint falls back to the historical trailing
   // 7-day window ending now, exactly matching the endpoint's old behavior.
   app.get("/api/manager/dashboard-stats", async (req, res) => {
-    const requesterId = Number(req.query.requesterId);
-    if (!requesterId) {
-      return res.status(400).json({ message: "requesterId is required" });
-    }
-    const requester = await storage.getUser(requesterId);
-    if (!requester) return res.status(401).json({ message: "Unknown user" });
-    if (requester.role !== "manager" && requester.role !== "qa") {
-      return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
-    }
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
 
     // The manager dashboard itself is the paid add-on: an office without the
     // Manager Dashboard line (office.managerItemId unset) is not entitled to it.
@@ -5169,15 +5194,9 @@ export function registerManagerDashboardRoutes(app: Express): void {
   // resolveDashboardPeriod), so both endpoints are always scoped to the same
   // manager-selected range.
   app.get("/api/manager/dashboard-command-center", async (req, res) => {
-    const requesterId = Number(req.query.requesterId);
-    if (!requesterId) {
-      return res.status(400).json({ message: "requesterId is required" });
-    }
-    const requester = await storage.getUser(requesterId);
-    if (!requester) return res.status(401).json({ message: "Unknown user" });
-    if (requester.role !== "manager" && requester.role !== "qa") {
-      return res.status(403).json({ message: "Only a manager or QA can view dashboard analytics" });
-    }
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
     if (!requester.isDemoAccount && !office?.managerItemId) {
@@ -5205,15 +5224,9 @@ export function registerManagerDashboardRoutes(app: Express): void {
   // default to visible (see resolveDashboardWidgetConfig), and a PUT only
   // ever touches the dashboardWidgetConfig column — no other office fields.
   app.get("/api/manager/dashboard-widget-config", async (req, res) => {
-    const requesterId = Number(req.query.requesterId);
-    if (!requesterId) {
-      return res.status(400).json({ message: "requesterId is required" });
-    }
-    const requester = await storage.getUser(requesterId);
-    if (!requester) return res.status(401).json({ message: "Unknown user" });
-    if (requester.role !== "manager" && requester.role !== "qa") {
-      return res.status(403).json({ message: "Only a manager or QA can view dashboard settings" });
-    }
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard settings");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
     if (!office) return res.status(404).json({ message: "Office not found" });
@@ -5222,15 +5235,9 @@ export function registerManagerDashboardRoutes(app: Express): void {
   });
 
   app.put("/api/manager/dashboard-widget-config", async (req, res) => {
-    const requesterId = Number(req.body?.requesterId);
-    if (!requesterId) {
-      return res.status(400).json({ message: "requesterId is required" });
-    }
-    const requester = await storage.getUser(requesterId);
-    if (!requester) return res.status(401).json({ message: "Unknown user" });
-    if (requester.role !== "manager" && requester.role !== "qa") {
-      return res.status(403).json({ message: "Only a manager or QA can change dashboard settings" });
-    }
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can change dashboard settings");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
     if (!office) return res.status(404).json({ message: "Office not found" });
@@ -5256,22 +5263,17 @@ export function registerManagerDashboardRoutes(app: Express): void {
   // Live Feed session detail: a manager/QA clicks an entry in the Live Feed
   // widget and needs the full picture (consultant, full scenario title, score,
   // rubric breakdown, completion time). Scoped strictly to sessions belonging
-  // to a consultant in the requester's own office, same requesterId + role +
-  // office pattern as the rest of this file's manager routes. This is
+  // to a consultant in the authenticated caller's own office, using the same
+  // signed-session + role + office pattern as the rest of this file's manager
+  // routes. This is
   // intentionally a separate route from the trainee-facing GET /api/sessions/:id
   // (which has no office scoping, since a trainee only ever links to their own
   // session) so manager access to any office's data never depends on that
   // route accidentally staying unscoped.
   app.get("/api/manager/session/:id", async (req, res) => {
-    const requesterId = Number(req.query.requesterId);
-    if (!requesterId) {
-      return res.status(400).json({ message: "requesterId is required" });
-    }
-    const requester = await storage.getUser(requesterId);
-    if (!requester) return res.status(401).json({ message: "Unknown user" });
-    if (requester.role !== "manager" && requester.role !== "qa") {
-      return res.status(403).json({ message: "Only a manager or QA can view session detail" });
-    }
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view session detail");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
     if (!requester.isDemoAccount && !office?.managerItemId) {

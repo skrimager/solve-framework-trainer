@@ -142,14 +142,19 @@ describe("manager roster HTTP endpoints", () => {
 
   // --- Authorization ---
 
-  test("requires a requesterId", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`);
-    assert.equal(res.status, 400);
+  test("rejects a stolen or guessed requesterId when there is no valid session", async () => {
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    assert.equal(res.status, 401);
   });
 
-  test("rejects an unknown requester", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=999`);
-    assert.equal(res.status, 401);
+  test("uses the verified manager session as the caller identity, not requesterId", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=999`,
+      { headers: authHeaders(1) },
+    );
+    assert.equal(res.status, 200);
+    const rows = await res.json();
+    assert.equal(rows.length, 2);
   });
 
   test("does not allow a requester id alone to read intelligence or a session drill-down", async () => {
@@ -164,33 +169,33 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("rejects a plain consultant (not manager/qa)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=3`, { headers: authHeaders(3) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(3) });
     assert.equal(res.status, 403);
   });
 
   test("rejects a manager from a different office", async () => {
     const other = mkUser({ id: 6, role: "manager", officeId: OTHER_OFFICE_ID });
     users.push(other);
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=6`, { headers: authHeaders(6) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(6) });
     assert.equal(res.status, 403);
   });
 
   test("allows the office's own QA to view (shared manager/qa dashboard)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=2`, { headers: authHeaders(2) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(2) });
     assert.equal(res.status, 200);
   });
 
   // --- Roster contents ---
 
   test("returns only consultants of this office, excluding manager/qa and other offices", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const usernames = rows.map((r: any) => r.username).sort();
     assert.deepEqual(usernames, ["alice", "bob"]);
   });
 
   test("computes qualifying sessions at the consultant's current tier", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // 3 of Alice's beginner sessions cleared 85; the 70 and the in-progress do not.
@@ -199,7 +204,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("computes completed count and average score over scored sessions only", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // 4 completed (90,88,86,70); in-progress excluded. Avg = 334/4 = 83.5 -> 84.
@@ -208,7 +213,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("reports the most recent activity date", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // The in-progress session on 03-05 is the newest activity (uses createdAt).
@@ -216,7 +221,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("surfaces per-track certification status", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const bob = rows.find((r: any) => r.username === "bob");
     assert.equal(bob.currentLevel, "advanced");
@@ -227,7 +232,7 @@ describe("manager roster HTTP endpoints", () => {
 
   test("consultant with no sessions has null average and zero counts", async () => {
     users.push(mkUser({ id: 7, role: "consultant", username: "dave", displayName: "Dave D" }));
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants`, { headers: authHeaders(1) });
     const rows = await res.json();
     const dave = rows.find((r: any) => r.username === "dave");
     assert.equal(dave.averageScore, null);
@@ -239,7 +244,7 @@ describe("manager roster HTTP endpoints", () => {
   // --- Detail endpoint ---
 
   test("detail returns the consultant summary plus session history newest-first", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3`, { headers: authHeaders(1) });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.consultant.username, "alice");
@@ -255,7 +260,7 @@ describe("manager roster HTTP endpoints", () => {
       mkSession({ id: 105, userId: 3, scenarioId: 10, score: 80, rubricScores: '{"needsDiscovery":80}', completedAt: "2026-03-06T00:00:00.000Z" }),
       mkSession({ id: 106, userId: 3, scenarioId: 10, score: 80, rubricScores: "not json", completedAt: "2026-03-07T00:00:00.000Z" }),
     );
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3`, { headers: authHeaders(1) });
     const body = await res.json();
     const good = body.sessions.find((s: any) => s.id === 105);
     const bad = body.sessions.find((s: any) => s.id === 106);
@@ -264,12 +269,12 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("detail 404s for a user outside the office", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/5?requesterId=1`, { headers: authHeaders(1) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/5`, { headers: authHeaders(1) });
     assert.equal(res.status, 404);
   });
 
   test("detail enforces the same manager/qa authorization", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=3`, { headers: authHeaders(3) });
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3`, { headers: authHeaders(3) });
     assert.equal(res.status, 403);
   });
 
@@ -310,7 +315,7 @@ describe("manager roster HTTP endpoints", () => {
     ];
 
     const intelligence = await fetch(
-      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/intelligence?requesterId=1`,
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/intelligence`,
       { headers: authHeaders(1) },
     );
     assert.equal(intelligence.status, 200);
@@ -322,7 +327,7 @@ describe("manager roster HTTP endpoints", () => {
     assert.deepEqual(intelligenceBody.academyCredits, []);
 
     const drillDown = await fetch(
-      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/sessions/100?requesterId=1`,
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/sessions/100`,
       { headers: authHeaders(1) },
     );
     assert.equal(drillDown.status, 200);

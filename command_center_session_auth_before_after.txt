@@ -1,0 +1,85 @@
+Command Center session-auth before/after audit
+
+ORIGINAL STATE (commit dad8c55, before this feature branch)
+
+server/routes.ts:834-842:
+  // --- Auth (simple demo-credential login, no sessions/passwords hashing needed for pilot) ---
+  app.post("/api/login", async (req, res) => {
+    ...
+    res.json(publicUser(user));
+  });
+
+The original login response issued no browser session or cookie.
+
+server/routes.ts:3710-3724:
+  async function authorizeRosterRequest(
+    requesterId: number,
+    officeId: number,
+  ) {
+    if (!requesterId) return { ok: false, status: 400, message: "requesterId is required" };
+    const requester = await storage.getUser(requesterId);
+    ...
+  }
+
+server/routes.ts:3728-3732:
+  app.get("/api/offices/:officeId/consultants", async (req, res) => {
+    const officeId = Number(req.params.officeId);
+    const requesterId = Number(req.query.requesterId);
+    const auth = await authorizeRosterRequest(requesterId, officeId);
+  });
+
+The original rep-detail route used the same requesterId query parameter at
+server/routes.ts:3776-3781. There was no server/userSession.ts file.
+
+IMMEDIATE PRE-CORRECTION STATE (commit 4510780 on this feature branch)
+
+A signed cookie had been added, but requesterId was still part of every
+authorization decision:
+
+server/routes.ts:3761-3772:
+  async function requireManagerOrQaForOffice(req, requesterId, officeId) {
+    if (!requesterId) return { ok: false, status: 400, message: "requesterId is required" };
+    const session = verifyUserSession(readCookie(req, USER_SESSION_COOKIE));
+    if (!session) return { ok: false, status: 401, message: "Authentication is required" };
+    if (session.userId !== requesterId) {
+      return { ok: false, status: 403, message: "Authenticated user does not match requesterId" };
+    }
+    return authorizeRosterRequest(requesterId, officeId);
+  }
+
+server/routes.ts:3777-3780:
+  const requesterId = Number(req.query.requesterId);
+  const auth = await requireManagerOrQaForOffice(req, requesterId, officeId);
+
+The existing detail, intelligence, and session drill-down routes had the same
+requesterId parsing pattern. client/src/components/consultant-roster.tsx sent
+requesterId in its list, detail, intelligence, session-detail, and Field URLs.
+
+CURRENT STATE (feature/command-center-rep-intelligence)
+
+server/routes.ts:853-868:
+  res.cookie(USER_SESSION_COOKIE, signUserSession(user.id), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: USER_SESSION_TTL_MS,
+    path: "/",
+  });
+
+server/routes.ts:3790-3796:
+  async function requireManagerOrQaForOffice(req: Request, officeId: number) {
+    const session = verifyUserSession(readCookie(req, USER_SESSION_COOKIE));
+    if (!session) return { ok: false, status: 401, message: "Authentication is required" };
+    return authorizeRosterRequest(session.userId, officeId);
+  }
+
+The roster list, existing rep detail, intelligence summary, session drill-down,
+and real-conversation review now all call requireManagerOrQaForOffice without
+reading requesterId. The existing role and same-office checks are preserved
+inside authorizeRosterRequest, but its identity now comes only from the verified
+cookie. server/userSession.ts signs/verifies an HMAC cookie containing userId and
+expiry; /api/logout clears it, and .env.example documents USER_SESSION_SECRET.
+
+The manager dashboard's stats, command-center extras, widget configuration, and
+manager session-detail routes also now derive manager/QA identity from that
+verified session rather than requesterId.
