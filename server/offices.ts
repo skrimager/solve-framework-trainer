@@ -72,6 +72,7 @@ export function filterOfficesByArchive<T extends { archivedAt: string | null }>(
 export interface OfficeCascade {
   deleteUsers(officeId: number): Promise<void>;
   deleteAcademyCredits(officeId: number): Promise<void>;
+  deleteCoinAwards(officeId: number): Promise<void>;
   deleteRealConversations(officeId: number): Promise<void>;
   detachPaidOfficeSignups(officeId: number): Promise<void>;
   detachBillingEvents(officeId: number): Promise<void>;
@@ -81,6 +82,7 @@ export interface OfficeCascade {
 export async function runOfficeCascade(officeId: number, ops: OfficeCascade): Promise<void> {
   await ops.deleteUsers(officeId);
   await ops.deleteAcademyCredits(officeId);
+  await ops.deleteCoinAwards(officeId);
   await ops.deleteRealConversations(officeId);
   await ops.detachPaidOfficeSignups(officeId);
   await ops.detachBillingEvents(officeId);

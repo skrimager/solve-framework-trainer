@@ -5,6 +5,7 @@ import type { Server } from "node:http";
 
 import { storage } from "./storage";
 import { registerManagerRosterRoutes } from "./routes";
+import { USER_SESSION_COOKIE, signUserSession } from "./userSession";
 import type { User, Session, Scenario } from "@shared/schema";
 
 // ===========================================================================
@@ -104,10 +105,10 @@ describe("manager roster HTTP endpoints", () => {
 
     sessions = [
       // Alice: 3 qualifying beginner sessions (90,88,86), 1 sub-bar (70), 1 in-progress.
-      mkSession({ id: 100, userId: 3, scenarioId: 10, score: 90, completedAt: "2026-03-01T00:00:00.000Z" }),
-      mkSession({ id: 101, userId: 3, scenarioId: 10, score: 88, completedAt: "2026-03-02T00:00:00.000Z" }),
-      mkSession({ id: 102, userId: 3, scenarioId: 10, score: 86, completedAt: "2026-03-03T00:00:00.000Z" }),
-      mkSession({ id: 103, userId: 3, scenarioId: 10, score: 70, completedAt: "2026-03-04T00:00:00.000Z" }),
+      mkSession({ id: 100, userId: 3, scenarioId: 10, score: 90, createdAt: "2026-03-01T00:00:00.000Z", completedAt: "2026-03-01T00:00:00.000Z" }),
+      mkSession({ id: 101, userId: 3, scenarioId: 10, score: 88, createdAt: "2026-03-02T00:00:00.000Z", completedAt: "2026-03-02T00:00:00.000Z" }),
+      mkSession({ id: 102, userId: 3, scenarioId: 10, score: 86, createdAt: "2026-03-03T00:00:00.000Z", completedAt: "2026-03-03T00:00:00.000Z" }),
+      mkSession({ id: 103, userId: 3, scenarioId: 10, score: 70, createdAt: "2026-03-04T00:00:00.000Z", completedAt: "2026-03-04T00:00:00.000Z" }),
       mkSession({ id: 104, userId: 3, scenarioId: 10, score: null, status: "in_progress", completedAt: null, createdAt: "2026-03-05T00:00:00.000Z" }),
       // Bob: one completed advanced session.
       mkSession({ id: 200, userId: 4, scenarioId: 11, score: 92, completedAt: "2026-04-01T00:00:00.000Z" }),
@@ -117,6 +118,7 @@ describe("manager roster HTTP endpoints", () => {
 
     (storage as any).getUser = async (id: number) => users.find((u) => u.id === id);
     (storage as any).listScenarios = async () => scenarios;
+    (storage as any).getScenario = async (id: number) => scenarios.find((scenario) => scenario.id === id);
     (storage as any).listUsersByOffice = async (officeId: number) => users.filter((u) => u.officeId === officeId);
     (storage as any).listSessionsByOffice = async (officeId: number) => {
       const ids = users.filter((u) => u.officeId === officeId).map((u) => u.id);
@@ -127,9 +129,16 @@ describe("manager roster HTTP endpoints", () => {
     (storage as any).listIndustryCertificationsByUser = async () => [];
     (storage as any).listAcademyCreditsByOffice = async () => [];
     (storage as any).listAcademyCreditsByUser = async () => [];
+    (storage as any).listCoinAwardsByUser = async () => [];
+    (storage as any).getSession = async (id: number) => sessions.find((session) => session.id === id);
+    (storage as any).listCoachingMessagesBySession = async () => [];
     (storage as any).listRealConversationsByOffice = async () => [];
     (storage as any).listRealConversationsBySubjectRep = async () => [];
   });
+
+  function authHeaders(userId: number): HeadersInit {
+    return { cookie: `${USER_SESSION_COOKIE}=${encodeURIComponent(signUserSession(userId))}` };
+  }
 
   // --- Authorization ---
 
@@ -143,34 +152,45 @@ describe("manager roster HTTP endpoints", () => {
     assert.equal(res.status, 401);
   });
 
+  test("does not allow a requester id alone to read intelligence or a session drill-down", async () => {
+    const intelligence = await fetch(
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/intelligence?requesterId=1`,
+    );
+    const drillDown = await fetch(
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/sessions/100?requesterId=1`,
+    );
+    assert.equal(intelligence.status, 401);
+    assert.equal(drillDown.status, 401);
+  });
+
   test("rejects a plain consultant (not manager/qa)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=3`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=3`, { headers: authHeaders(3) });
     assert.equal(res.status, 403);
   });
 
   test("rejects a manager from a different office", async () => {
     const other = mkUser({ id: 6, role: "manager", officeId: OTHER_OFFICE_ID });
     users.push(other);
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=6`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=6`, { headers: authHeaders(6) });
     assert.equal(res.status, 403);
   });
 
   test("allows the office's own QA to view (shared manager/qa dashboard)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=2`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=2`, { headers: authHeaders(2) });
     assert.equal(res.status, 200);
   });
 
   // --- Roster contents ---
 
   test("returns only consultants of this office, excluding manager/qa and other offices", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const usernames = rows.map((r: any) => r.username).sort();
     assert.deepEqual(usernames, ["alice", "bob"]);
   });
 
   test("computes qualifying sessions at the consultant's current tier", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // 3 of Alice's beginner sessions cleared 85; the 70 and the in-progress do not.
@@ -179,7 +199,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("computes completed count and average score over scored sessions only", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // 4 completed (90,88,86,70); in-progress excluded. Avg = 334/4 = 83.5 -> 84.
@@ -188,7 +208,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("reports the most recent activity date", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const alice = rows.find((r: any) => r.username === "alice");
     // The in-progress session on 03-05 is the newest activity (uses createdAt).
@@ -196,7 +216,7 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("surfaces per-track certification status", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const bob = rows.find((r: any) => r.username === "bob");
     assert.equal(bob.currentLevel, "advanced");
@@ -207,7 +227,7 @@ describe("manager roster HTTP endpoints", () => {
 
   test("consultant with no sessions has null average and zero counts", async () => {
     users.push(mkUser({ id: 7, role: "consultant", username: "dave", displayName: "Dave D" }));
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants?requesterId=1`, { headers: authHeaders(1) });
     const rows = await res.json();
     const dave = rows.find((r: any) => r.username === "dave");
     assert.equal(dave.averageScore, null);
@@ -219,13 +239,13 @@ describe("manager roster HTTP endpoints", () => {
   // --- Detail endpoint ---
 
   test("detail returns the consultant summary plus session history newest-first", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`, { headers: authHeaders(1) });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.consultant.username, "alice");
-    assert.equal(body.sessions.length, 5);
-    // Newest first: the 03-05 in-progress session leads.
-    assert.equal(body.sessions[0].id, 104);
+    assert.equal(body.sessions.length, 4);
+    // Newest completed session first; active attempts do not enter the rolling history.
+    assert.equal(body.sessions[0].id, 103);
     assert.equal(body.sessions[0].scenarioTitle, "Kicking Tires");
     assert.equal(body.sessions[0].track, "consulting");
   });
@@ -235,7 +255,7 @@ describe("manager roster HTTP endpoints", () => {
       mkSession({ id: 105, userId: 3, scenarioId: 10, score: 80, rubricScores: '{"needsDiscovery":80}', completedAt: "2026-03-06T00:00:00.000Z" }),
       mkSession({ id: 106, userId: 3, scenarioId: 10, score: 80, rubricScores: "not json", completedAt: "2026-03-07T00:00:00.000Z" }),
     );
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=1`, { headers: authHeaders(1) });
     const body = await res.json();
     const good = body.sessions.find((s: any) => s.id === 105);
     const bad = body.sessions.find((s: any) => s.id === 106);
@@ -244,12 +264,73 @@ describe("manager roster HTTP endpoints", () => {
   });
 
   test("detail 404s for a user outside the office", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/5?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/5?requesterId=1`, { headers: authHeaders(1) });
     assert.equal(res.status, 404);
   });
 
   test("detail enforces the same manager/qa authorization", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=3`);
+    const res = await fetch(`${baseUrl}/api/offices/${OFFICE_ID}/consultants/3?requesterId=3`, { headers: authHeaders(3) });
     assert.equal(res.status, 403);
+  });
+
+  test("intelligence and a selected session drill-down return only the requested consultant's data", async () => {
+    const selected = sessions.find((session) => session.id === 100)!;
+    selected.transcript = JSON.stringify([
+      { role: "customer", content: "I need help.", timestamp: "2026-03-01T00:00:00.000Z" },
+      { role: "consultant", content: "Tell me more.", timestamp: "2026-03-01T00:01:00.000Z" },
+    ]);
+    selected.rubricScores = JSON.stringify({
+      needsDiscovery: 92,
+      objectionPrevention: 80,
+      trustBuilding: 76,
+      naturalClose: 74,
+      relationshipContinuity: 70,
+    });
+    selected.feedback = "Open with a broader discovery question.";
+    (storage as any).listCoinAwardsByUser = async () => [
+      {
+        id: 1,
+        userId: 3,
+        officeId: OFFICE_ID,
+        track: "consulting",
+        tier: "bronze",
+        earnedAt: "2026-03-01T00:00:00.000Z",
+      },
+    ];
+    (storage as any).listCoachingMessagesBySession = async () => [
+      {
+        id: 9,
+        sessionId: 100,
+        userId: 3,
+        role: "coach",
+        content: "Try a follow-up question next.",
+        cleared: false,
+        createdAt: "2026-03-01T00:02:00.000Z",
+      },
+    ];
+
+    const intelligence = await fetch(
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/intelligence?requesterId=1`,
+      { headers: authHeaders(1) },
+    );
+    assert.equal(intelligence.status, 200);
+    const intelligenceBody = await intelligence.json();
+    assert.equal(intelligenceBody.rank.outOf, 2);
+    assert.equal(intelligenceBody.strengths.consulting.sampleSize, 4);
+    assert.equal(intelligenceBody.coins.consulting[0].tier, "bronze");
+    assert.equal(intelligenceBody.certifications.consulting.certified, false);
+    assert.deepEqual(intelligenceBody.academyCredits, []);
+
+    const drillDown = await fetch(
+      `${baseUrl}/api/offices/${OFFICE_ID}/consultants/3/sessions/100?requesterId=1`,
+      { headers: authHeaders(1) },
+    );
+    assert.equal(drillDown.status, 200);
+    const drillDownBody = await drillDown.json();
+    assert.equal(drillDownBody.session.id, 100);
+    assert.equal(drillDownBody.session.transcript.length, 2);
+    assert.equal(drillDownBody.session.rubricScores.needsDiscovery, 92);
+    assert.equal(drillDownBody.session.feedback, "Open with a broader discovery question.");
+    assert.equal(drillDownBody.coachingMessages[0].content, "Try a follow-up question next.");
   });
 });

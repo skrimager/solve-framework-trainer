@@ -1,4 +1,4 @@
-import { pgTable, text, integer, boolean, serial, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, boolean, serial, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -302,6 +302,29 @@ export const academyCredits = pgTable("academy_credits", {
 export const insertAcademyCreditSchema = createInsertSchema(academyCredits).omit({ id: true });
 export type InsertAcademyCredit = z.infer<typeof insertAcademyCreditSchema>;
 export type AcademyCredit = typeof academyCredits.$inferSelect;
+
+// Durable advancement-achievement ledger. Unlike the old presentational tier
+// badges, these rows preserve when a consultant actually crossed each 5x85+
+// milestone. The compound unique index is the database backstop that makes a
+// re-run of the advancement check safe.
+export const coinAwards = pgTable(
+  "coin_awards",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id").notNull().references(() => users.id),
+    officeId: integer("office_id").notNull().references(() => offices.id),
+    track: text("track").notNull(), // 'consulting' | 'leadership'
+    tier: text("tier").notNull(), // 'bronze' | 'silver' | 'gold'
+    earnedAt: text("earned_at").notNull(),
+  },
+  (table) => ({
+    userTrackTierUnique: uniqueIndex("coin_awards_user_track_tier_unique").on(table.userId, table.track, table.tier),
+  }),
+);
+
+export const insertCoinAwardSchema = createInsertSchema(coinAwards).omit({ id: true });
+export type InsertCoinAward = z.infer<typeof insertCoinAwardSchema>;
+export type CoinAward = typeof coinAwards.$inferSelect;
 
 // A "Real Conversation Scoring" submission: a real (non-practice) discovery
 // conversation a rep pastes in to be scored against the same SOLVE rubric engine

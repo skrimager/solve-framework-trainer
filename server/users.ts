@@ -64,6 +64,7 @@ export interface UserCascade {
   deleteCertificationAttempts(userId: number): Promise<void>;
   deleteIndustryCertifications(userId: number): Promise<void>;
   deleteAcademyCredits(userId: number): Promise<void>;
+  deleteCoinAwards(userId: number): Promise<void>;
   deleteRealConversations(userId: number): Promise<void>;
   deleteMonthlyLifecycleEmails(userId: number): Promise<void>;
   deleteSessions(userId: number): Promise<void>;
@@ -75,6 +76,7 @@ export async function runUserCascade(userId: number, ops: UserCascade): Promise<
   await ops.deleteCertificationAttempts(userId);
   await ops.deleteIndustryCertifications(userId);
   await ops.deleteAcademyCredits(userId);
+  await ops.deleteCoinAwards(userId);
   await ops.deleteRealConversations(userId);
   await ops.deleteMonthlyLifecycleEmails(userId);
   await ops.deleteSessions(userId);
