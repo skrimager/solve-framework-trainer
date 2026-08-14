@@ -7,6 +7,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { apiRequest } from "@/lib/queryClient";
+import {
   Table,
   TableBody,
   TableCell,
@@ -84,6 +92,53 @@ type DetailSession = {
 type ConsultantDetail = {
   consultant: ConsultantSummary;
   sessions: DetailSession[];
+};
+
+type IntelligenceDimension = { key: string; label: string; average: number } | null;
+type TrackIntelligence = {
+  strength: IntelligenceDimension;
+  weakness: IntelligenceDimension;
+  sampleSize: number;
+};
+type CoinAward = { tier: "bronze" | "silver" | "gold"; earnedAt: string };
+type ConsultantIntelligence = {
+  rank: { position: number | null; outOf: number; averageScore: number | null; sampleSize: number };
+  strengths: { consulting: TrackIntelligence; leadership: TrackIntelligence };
+  coins: { consulting: CoinAward[]; leadership: CoinAward[] };
+  certifications: {
+    consulting: { certified: boolean; earnedAt: string | null };
+    leadership: { certified: boolean; earnedAt: string | null };
+  };
+  academyCredits: { level: number; amountCents: number; earnedAt: string }[];
+};
+type SessionIntelligence = {
+  session: {
+    id: number;
+    scenarioTitle: string;
+    scenarioVertical: string | null;
+    track: string;
+    status: string;
+    score: number | null;
+    createdAt: string;
+    completedAt: string | null;
+    transcript: { role?: string; content?: string }[];
+    rubricScores: Record<string, number> | null;
+    feedback: string | null;
+  };
+  coachingMessages: { id: number; role: string; content: string; createdAt: string }[];
+};
+
+const RUBRIC_LABELS: Record<string, string> = {
+  needsDiscovery: "Needs discovery (drill vs. the hole)",
+  objectionPrevention: "Objection prevention via early discovery",
+  trustBuilding: "Trust building",
+  naturalClose: "Natural, decision-focused close",
+  relationshipContinuity: "Relationship continuity / follow-up",
+  activeListening: "Active listening (let them fully vent)",
+  empathyAcknowledgment: "Empathy / acknowledged the feeling",
+  rootCauseDiscovery: "Root-cause discovery",
+  solutionVisualization: "Co-created the solution",
+  blamelessResolution: "Blameless resolution",
 };
 
 // A scored real (field) conversation as returned by the manager Field endpoint,
@@ -356,6 +411,132 @@ function IndustryTrackCard({ title, breakdown }: { title: string; breakdown: Ind
   );
 }
 
+function TrackIntelligenceCard({
+  title,
+  data,
+  coins,
+  certification,
+}: {
+  title: string;
+  data: TrackIntelligence;
+  coins: CoinAward[];
+  certification: { certified: boolean; earnedAt: string | null };
+}) {
+  const coinsByTier = new Map(coins.map((coin) => [coin.tier, coin]));
+  return (
+    <div className="rounded-lg border p-3 space-y-3" data-testid={`card-track-intelligence-${title.toLowerCase()}`}>
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="text-sm font-semibold">{title}</p>
+        <p className="text-xs text-muted-foreground">
+          based on last {data.sampleSize} {data.sampleSize === 1 ? "scenario" : "scenarios"}
+        </p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 text-sm">
+        <div>
+          <p className="text-xs text-muted-foreground">Strength</p>
+          <p className="font-medium">{data.strength ? `${data.strength.label} (${Math.round(data.strength.average)})` : "Not enough scored rubric data"}</p>
+        </div>
+        <div>
+          <p className="text-xs text-muted-foreground">Coaching focus</p>
+          <p className="font-medium">{data.weakness ? `${data.weakness.label} (${Math.round(data.weakness.average)})` : "Not enough scored rubric data"}</p>
+        </div>
+      </div>
+      <div>
+        <p className="text-xs text-muted-foreground">Coins earned</p>
+        <div className="mt-1 grid grid-cols-3 gap-1.5 text-xs">
+          {(["bronze", "silver", "gold"] as const).map((tier) => {
+            const coin = coinsByTier.get(tier);
+            return (
+              <div className="rounded border px-2 py-1.5 capitalize" key={tier} data-testid={`coin-${title.toLowerCase()}-${tier}`}>
+                <p className="font-medium">{tier}</p>
+                <p className="text-muted-foreground">{coin ? fmtDate(coin.earnedAt) : "Not earned"}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="text-sm">
+        <p className="text-xs text-muted-foreground">Certification</p>
+        <p className="font-medium">{certification.certified ? `Certified ${fmtDate(certification.earnedAt)}` : "In progress"}</p>
+      </div>
+    </div>
+  );
+}
+
+function SessionDetailModal({
+  detail,
+  isLoading,
+  open,
+  onOpenChange,
+}: {
+  detail: SessionIntelligence | undefined;
+  isLoading: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const session = detail?.session;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{session?.scenarioTitle ?? "Session detail"}</DialogTitle>
+          <DialogDescription>
+            {session ? `${session.track} · ${session.scenarioVertical ?? "No vertical"} · ${fmtDate(session.completedAt ?? session.createdAt)} · score ${session.score ?? "—"}` : "Loading the selected session"}
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <Skeleton className="h-64 rounded-lg" />}
+        {session && (
+          <div className="space-y-5" data-testid={`session-detail-${session.id}`}>
+            <section>
+              <h3 className="text-sm font-semibold">Rubric breakdown</h3>
+              {session.rubricScores ? (
+                <dl className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {Object.entries(session.rubricScores).map(([key, score]) => (
+                    <div key={key} className="rounded border px-3 py-2 text-sm">
+                      <dt className="text-muted-foreground">{RUBRIC_LABELS[key] ?? key}</dt>
+                      <dd className="font-semibold">{score}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : <p className="mt-1 text-sm text-muted-foreground">No rubric was recorded.</p>}
+            </section>
+            <section>
+              <h3 className="text-sm font-semibold">Narrative feedback</h3>
+              <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{session.feedback ?? "No narrative feedback was recorded."}</p>
+            </section>
+            <section>
+              <h3 className="text-sm font-semibold">Transcript</h3>
+              {session.transcript.length ? (
+                <div className="mt-2 space-y-2">
+                  {session.transcript.map((message, index) => (
+                    <div key={`${message.role ?? "message"}-${index}`} className="rounded border px-3 py-2 text-sm">
+                      <p className="text-xs font-semibold uppercase text-muted-foreground">{message.role ?? "Conversation"}</p>
+                      <p className="mt-1 whitespace-pre-wrap">{message.content ?? ""}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="mt-1 text-sm text-muted-foreground">No transcript was recorded.</p>}
+            </section>
+            <section>
+              <h3 className="text-sm font-semibold">SOLVE Coach thread</h3>
+              {detail?.coachingMessages.length ? (
+                <div className="mt-2 space-y-2">
+                  {detail.coachingMessages.map((message) => (
+                    <div key={message.id} className="rounded border px-3 py-2 text-sm">
+                      <p className="text-xs font-semibold uppercase text-muted-foreground">{message.role === "coach" ? "SOLVE Coach" : "Trainee"} · {fmtDate(message.createdAt)}</p>
+                      <p className="mt-1 whitespace-pre-wrap">{message.content}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="mt-1 text-sm text-muted-foreground">No active coaching messages for this session.</p>}
+            </section>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ConsultantDetailPanel({
   officeId,
   requesterId,
@@ -374,6 +555,7 @@ function ConsultantDetailPanel({
   // Practice = existing discovery-practice sessions; Field = scored real
   // conversations. Practice is the default so the panel opens unchanged.
   const [view, setView] = useState<"practice" | "field">("practice");
+  const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
 
   const { data: fetched, isLoading: fetchedLoading } = useQuery<ConsultantDetail>({
     queryKey: [`/api/offices/${officeId}/consultants/${userId}?requesterId=${requesterId}`],
@@ -387,6 +569,29 @@ function ConsultantDetailPanel({
   const { data: fieldRows, isLoading: fieldLoading } = useQuery<FieldConversation[]>({
     queryKey: [`/api/offices/${officeId}/consultants/${userId}/real-conversations?requesterId=${requesterId}`],
     enabled: !readOnlyDetail && view === "field",
+  });
+
+  const { data: intelligence, isLoading: intelligenceLoading } = useQuery<ConsultantIntelligence>({
+    queryKey: ["consultant-intelligence", officeId, userId, requesterId],
+    enabled: !readOnlyDetail,
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/offices/${officeId}/consultants/${userId}/intelligence?requesterId=${requesterId}`,
+      );
+      return res.json();
+    },
+  });
+  const { data: sessionDetail, isLoading: sessionDetailLoading } = useQuery<SessionIntelligence>({
+    queryKey: ["consultant-session-intelligence", officeId, userId, selectedSessionId, requesterId],
+    enabled: !readOnlyDetail && selectedSessionId !== null,
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/offices/${officeId}/consultants/${userId}/sessions/${selectedSessionId}?requesterId=${requesterId}`,
+      );
+      return res.json();
+    },
   });
 
   function submitForRep() {
@@ -431,6 +636,48 @@ function ConsultantDetailPanel({
         <div className="mt-4 grid gap-4 sm:grid-cols-2" data-testid="industry-breakdown">
           <IndustryTrackCard title="Consulting" breakdown={data.consultant.industries.consulting} />
           <IndustryTrackCard title="Conflict Management" breakdown={data.consultant.industries.leadership} />
+        </div>
+      )}
+
+      {!readOnlyDetail && (
+        <div className="mt-4 space-y-3" data-testid="consultant-intelligence">
+          {intelligenceLoading && <Skeleton className="h-48 rounded-lg" />}
+          {intelligence && (
+            <>
+              <div className="rounded-lg border px-3 py-2">
+                <p className="text-xs text-muted-foreground">Rolling last-20 rank</p>
+                <p className="text-sm font-semibold" data-testid="text-rolling-rank">
+                  {intelligence.rank.position ? `#${intelligence.rank.position} of ${intelligence.rank.outOf}` : "Unranked"} · avg {intelligence.rank.averageScore === null ? "—" : Math.round(intelligence.rank.averageScore)} · {intelligence.rank.sampleSize} scored
+                </p>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-2">
+                <TrackIntelligenceCard
+                  title="Consulting"
+                  data={intelligence.strengths.consulting}
+                  coins={intelligence.coins.consulting}
+                  certification={intelligence.certifications.consulting}
+                />
+                <TrackIntelligenceCard
+                  title="Leadership"
+                  data={intelligence.strengths.leadership}
+                  coins={intelligence.coins.leadership}
+                  certification={intelligence.certifications.leadership}
+                />
+              </div>
+              <div className="rounded-lg border p-3">
+                <p className="text-sm font-semibold">Academy credits</p>
+                {intelligence.academyCredits.length ? (
+                  <ul className="mt-1 space-y-1 text-sm">
+                    {intelligence.academyCredits.map((credit) => (
+                      <li key={`${credit.level}-${credit.earnedAt}`}>
+                        Level {credit.level} · ${(credit.amountCents / 100).toFixed(0)} · {fmtDate(credit.earnedAt)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="mt-1 text-sm text-muted-foreground">No academy credits earned yet.</p>}
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -481,8 +728,13 @@ function ConsultantDetailPanel({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.sessions.map((s) => (
-                  <TableRow key={s.id} data-testid={`row-detail-session-${s.id}`}>
+                {data.sessions.slice(0, 20).map((s) => (
+                  <TableRow
+                    key={s.id}
+                    onClick={() => !readOnlyDetail && setSelectedSessionId(s.id)}
+                    className={readOnlyDetail ? undefined : "cursor-pointer hover-elevate"}
+                    data-testid={`row-detail-session-${s.id}`}
+                  >
                     <TableCell className="font-medium">{s.scenarioTitle}</TableCell>
                     <TableCell className="capitalize text-muted-foreground">{s.track}</TableCell>
                     <TableCell className="text-right">{s.score ?? "-"}</TableCell>
@@ -553,6 +805,16 @@ function ConsultantDetailPanel({
             </Table>
           )}
         </div>
+      )}
+      {!readOnlyDetail && (
+        <SessionDetailModal
+          detail={sessionDetail}
+          isLoading={sessionDetailLoading}
+          open={selectedSessionId !== null}
+          onOpenChange={(open) => {
+            if (!open) setSelectedSessionId(null);
+          }}
+        />
       )}
     </div>
   );
