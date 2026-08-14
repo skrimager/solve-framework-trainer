@@ -81,6 +81,7 @@ describe("runOfficeCascade", () => {
     await runOfficeCascade(3, {
       deleteUsers: async () => { order.push("users"); },
       deleteAcademyCredits: async () => { order.push("credits"); },
+      deleteCoinAwards: async () => { order.push("coins"); },
       deleteRealConversations: async () => { order.push("real-convos"); },
       detachPaidOfficeSignups: async () => { order.push("detach-signups"); },
       detachBillingEvents: async () => { order.push("detach-billing"); },
@@ -89,6 +90,7 @@ describe("runOfficeCascade", () => {
     assert.deepEqual(order, [
       "users",
       "credits",
+      "coins",
       "real-convos",
       "detach-signups",
       "detach-billing",

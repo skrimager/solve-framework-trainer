@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, industryCertifications, academyCredits, coinAwards, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, CoinAward, InsertCoinAward, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, or, desc, lte, isNull } from "drizzle-orm";
@@ -41,6 +41,9 @@ function userCascadeOps(tx: Tx, userId: number): UserCascade {
     },
     deleteAcademyCredits: async () => {
       await tx.delete(academyCredits).where(eq(academyCredits.userId, userId));
+    },
+    deleteCoinAwards: async () => {
+      await tx.delete(coinAwards).where(eq(coinAwards.userId, userId));
     },
     deleteRealConversations: async () => {
       await tx
@@ -173,6 +176,8 @@ export interface IStorage {
   listAcademyCreditsByUser(userId: number): Promise<AcademyCredit[]>;
   listAcademyCreditsByOffice(officeId: number): Promise<AcademyCredit[]>;
   listAllAcademyCredits(): Promise<AcademyCredit[]>;
+  insertCoinAwardIfAbsent(award: InsertCoinAward): Promise<boolean>;
+  listCoinAwardsByUser(userId: number): Promise<CoinAward[]>;
 
   // Public "Free Voice Demo". Signups are keyed by email (one row per email, holds
   // verification-code state + the all-time usage counter). Sessions are anonymous
@@ -381,6 +386,9 @@ export class DatabaseStorage implements IStorage {
         },
         deleteAcademyCredits: async () => {
           await tx.delete(academyCredits).where(eq(academyCredits.officeId, id));
+        },
+        deleteCoinAwards: async () => {
+          await tx.delete(coinAwards).where(eq(coinAwards.officeId, id));
         },
         deleteRealConversations: async () => {
           await tx.delete(realConversations).where(eq(realConversations.officeId, id));
@@ -753,6 +761,22 @@ export class DatabaseStorage implements IStorage {
 
   async listAllAcademyCredits(): Promise<AcademyCredit[]> {
     return db.select().from(academyCredits);
+  }
+
+  // --- Performance coin award ledger ---
+  async insertCoinAwardIfAbsent(award: InsertCoinAward): Promise<boolean> {
+    const rows = await db
+      .insert(coinAwards)
+      .values(award)
+      .onConflictDoNothing({
+        target: [coinAwards.userId, coinAwards.track, coinAwards.tier],
+      })
+      .returning({ id: coinAwards.id });
+    return rows.length === 1;
+  }
+
+  async listCoinAwardsByUser(userId: number): Promise<CoinAward[]> {
+    return db.select().from(coinAwards).where(eq(coinAwards.userId, userId)).orderBy(coinAwards.earnedAt);
   }
 
   async getDemoSignupByEmail(email: string): Promise<DemoSignup | undefined> {

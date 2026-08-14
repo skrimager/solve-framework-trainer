@@ -52,7 +52,9 @@ describe("admin session token", () => {
   test("rejects a tampered token", () => {
     const token = signAdminSession(1, "a");
     assert.equal(verifyAdminSession(token + "x"), null);
-    assert.equal(verifyAdminSession(token.replace(/.$/, "0")), null);
+    // Always mutate the final character. A literal "0" can be a no-op when a
+    // base64url signature already happens to end in zero.
+    assert.equal(verifyAdminSession(token.replace(/.$/, token.endsWith("0") ? "1" : "0")), null);
   });
 
   test("rejects an expired token", () => {

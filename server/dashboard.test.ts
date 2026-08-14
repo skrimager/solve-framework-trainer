@@ -26,6 +26,7 @@ import {
   resolveDashboardPeriod,
 } from "./routes";
 import type { User, Session, Scenario } from "@shared/schema";
+import { USER_SESSION_COOKIE, signUserSession } from "./userSession";
 
 // ===========================================================================
 // Manager command-center dashboard analytics. Follows roster.test.ts: unit-test
@@ -248,23 +249,29 @@ describe("manager dashboard HTTP endpoint", () => {
     (storage as any).listAcademyCreditsByOffice = async () => [];
   });
 
-  test("requires a requesterId", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats`);
-    assert.equal(res.status, 400);
-  });
+  function dashboardFetch(url: string, init?: RequestInit, userId = 1) {
+    return fetch(url, {
+      ...init,
+      headers: {
+        ...(init?.headers ?? {}),
+        cookie: `${USER_SESSION_COOKIE}=${encodeURIComponent(signUserSession(userId))}`,
+      },
+    });
+  }
 
-  test("rejects an unknown requester", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=999`);
+  test("rejects a caller with no verified session even when it supplies a manager requesterId", async () => {
+
+    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
     assert.equal(res.status, 401);
   });
 
   test("rejects a plain consultant", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=3`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`, undefined, 3);
     assert.equal(res.status, 403);
   });
 
   test("allows the office manager and returns aggregates", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.kpis.consultantCount, 3);
@@ -274,7 +281,7 @@ describe("manager dashboard HTTP endpoint", () => {
 
   test("rejects an office without the Manager Dashboard add-on", async () => {
     (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     assert.equal(res.status, 403);
   });
 
@@ -283,7 +290,7 @@ describe("manager dashboard HTTP endpoint", () => {
     // dashboard add-on (managerItemId null). Its demo manager must still get 200.
     users.find((u) => u.id === 1)!.isDemoAccount = true;
     (storage as any).getOffice = async (id: number) => ({ id, managerItemId: null });
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.kpis.consultantCount, 3);
@@ -291,7 +298,7 @@ describe("manager dashboard HTTP endpoint", () => {
   });
 
   test("omitting since/until falls back to the historical trailing 7-day window", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.period.days, 7);
@@ -303,8 +310,8 @@ describe("manager dashboard HTTP endpoint", () => {
   test("an explicit since/until narrows the period and scopes practiceSessionsThisPeriod", async () => {
     // Fixtures' completed sessions land 2026-03-01..03. A since/until window
     // covering only 2026-03-01 should see just Alice's first session (id 100).
-    const res = await fetch(
-      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-stats?since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
     );
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -313,19 +320,19 @@ describe("manager dashboard HTTP endpoint", () => {
   });
 
   test("a wider since/until captures more sessions than the 7-day default", async () => {
-    const wide = await fetch(
-      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    const wide = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-stats?since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
     );
     const wideBody = await wide.json();
-    const narrow = await fetch(
-      `${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
+    const narrow = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-stats?since=2026-03-01T00:00:00.000Z&until=2026-03-01T23:59:59.999Z`,
     );
     const narrowBody = await narrow.json();
     assert.ok(wideBody.kpis.practiceSessionsThisPeriod >= narrowBody.kpis.practiceSessionsThisPeriod);
   });
 
   test("an unparseable since falls back to the default 7-day window instead of erroring", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1&since=not-a-date`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats?since=not-a-date`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.period.days, 7);
@@ -333,7 +340,7 @@ describe("manager dashboard HTTP endpoint", () => {
   });
 
   test("returns the office's earliest session timestamp for the client's all-time preset", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     const body = await res.json();
     // Fixtures' earliest session (by createdAt) is id 100 on 2026-03-01.
     assert.equal(body.earliestSessionAt, "2026-03-01T00:00:00.000Z");
@@ -341,7 +348,7 @@ describe("manager dashboard HTTP endpoint", () => {
 
   test("an office with no sessions yet returns a null earliestSessionAt", async () => {
     sessions.length = 0;
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-stats?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-stats`);
     const body = await res.json();
     assert.equal(body.earliestSessionAt, null);
   });
@@ -908,13 +915,23 @@ describe("command center + widget-config HTTP endpoints", () => {
     (storage as any).getScenario = async (id: number) => scenarios.find((s) => s.id === id);
   });
 
+  function dashboardFetch(url: string, init?: RequestInit, userId = 1) {
+    return fetch(url, {
+      ...init,
+      headers: {
+        ...(init?.headers ?? {}),
+        cookie: `${USER_SESSION_COOKIE}=${encodeURIComponent(signUserSession(userId))}`,
+      },
+    });
+  }
+
   test("GET dashboard-command-center requires manager/qa role", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=3`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-command-center`, undefined, 3);
     assert.equal(res.status, 403);
   });
 
   test("GET dashboard-command-center returns widget data plus the default widget config", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-command-center`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.ok(body.teamHealth);
@@ -924,8 +941,8 @@ describe("command center + widget-config HTTP endpoints", () => {
   test("an explicit since/until makes the performance-over-time series span the full selected range, not just 7 days", async () => {
     // Fixtures' sessions run 2026-03-01..04; a since/until spanning Jan-Apr
     // must produce far more than the old hardcoded 8-day (7-day + today) series.
-    const res = await fetch(
-      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center?since=2026-01-01T00:00:00.000Z&until=2026-04-01T00:00:00.000Z`,
     );
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -933,31 +950,31 @@ describe("command center + widget-config HTTP endpoints", () => {
   });
 
   test("a narrow since/until still returns a day-by-day series clipped to that exact range", async () => {
-    const res = await fetch(
-      `${baseUrl}/api/manager/dashboard-command-center?requesterId=1&since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center?since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
     );
     const body = await res.json();
     assert.equal(body.performanceOverTime.length, 2);
   });
 
   test("omitting since/until keeps the old 7-day-trailing conversations sparkline length", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-command-center?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-command-center`);
     const body = await res.json();
     assert.equal(body.conversations.sparkline.length, 8); // periodSince..now inclusive, UTC days
   });
 
   test("GET dashboard-widget-config returns saved defaults when nothing is stored", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(body.widgetConfig, defaultDashboardWidgetConfig());
   });
 
   test("PUT dashboard-widget-config persists a toggle and GET reflects it", async () => {
-    const putRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+    const putRes = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requesterId: 1, widgetConfig: { alerts: false, liveFeed: false } }),
+      body: JSON.stringify({ widgetConfig: { alerts: false, liveFeed: false } }),
     });
     assert.equal(putRes.status, 200);
     const putBody = await putRes.json();
@@ -965,7 +982,7 @@ describe("command center + widget-config HTTP endpoints", () => {
     assert.equal(putBody.widgetConfig.liveFeed, false);
     assert.equal(putBody.widgetConfig.teamHealth, true);
 
-    const getRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config?requesterId=1`);
+    const getRes = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`);
     const getBody = await getRes.json();
     assert.equal(getBody.widgetConfig.alerts, false);
     assert.equal(officeRecord.dashboardWidgetConfig, JSON.stringify(putBody.widgetConfig));
@@ -973,10 +990,10 @@ describe("command center + widget-config HTTP endpoints", () => {
 
   test("PUT dashboard-widget-config merges onto the existing saved config instead of overwriting it", async () => {
     officeRecord.dashboardWidgetConfig = JSON.stringify({ ...defaultDashboardWidgetConfig(), alerts: false });
-    const putRes = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+    const putRes = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requesterId: 1, widgetConfig: { liveFeed: false } }),
+      body: JSON.stringify({ widgetConfig: { liveFeed: false } }),
     });
     const putBody = await putRes.json();
     assert.equal(putBody.widgetConfig.alerts, false, "previously saved toggle survives an unrelated PUT");
@@ -984,30 +1001,30 @@ describe("command center + widget-config HTTP endpoints", () => {
   });
 
   test("PUT dashboard-widget-config rejects a non-manager", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requesterId: 3, widgetConfig: { alerts: false } }),
-    });
+      body: JSON.stringify({ widgetConfig: { alerts: false } }),
+    }, 3);
     assert.equal(res.status, 403);
   });
 
   test("PUT dashboard-widget-config rejects a malformed body", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
+    const res = await dashboardFetch(`${baseUrl}/api/manager/dashboard-widget-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requesterId: 1, widgetConfig: "nope" }),
+      body: JSON.stringify({ widgetConfig: "nope" }),
     });
     assert.equal(res.status, 400);
   });
 
   test("GET manager/session/:id requires manager/qa role", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=3`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/session/100`, undefined, 3);
     assert.equal(res.status, 403);
   });
 
   test("GET manager/session/:id returns full detail for a session in the requester's own office", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/session/100`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.consultantName, "Alice A");
@@ -1026,12 +1043,12 @@ describe("command center + widget-config HTTP endpoints", () => {
     (storage as any).getOffice = async (id: number) =>
       id === officeRecord.id ? officeRecord : id === OTHER_OFFICE_ID ? { id: OTHER_OFFICE_ID, managerItemId: "si_dash_2" } : undefined;
 
-    const res = await fetch(`${baseUrl}/api/manager/session/100?requesterId=900`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/session/100`, undefined, 900);
     assert.equal(res.status, 404);
   });
 
   test("GET manager/session/:id 404s for a session id that does not exist", async () => {
-    const res = await fetch(`${baseUrl}/api/manager/session/999999?requesterId=1`);
+    const res = await dashboardFetch(`${baseUrl}/api/manager/session/999999`);
     assert.equal(res.status, 404);
   });
 });

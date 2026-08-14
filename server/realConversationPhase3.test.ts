@@ -13,6 +13,7 @@ import {
 } from "./realConversationCap";
 import type { RealConversation, RubricScores } from "@shared/schema";
 import type { RealConversationScorer } from "./realConversations";
+import { USER_SESSION_COOKIE, signUserSession } from "./userSession";
 
 // ===========================================================================
 // Phase 3: monthly per-rep cap, manager-submits-on-behalf, rep visibility of
@@ -155,6 +156,10 @@ describe("real conversation Phase 3 routes", () => {
     (storage as any).listRealConversationsBySubjectRep = async (repId: number) =>
       created.filter((r) => r.subjectRepUserId === repId).slice().reverse();
   });
+
+  function authHeaders(userId: number): HeadersInit {
+    return { cookie: `${USER_SESSION_COOKIE}=${encodeURIComponent(signUserSession(userId))}` };
+  }
 
   // Seed `n` counted submissions this month for a given rep.
   function seedCap(subjectRepUserId: number, n: number) {
@@ -323,7 +328,7 @@ describe("real conversation Phase 3 routes", () => {
 
   test("Field endpoint returns a rep's real conversations with attribution", async () => {
     await post({ userId: 1, subjectRepUserId: 2, submissionType: "text_chat", rawTranscript: "Customer: hi\nMe: a", consentAccepted: true });
-    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations`, { headers: authHeaders(1) });
     const rows = await res.json();
     assert.equal(res.status, 200);
     assert.equal(rows.length, 1);
@@ -332,17 +337,17 @@ describe("real conversation Phase 3 routes", () => {
   });
 
   test("Field endpoint rejects a manager from another office (403)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations?requesterId=4`);
+    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations`, { headers: authHeaders(4) });
     assert.equal(res.status, 403);
   });
 
   test("Field endpoint 404s for a rep outside the office", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/1/consultants/5/real-conversations?requesterId=1`);
+    const res = await fetch(`${baseUrl}/api/offices/1/consultants/5/real-conversations`, { headers: authHeaders(1) });
     assert.equal(res.status, 404);
   });
 
   test("Field endpoint rejects a plain consultant (403)", async () => {
-    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations?requesterId=3`);
+    const res = await fetch(`${baseUrl}/api/offices/1/consultants/2/real-conversations`, { headers: authHeaders(3) });
     assert.equal(res.status, 403);
   });
 });

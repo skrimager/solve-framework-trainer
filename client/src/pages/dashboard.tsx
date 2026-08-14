@@ -58,7 +58,7 @@ import type { DateRange } from "react-day-picker";
 import { format as dateFnsFormat } from "date-fns";
 import { ConsultantRoster } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { verticalLabel } from "@/lib/verticals";
 import { planForSeatCount } from "@shared/pricing";
@@ -419,7 +419,7 @@ export default function Dashboard() {
   });
 
   const { data: stats, isLoading: statsLoading, isError: statsError } = useQuery<DashboardStats>({
-    queryKey: [`/api/manager/dashboard-stats?requesterId=${user?.id}&since=${sinceParam}&until=${untilParam}`],
+    queryKey: [`/api/manager/dashboard-stats?since=${sinceParam}&until=${untilParam}`],
     enabled: !!user,
   });
 
@@ -427,7 +427,7 @@ export default function Dashboard() {
   // merged into dashboard-stats) so the original endpoint/response shape is
   // never touched. Same 403-on-no-add-on behavior as dashboard-stats.
   const { data: extras, isLoading: extrasLoading, isError: extrasError } = useQuery<CommandCenterExtras>({
-    queryKey: [`/api/manager/dashboard-command-center?requesterId=${user?.id}&since=${sinceParam}&until=${untilParam}`],
+    queryKey: [`/api/manager/dashboard-command-center?since=${sinceParam}&until=${untilParam}`],
     enabled: !!user,
   });
 
@@ -523,7 +523,9 @@ export default function Dashboard() {
               variant="ghost"
               size="icon"
               className="text-white/70 hover:text-white"
-              onClick={() => {
+              onClick={async () => {
+                await apiRequest("POST", "/api/logout").catch(() => undefined);
+                queryClient.clear();
                 setUser(null);
                 navigate("/command-center");
               }}
@@ -1239,7 +1241,7 @@ function fmtFullDate(iso: string | null): string {
 function SessionDetailModal({ sessionId, onClose }: { sessionId: number | null; onClose: () => void }) {
   const { user } = useAuth();
   const { data, isLoading, isError } = useQuery<ManagerSessionDetail>({
-    queryKey: [`/api/manager/session/${sessionId}?requesterId=${user?.id}`],
+    queryKey: [`/api/manager/session/${sessionId}`],
     enabled: sessionId !== null && !!user,
   });
 
@@ -1686,12 +1688,12 @@ function TeamSection({
     <div className="space-y-6">
       {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
       {isManager && office && officeActive(office) && userId != null && (
-        <EmailInviteCard userId={userId} officeName={office.name} />
+        <EmailInviteCard officeName={office.name} />
       )}
       {userId != null && officeId != null && (
         <div className="rounded-xl border overflow-hidden" style={{ borderColor: BORDER }}>
           <div className="[&_*]:!text-inherit">
-            <ConsultantRoster officeId={officeId} requesterId={userId} />
+            <ConsultantRoster officeId={officeId} />
           </div>
         </div>
       )}
@@ -1817,28 +1819,27 @@ function SettingsSection({
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery<{ widgetConfig: Record<string, boolean> }>({
-    queryKey: [`/api/manager/dashboard-widget-config?requesterId=${userId}`],
+    queryKey: ["/api/manager/dashboard-widget-config"],
     enabled: !!userId,
   });
 
   const updateWidget = useMutation({
     mutationFn: async (patch: Record<string, boolean>) => {
       const res = await apiRequest("PUT", "/api/manager/dashboard-widget-config", {
-        requesterId: userId,
         widgetConfig: patch,
       });
       return res.json() as Promise<{ widgetConfig: Record<string, boolean> }>;
     },
     onSuccess: (result) => {
-      queryClient.setQueryData([`/api/manager/dashboard-widget-config?requesterId=${userId}`], result);
+      queryClient.setQueryData(["/api/manager/dashboard-widget-config"], result);
       // The command-center query key now also carries since/until, so match
-      // by prefix (any cached range for this requester) rather than an exact
+      // by prefix (any cached date range) rather than an exact
       // key, otherwise switching date ranges would leave stale widget config
       // cached under the previously active range's key.
       queryClient.invalidateQueries({
         predicate: (query) => {
           const key = query.queryKey[0];
-          return typeof key === "string" && key.startsWith(`/api/manager/dashboard-command-center?requesterId=${userId}`);
+          return typeof key === "string" && key.startsWith("/api/manager/dashboard-command-center?");
         },
       });
     },
@@ -1918,13 +1919,13 @@ function InviteCodeCard({ office }: { office: Office }) {
 // code above). Sends an enrollment email per address via
 // POST /api/manager/enroll-consultants, which returns which addresses were sent
 // and which failed so we can report both back to the manager.
-function EmailInviteCard({ userId, officeName }: { userId: number; officeName: string }) {
+function EmailInviteCard({ officeName }: { officeName: string }) {
   const { toast } = useToast();
   const [raw, setRaw] = useState("");
 
   const enroll = useMutation({
     mutationFn: async (emails: string[]) => {
-      const res = await apiRequest("POST", "/api/manager/enroll-consultants", { userId, emails });
+      const res = await apiRequest("POST", "/api/manager/enroll-consultants", { emails });
       return res.json() as Promise<{ sent: string[]; failed: string[] }>;
     },
     onSuccess: ({ sent, failed }) => {
