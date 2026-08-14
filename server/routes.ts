@@ -124,7 +124,7 @@ import {
   type OfficeArchiveView,
 } from "./offices";
 import { UserDeleteBlockedError } from "./users";
-import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores } from "@shared/schema";
+import { transcriptMessageSchema, type TranscriptMessage, type User, type Contact, type Session, type Scenario, type RealConversation, type RubricScores, type AlertAcknowledgement } from "@shared/schema";
 import { seed } from "./seed";
 import { isStripeConfigured, getStripe, STRIPE_WEBHOOK_SECRET, APP_URL } from "./stripe";
 import {
@@ -4639,6 +4639,99 @@ export function computeAlerts(
   return alerts;
 }
 
+export type AlertReason = "inactive" | "lowScore";
+export type CommandCenterAlert = { id: number; displayName: string; reasons: AlertReason[] };
+
+// Removes only the acknowledged reason from an alert, rather than the whole
+// consultant row. One consultant can still need attention for a separate,
+// unacknowledged condition. The session check makes the function safe even if
+// a caller supplies acknowledgement rows that have not already been filtered
+// by storage.
+export function filterAcknowledgedAlerts(
+  alerts: CommandCenterAlert[],
+  sessionsByUser: Map<number, Session[]>,
+  acknowledgements: AlertAcknowledgement[],
+): CommandCenterAlert[] {
+  const acknowledgementIsActive = (acknowledgement: AlertAcknowledgement): boolean => {
+    const newerCompleted = (sessionsByUser.get(acknowledgement.consultantId) ?? []).some((session) => {
+      if (session.status !== "completed" || !session.completedAt) return false;
+      if (session.completedAt <= acknowledgement.acknowledgedAt) return false;
+      return acknowledgement.reason === "inactive" || session.score !== null;
+    });
+    return !newerCompleted;
+  };
+
+  const activeKeys = new Set(
+    acknowledgements
+      .filter(acknowledgementIsActive)
+      .map((acknowledgement) => `${acknowledgement.consultantId}:${acknowledgement.reason}`),
+  );
+
+  return alerts
+    .map((alert) => ({
+      ...alert,
+      reasons: alert.reasons.filter((reason) => !activeKeys.has(`${alert.id}:${reason}`)),
+    }))
+    .filter((alert) => alert.reasons.length > 0);
+}
+
+export function completedSessionsInPeriod(officeSessions: Session[], period: DashboardPeriod): Session[] {
+  return officeSessions.filter(
+    (session) =>
+      session.status === "completed" &&
+      !!session.completedAt &&
+      new Date(session.completedAt) >= period.since &&
+      new Date(session.completedAt) <= period.until,
+  );
+}
+
+export function buildConversationDrilldown(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  period: DashboardPeriod,
+) {
+  const userById = new Map(officeUsers.map((user) => [user.id, user]));
+  const scenarioById = new Map(allScenarios.map((scenario) => [scenario.id, scenario]));
+
+  return completedSessionsInPeriod(officeSessions, period)
+    .map((session) => ({
+      consultantName: userById.get(session.userId)?.displayName ?? "Unknown consultant",
+      scenarioTitle: scenarioById.get(session.scenarioId)?.title ?? "Unknown scenario",
+      score: session.score,
+      completedAt: session.completedAt as string,
+      sessionId: session.id,
+    }))
+    .sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+}
+
+export function buildCertificationDrilldown(officeUsers: User[], period: DashboardPeriod) {
+  const inPeriod = (value: string | null) =>
+    !!value && new Date(value) >= period.since && new Date(value) <= period.until;
+
+  return officeUsers
+    .filter((user) => user.role === "consultant")
+    .flatMap((user) => {
+      const certifications: { consultantName: string; track: "consulting" | "leadership"; certifiedAt: string }[] = [];
+      if (inPeriod(user.consultingCertifiedAt)) {
+        certifications.push({
+          consultantName: user.displayName,
+          track: "consulting",
+          certifiedAt: user.consultingCertifiedAt as string,
+        });
+      }
+      if (inPeriod(user.leadershipCertifiedAt)) {
+        certifications.push({
+          consultantName: user.displayName,
+          track: "leadership",
+          certifiedAt: user.leadershipCertifiedAt as string,
+        });
+      }
+      return certifications;
+    })
+    .sort((a, b) => b.certifiedAt.localeCompare(a.certifiedAt));
+}
+
 // Live Feed: a chronological stream of real recent events a manager would
 // want to see at a glance — certifications earned, high-scoring completed
 // sessions, and any completed session in general — each with a real
@@ -4885,6 +4978,7 @@ export function buildCommandCenterExtras(
   allScenarios: Scenario[],
   now: Date = new Date(),
   period: DashboardPeriod = resolveDashboardPeriod(undefined, undefined, now),
+  alertAcknowledgements: AlertAcknowledgement[] = [],
 ) {
   const consultants = officeUsers.filter((u) => u.role === "consultant");
   const sessionsByUser = groupSessionsByUser(officeSessions);
@@ -4899,7 +4993,7 @@ export function buildCommandCenterExtras(
     !!iso && new Date(iso) >= priorPeriodSince && new Date(iso) < periodSince;
 
   const sessionsThisPeriod = officeSessions.filter((s) => inPeriod(s.completedAt ?? (s.status !== "completed" ? s.createdAt : null)));
-  const completedThisPeriod = officeSessions.filter((s) => s.status === "completed" && inPeriod(s.completedAt));
+  const completedThisPeriod = completedSessionsInPeriod(officeSessions, period);
   const completedPriorPeriod = officeSessions.filter((s) => s.status === "completed" && inPriorPeriod(s.completedAt));
   const startedThisPeriod = officeSessions.filter((s) => inPeriod(s.createdAt));
   const startedPriorPeriod = officeSessions.filter((s) => inPriorPeriod(s.createdAt));
@@ -4985,7 +5079,11 @@ export function buildCommandCenterExtras(
   const conversationOutcomes = computeConversationOutcomes(sessionsThisPeriod);
 
   // --- Alerts, live feed, popular scenarios, achievements ---
-  const alerts = computeAlerts(consultants, sessionsByUser, now);
+  const alerts = filterAcknowledgedAlerts(
+    computeAlerts(consultants, sessionsByUser, now),
+    sessionsByUser,
+    alertAcknowledgements,
+  );
   const liveFeed = buildLiveFeed(officeUsers, officeSessions, allScenarios, 12);
   const popularScenarios = computePopularScenarios(completedThisPeriod, allScenarios, 5);
   const leaderboardForBadges = consultants.map((u) => {
@@ -5203,10 +5301,11 @@ export function registerManagerDashboardRoutes(app: Express): void {
       return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
     }
 
-    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+    const [officeUsers, officeSessions, allScenarios, alertAcknowledgements] = await Promise.all([
       storage.listUsersByOffice(requester.officeId),
       storage.listSessionsByOffice(requester.officeId),
       storage.listScenarios(),
+      storage.listActiveAlertAcknowledgements(requester.officeId),
     ]);
 
     const now = new Date();
@@ -5214,9 +5313,83 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const period = resolveDashboardPeriod(since, until, now);
 
     res.json({
-      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, now, period),
+      ...buildCommandCenterExtras(officeUsers, officeSessions, allScenarios, now, period, alertAcknowledgements),
       widgetConfig: resolveDashboardWidgetConfig(office?.dashboardWidgetConfig ?? null),
     });
+  });
+
+  // Clear one manager-facing derived alert. Acknowledgements are written only
+  // for a consultant in the authenticated caller's office. New relevant
+  // completed sessions later supersede this row and allow the alert to recur.
+  app.post("/api/manager/alerts/acknowledge", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can acknowledge alerts");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+
+    const body = z.object({
+      consultantId: z.coerce.number().int().positive(),
+      reason: z.enum(["inactive", "lowScore"]),
+    }).safeParse(req.body ?? {});
+    if (!body.success) {
+      return res.status(400).json({ message: "consultantId and a valid alert reason are required" });
+    }
+
+    const consultant = await storage.getUser(body.data.consultantId);
+    if (!consultant || consultant.officeId !== requester.officeId || consultant.role !== "consultant") {
+      return res.status(404).json({ message: "Consultant not found" });
+    }
+
+    const acknowledgement = await storage.createAlertAcknowledgement({
+      officeId: requester.officeId,
+      consultantId: consultant.id,
+      reason: body.data.reason,
+      acknowledgedBy: requester.id,
+      acknowledgedAt: new Date().toISOString(),
+    });
+    res.status(201).json(acknowledgement);
+  });
+
+  // Completed sessions behind the Conversations KPI. This uses the same
+  // completed-session period helper as the KPI calculation, so a count and
+  // its drill-down list cannot diverge.
+  app.get("/api/manager/dashboard-command-center/conversations", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+    res.json({ sessions: buildConversationDrilldown(officeUsers, officeSessions, allScenarios, period) });
+  });
+
+  // Certification events behind the Certifications KPI. One consultant can
+  // appear once per track when they earned both credentials in the range.
+  app.get("/api/manager/dashboard-command-center/certifications", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+
+    const officeUsers = await storage.listUsersByOffice(requester.officeId);
+    const now = new Date();
+    const { since, until } = readPeriodParams(req);
+    const period = resolveDashboardPeriod(since, until, now);
+    res.json({ certifications: buildCertificationDrilldown(officeUsers, period) });
   });
 
   // Per-office widget visibility config: manager-only, own-office-only read
@@ -5300,6 +5473,16 @@ export function registerManagerDashboardRoutes(app: Express): void {
         rubricScores = null;
       }
     }
+    const parsedTranscript = z.array(transcriptMessageSchema).safeParse(
+      (() => {
+        try {
+          return JSON.parse(session.transcript);
+        } catch {
+          return [];
+        }
+      })(),
+    );
+    const coachingMessages = await storage.listCoachingMessagesBySession(session.id);
 
     res.json({
       id: session.id,
@@ -5313,6 +5496,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
       feedback: session.feedback,
       createdAt: session.createdAt,
       completedAt: session.completedAt,
+      transcript: parsedTranscript.success ? parsedTranscript.data : [],
+      coachingMessages,
     });
   });
 }
