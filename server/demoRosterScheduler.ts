@@ -15,6 +15,10 @@ import {
 // similarly named account in another tenant.
 export const DEMO_ROSTER_USERNAMES = new Set(DEMO_OFFICE_PERSONAS.map((persona) => persona.username));
 export const ROLLING_WINDOW_DAYS = 180;
+// Sessions are only pruned once they fall this far outside the active
+// window, giving a safety margin so a session never gets deleted while it is
+// still the oldest anchor satisfying ROLLING_WINDOW_DAYS.
+export const PRUNE_AFTER_DAYS = 200;
 const ANCHOR_TOLERANCE_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -25,6 +29,7 @@ export interface DemoRosterPlannerUser {
 }
 
 export interface DemoRosterPlannerSession {
+  id: number;
   userId: number;
   completedAt: string | null;
 }
@@ -37,6 +42,14 @@ export interface DemoSessionInsertPlan {
   score: number;
   seed: number;
   reason: "recent" | "rolling_anchor";
+}
+
+export interface DemoRosterRefreshPlan {
+  inserts: DemoSessionInsertPlan[];
+  /** Existing session ids older than PRUNE_AFTER_DAYS, safe to delete along
+   * with their coaching messages. Only ever includes ids belonging to the
+   * allowlisted Demo Office personas passed into the planner. */
+  pruneSessionIds: number[];
 }
 
 function startOfUtcDay(value: Date): Date {
@@ -79,11 +92,8 @@ function personaFor(username: string): Persona | undefined {
   return DEMO_OFFICE_PERSONAS.find((persona) => persona.username === username);
 }
 
-function sessionDays(existing: DemoRosterPlannerSession[], userId: number): Date[] {
-  return existing
-    .filter((session) => session.userId === userId && !!session.completedAt)
-    .map((session) => new Date(session.completedAt!))
-    .filter((date) => !Number.isNaN(date.getTime()));
+function userSessions(existing: DemoRosterPlannerSession[], userId: number): DemoRosterPlannerSession[] {
+  return existing.filter((session) => session.userId === userId && !!session.completedAt);
 }
 
 function hasSessionNearDay(existingDays: Date[], target: Date): boolean {
@@ -92,19 +102,29 @@ function hasSessionNearDay(existingDays: Date[], target: Date): boolean {
 }
 
 /**
- * Plans only additive Demo Office roster sessions. A daily recent attempt
- * keeps seven- and 30-day dashboard periods populated. A bounded set of
- * bootstrap anchors gives new installations immediate multi-month depth, and
- * a new ~180-day anchor is inserted whenever the prior one drifts more than a
- * week old. Existing history is never deleted.
+ * Plans additive inserts AND prunes for the Demo Office roster.
+ *
+ * Inserts: a daily recent attempt keeps seven- and 30-day dashboard periods
+ * populated. A bounded set of bootstrap anchors gives new installations
+ * immediate multi-month depth, and a new ~180-day anchor is inserted
+ * whenever the prior one drifts more than a week old.
+ *
+ * Prunes: any existing session older than PRUNE_AFTER_DAYS is scheduled for
+ * deletion (along with its coaching messages, handled by the caller). This
+ * is what keeps the roster's total history genuinely rolling instead of
+ * growing without bound: every tick both extends the recent/old edges AND
+ * retires rows that have aged out past the active window plus a safety
+ * margin.
  */
 export function planDemoRefresh(
   personas: DemoRosterPlannerUser[],
   existingSessions: DemoRosterPlannerSession[],
   now: Date,
-): DemoSessionInsertPlan[] {
+): DemoRosterRefreshPlan {
   const today = startOfUtcDay(now);
-  const plans: DemoSessionInsertPlan[] = [];
+  const inserts: DemoSessionInsertPlan[] = [];
+  const pruneSessionIds: number[] = [];
+  const pruneCutoffMs = today.getTime() - PRUNE_AFTER_DAYS * DAY_MS;
 
   for (const user of personas) {
     if (user.officeId !== DEMO_ROSTER_OFFICE_ID || !DEMO_ROSTER_USERNAMES.has(user.username)) continue;
@@ -112,7 +132,8 @@ export function planDemoRefresh(
     if (!persona) continue;
 
     const personaIndex = DEMO_OFFICE_PERSONAS.findIndex((candidate) => candidate.username === user.username);
-    const existingDays = sessionDays(existingSessions, user.id);
+    const existingForUser = userSessions(existingSessions, user.id);
+    const existingDays = existingForUser.map((session) => new Date(session.completedAt!));
     const existingKeys = new Set(existingDays.map(utcDayKey));
     const daySeed = Math.floor(today.getTime() / DAY_MS) + personaIndex * 31;
     const desired: Array<{ day: Date; reason: DemoSessionInsertPlan["reason"] }> = [
@@ -134,7 +155,7 @@ export function planDemoRefresh(
       const key = utcDayKey(day);
       if (existingKeys.has(key)) continue;
       const seed = daySeed + Math.floor(day.getTime() / DAY_MS);
-      plans.push({
+      inserts.push({
         userId: user.id,
         username: user.username,
         completedAt: timestampForDay(day, personaIndex, seed),
@@ -145,9 +166,19 @@ export function planDemoRefresh(
       });
       existingKeys.add(key);
     }
+
+    // Retire any existing session that has drifted past the active window
+    // plus safety margin. This is the other half of "rolling": without it,
+    // history only ever grows, even though the visible window stays anchored.
+    for (const session of existingForUser) {
+      const completedMs = new Date(session.completedAt!).getTime();
+      if (completedMs < pruneCutoffMs) pruneSessionIds.push(session.id);
+    }
   }
 
-  return plans.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.userId - b.userId);
+  inserts.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.userId - b.userId);
+  pruneSessionIds.sort((a, b) => a - b);
+  return { inserts, pruneSessionIds };
 }
 
 function scenarioPools(allScenarios: Scenario[]): Record<DemoSessionInsertPlan["level"], Scenario[]> {
@@ -174,45 +205,64 @@ function rubricFor(score: number, seed: number): string {
 
 export type DemoRosterRefreshStorage = Pick<
   IStorage,
-  "listUsersByOffice" | "listSessionsByUser" | "listScenarios" | "createSession" | "createCoachingMessage"
+  | "listUsersByOffice"
+  | "listSessionsByUser"
+  | "listScenarios"
+  | "createSession"
+  | "createCoachingMessage"
+  | "deleteSessionsByIds"
+  | "deleteCoachingMessagesBySessionIds"
 >;
 
 /** Thin database wrapper around the pure plan. It only queries office #1 and
- * only creates rows for the six allowlisted usernames. */
+ * only creates or deletes rows for the six allowlisted usernames — every id
+ * passed to the delete helpers was just fetched for those exact users, so
+ * pruning can never reach outside the Demo Office roster. */
 export async function refreshDemoRoster(
   storage: DemoRosterRefreshStorage,
   now: Date = new Date(),
-): Promise<{ sessionsCreated: number; coachingCreated: number }> {
+): Promise<{ sessionsCreated: number; coachingCreated: number; sessionsPruned: number }> {
   const users = await storage.listUsersByOffice(DEMO_ROSTER_OFFICE_ID);
   const allowedUsers = users.filter((user) => DEMO_ROSTER_USERNAMES.has(user.username));
   const existingByUser = await Promise.all(allowedUsers.map(async (user) => storage.listSessionsByUser(user.id)));
-  const plans = planDemoRefresh(allowedUsers, existingByUser.flat(), now);
-  if (plans.length === 0) return { sessionsCreated: 0, coachingCreated: 0 };
+  const plan = planDemoRefresh(allowedUsers, existingByUser.flat(), now);
+
+  // Delete coaching messages before sessions (FK dependency), then the aged-
+  // out sessions themselves. This is the half of "rolling" that keeps total
+  // history bounded instead of growing forever.
+  if (plan.pruneSessionIds.length > 0) {
+    await storage.deleteCoachingMessagesBySessionIds(plan.pruneSessionIds);
+    await storage.deleteSessionsByIds(plan.pruneSessionIds);
+  }
+
+  if (plan.inserts.length === 0) {
+    return { sessionsCreated: 0, coachingCreated: 0, sessionsPruned: plan.pruneSessionIds.length };
+  }
 
   const pools = scenarioPools(await storage.listScenarios());
   let coachingCreated = 0;
-  for (const plan of plans) {
-    const pool = pools[plan.level];
-    const scenario = pool[Math.abs(plan.seed) % pool.length];
+  for (const insertPlan of plan.inserts) {
+    const pool = pools[insertPlan.level];
+    const scenario = pool[Math.abs(insertPlan.seed) % pool.length];
     const draft: InsertSession = {
-      userId: plan.userId,
+      userId: insertPlan.userId,
       scenarioId: scenario.id,
       status: "completed",
       transcript: "[]",
-      score: plan.score,
-      rubricScores: rubricFor(plan.score, plan.seed),
-      feedback: `Practice attempt on "${scenario.title}", overall ${plan.score}.`,
-      createdAt: plan.completedAt,
-      completedAt: plan.completedAt,
+      score: insertPlan.score,
+      rubricScores: rubricFor(insertPlan.score, insertPlan.seed),
+      feedback: `Practice attempt on "${scenario.title}", overall ${insertPlan.score}.`,
+      createdAt: insertPlan.completedAt,
+      completedAt: insertPlan.completedAt,
     };
-    draft.transcript = buildTranscript(draft as Pick<Session, "score" | "completedAt">, scenario, plan.seed);
+    draft.transcript = buildTranscript(draft as Pick<Session, "score" | "completedAt">, scenario, insertPlan.seed);
     const created = await storage.createSession(draft);
-    for (const message of buildCoachingMessages(created, scenario, plan.seed)) {
+    for (const message of buildCoachingMessages(created, scenario, insertPlan.seed)) {
       await storage.createCoachingMessage(message);
       coachingCreated += 1;
     }
   }
-  return { sessionsCreated: plans.length, coachingCreated };
+  return { sessionsCreated: plan.inserts.length, coachingCreated, sessionsPruned: plan.pruneSessionIds.length };
 }
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;

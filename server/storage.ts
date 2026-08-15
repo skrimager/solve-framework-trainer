@@ -118,6 +118,8 @@ export interface IStorage {
   getSession(id: number): Promise<Session | undefined>;
   updateSession(id: number, patch: Partial<InsertSession>): Promise<Session | undefined>;
   listSessionsByUser(userId: number): Promise<Session[]>;
+  deleteSessionsByIds(sessionIds: number[]): Promise<void>;
+  deleteCoachingMessagesBySessionIds(sessionIds: number[]): Promise<void>;
   listAllSessions(): Promise<Session[]>;
   listSessionsByOffice(officeId: number): Promise<Session[]>;
 
@@ -524,6 +526,21 @@ export class DatabaseStorage implements IStorage {
 
   async listSessionsByUser(userId: number): Promise<Session[]> {
     return db.select().from(sessions).where(eq(sessions.userId, userId));
+  }
+
+  // Narrow, purpose-built deletes for the demo roster's rolling-window
+  // pruning job. Callers must pass exact, already-vetted ids (the scheduler
+  // only ever prunes ids it just fetched for the allowlisted Demo Office
+  // personas) — this does not accept a userId/date filter of its own, so it
+  // cannot accidentally widen scope beyond what the caller already decided.
+  async deleteCoachingMessagesBySessionIds(sessionIds: number[]): Promise<void> {
+    if (sessionIds.length === 0) return;
+    await db.delete(coachingMessages).where(inArray(coachingMessages.sessionId, sessionIds));
+  }
+
+  async deleteSessionsByIds(sessionIds: number[]): Promise<void> {
+    if (sessionIds.length === 0) return;
+    await db.delete(sessions).where(inArray(sessions.id, sessionIds));
   }
 
   async listAllSessions(): Promise<Session[]> {
