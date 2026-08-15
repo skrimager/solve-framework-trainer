@@ -4088,6 +4088,16 @@ const DASHBOARD_PERIOD_DAYS = 7;
 // is computed from the actual since/until span rather than assumed to be 7.
 export type DashboardPeriod = { since: Date; until: Date; days: number; label: string };
 
+// The single inclusive time-window rule for all Command Center score analytics.
+// A score belongs on the current dashboard only when its completed session is
+// inside this exact window. Reusing this rule prevents score panels from
+// silently mixing historical and selected-period records.
+function isInDashboardPeriod(iso: string | null, period: DashboardPeriod): boolean {
+  if (!iso) return false;
+  const instant = new Date(iso);
+  return !Number.isNaN(instant.getTime()) && instant >= period.since && instant <= period.until;
+}
+
 // Builds the period boundaries a dashboard request should use. When both
 // `sinceParam` and `untilParam` (ISO date strings) are provided, they define
 // the window exactly; otherwise falls back to the historical trailing
@@ -4307,17 +4317,16 @@ export function buildDashboardStats(
   const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
   const consultants = officeUsers.filter((u) => u.role === "consultant");
 
-  const completed = officeSessions.filter((s) => s.status === "completed");
+  // The score cards, trend, radar, leaderboard, and distribution drill-down
+  // all start from this one selected-period set.
+  const completed = completedSessionsInPeriod(officeSessions, period);
   const scored = completed.filter((s) => s.score !== null);
 
   const teamAverageScore = scored.length
     ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
     : null;
 
-  const periodSince = period.since;
-  const practiceSessionsThisPeriod = completed.filter(
-    (s) => s.completedAt && new Date(s.completedAt) >= periodSince && new Date(s.completedAt) <= period.until,
-  ).length;
+  const practiceSessionsThisPeriod = completed.length;
 
   const certificationsEarned = consultants.filter((u) => u.consultingCertified).length;
   const activeConsultants = consultants.filter((u) => u.seatActive).length;
@@ -4379,22 +4388,28 @@ export function buildDashboardStats(
   // ranked best-first. Consultants with no scored sessions (averageScore null)
   // sort to the bottom so the client can show them with an honest empty score.
   const sessionsByUser = new Map<number, Session[]>();
-  for (const s of officeSessions) {
+  for (const s of scored) {
     const list = sessionsByUser.get(s.userId) ?? [];
     list.push(s);
     sessionsByUser.set(s.userId, list);
   }
-  const userById = new Map(consultants.map((consultant) => [consultant.id, consultant]));
-  const leaderboard = getOfficeRankings(consultants, sessionsByUser).map((ranking) => {
-    const consultant = userById.get(ranking.id)!;
-    return {
-      id: consultant.id,
-      displayName: consultant.displayName,
-      averageScore: ranking.averageScore === null ? null : Math.round(ranking.averageScore),
-      sessionsCompleted: ranking.sampleSize,
-      tier: consultantTier(consultant),
-    };
-  });
+  const leaderboard = consultants
+    .map((consultant) => {
+      const consultantSessions = sessionsByUser.get(consultant.id) ?? [];
+      return {
+        id: consultant.id,
+        displayName: consultant.displayName,
+        averageScore: consultantSessions.length
+          ? Math.round(
+              consultantSessions.reduce((sum, session) => sum + (session.score as number), 0) /
+                consultantSessions.length,
+            )
+          : null,
+        sessionsCompleted: consultantSessions.length,
+        tier: consultantTier(consultant),
+      };
+    })
+    .sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1));
 
   const levelDistribution = TIER_ORDER.map((tier) => ({
     tier,
@@ -4404,7 +4419,9 @@ export function buildDashboardStats(
   // Streaks & rankings: each consultant's current practice streak and peer rank.
   // Only reachable once the route has confirmed the office holds the paid
   // Manager Dashboard add-on, so no additional gating is needed here.
-  const streaksAndRankings = buildStreaksAndRankings(consultants, sessionsByUser, now);
+  // Streaks are a current-state metric, not a selected-report-period score
+  // metric, so preserve their all-time source explicitly.
+  const streaksAndRankings = buildStreaksAndRankings(consultants, groupSessionsByUser(officeSessions), now);
 
   const vertTotals = new Map<string, number>();
   for (const s of completed) {
@@ -4433,7 +4450,9 @@ export function buildDashboardStats(
     streaksAndRankings,
     totals: {
       completed: completed.length,
-      inProgress: officeSessions.length - completed.length,
+      inProgress: officeSessions.filter(
+        (s) => s.status !== "completed" && isInDashboardPeriod(s.createdAt, period),
+      ).length,
     },
     // SOLVE Success Investment credits earned by this office (sum of all earned
     // credit rows). "available" is simply the total earned: there is no
@@ -4557,6 +4576,66 @@ export function computeScoreDistribution(
   }).map(({ band, count, percent }) => ({ band, count, percent }));
 }
 
+function scoreBandFor(value: number): (typeof SCORE_BANDS)[number] | null {
+  return SCORE_BANDS.find((band) => value >= band.min && value <= band.max) ?? null;
+}
+
+export function buildScoreDistributionDrilldown(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  period: DashboardPeriod,
+  band: string,
+) {
+  const scoreBand = SCORE_BANDS.find((candidate) => candidate.key === band);
+  if (!scoreBand) return null;
+  const usersById = new Map(officeUsers.map((user) => [user.id, user]));
+  const scenariosById = new Map(allScenarios.map((scenario) => [scenario.id, scenario]));
+  return {
+    band: scoreBand.label,
+    sessions: completedSessionsInPeriod(officeSessions, period)
+      .filter((session) => session.score !== null && scoreBandFor(session.score as number)?.key === scoreBand.key)
+      .map((session) => ({
+        sessionId: session.id,
+        consultantName: usersById.get(session.userId)?.displayName ?? "Unknown consultant",
+        scenarioTitle: scenariosById.get(session.scenarioId)?.title ?? "Unknown scenario",
+        score: session.score as number,
+        completedAt: session.completedAt as string,
+      }))
+      .sort((a, b) => b.completedAt.localeCompare(a.completedAt)),
+  };
+}
+
+export function buildPerformerDrilldown(
+  consultant: User,
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  period: DashboardPeriod,
+) {
+  const scenariosById = new Map(allScenarios.map((scenario) => [scenario.id, scenario]));
+  const sessions = completedSessionsInPeriod(officeSessions, period)
+    .filter((session) => session.userId === consultant.id && session.score !== null)
+    .map((session) => ({
+      sessionId: session.id,
+      scenarioTitle: scenariosById.get(session.scenarioId)?.title ?? "Unknown scenario",
+      score: session.score as number,
+      completedAt: session.completedAt as string,
+    }))
+    .sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+  const scoreSum = sessions.reduce((total, session) => total + session.score, 0);
+  const averageScore = sessions.length
+    ? Math.round(scoreSum / sessions.length)
+    : null;
+  return {
+    consultantId: consultant.id,
+    consultantName: consultant.displayName,
+    averageScore,
+    sessionCount: sessions.length,
+    scoreSum,
+    sessions,
+  };
+}
+
 // Conversation Outcomes donut: buckets every session in the period into one of
 // four REAL, derivable states (no invented "deal outcome" field exists on
 // sessions, so this reuses status + score, the only outcome signals that
@@ -4677,11 +4756,7 @@ export function filterAcknowledgedAlerts(
 
 export function completedSessionsInPeriod(officeSessions: Session[], period: DashboardPeriod): Session[] {
   return officeSessions.filter(
-    (session) =>
-      session.status === "completed" &&
-      !!session.completedAt &&
-      new Date(session.completedAt) >= period.since &&
-      new Date(session.completedAt) <= period.until,
+    (session) => session.status === "completed" && isInDashboardPeriod(session.completedAt, period),
   );
 }
 
@@ -4732,29 +4807,25 @@ export function buildCertificationDrilldown(officeUsers: User[], period: Dashboa
     .sort((a, b) => b.certifiedAt.localeCompare(a.certifiedAt));
 }
 
-// Live Feed: a chronological stream of real recent events a manager would
-// want to see at a glance — certifications earned, high-scoring completed
-// sessions, and any completed session in general — each with a real
-// timestamp. Built entirely from users/sessions rows already fetched for the
-// rest of the dashboard; nothing here is a separate event log.
+// Live Feed: a chronological stream of real completed sessions in the selected
+// dashboard window. Certification-only events deliberately do not appear here:
+// they have no single honest session to open in a session-detail drill-down.
 const LIVE_FEED_HIGH_SCORE = 90;
 
 export type LiveFeedEvent = {
   id: string;
-  type: "certification" | "high_score" | "session_completed";
+  type: "high_score" | "session_completed";
   userId: number;
   displayName: string;
   detail: string;
   occurredAt: string;
-  // The backing session id, so a manager can click through to full session
-  // detail (GET /api/manager/session/:id). Null for certification events,
-  // which have no single backing session.
-  sessionId: number | null;
+  // Every feed row has a backing session, so every row can be inspected.
+  sessionId: number;
 };
 
 export function buildLiveFeed(
   officeUsers: User[],
-  officeSessions: Session[],
+  periodSessions: Session[],
   allScenarios: Scenario[],
   limit = 12,
 ): LiveFeedEvent[] {
@@ -4762,32 +4833,7 @@ export function buildLiveFeed(
   const userById = new Map(officeUsers.map((u) => [u.id, u]));
   const events: LiveFeedEvent[] = [];
 
-  for (const u of officeUsers) {
-    if (u.consultingCertifiedAt) {
-      events.push({
-        id: `cert-consulting-${u.id}`,
-        type: "certification",
-        userId: u.id,
-        displayName: u.displayName,
-        detail: "Earned Consulting Certification",
-        occurredAt: u.consultingCertifiedAt,
-        sessionId: null,
-      });
-    }
-    if (u.leadershipCertifiedAt) {
-      events.push({
-        id: `cert-leadership-${u.id}`,
-        type: "certification",
-        userId: u.id,
-        displayName: u.displayName,
-        detail: "Earned Leadership Certification",
-        occurredAt: u.leadershipCertifiedAt,
-        sessionId: null,
-      });
-    }
-  }
-
-  for (const s of officeSessions) {
+  for (const s of periodSessions) {
     if (s.status !== "completed" || !s.completedAt) continue;
     const user = userById.get(s.userId);
     if (!user) continue;
@@ -4988,7 +5034,7 @@ export function buildCommandCenterExtras(
   const periodUntil = period.until;
   const priorPeriodSince = new Date(periodSince.getTime() - periodDays * ONE_DAY_MS);
 
-  const inPeriod = (iso: string | null) => !!iso && new Date(iso) >= periodSince && new Date(iso) <= periodUntil;
+  const inPeriod = (iso: string | null) => isInDashboardPeriod(iso, period);
   const inPriorPeriod = (iso: string | null) =>
     !!iso && new Date(iso) >= priorPeriodSince && new Date(iso) < periodSince;
 
@@ -5071,7 +5117,7 @@ export function buildCommandCenterExtras(
   // office's own consultants only — never a cross-office/company comparison,
   // since offices must never see another office's performance data (and no
   // internal SOLVE Framework business data belongs on this screen either).
-  const performanceOverTime = buildPerformanceOverTime(officeSessions, consultants, sessionsByUser, periodSince, periodUntil);
+  const performanceOverTime = buildPerformanceOverTime(completedThisPeriod, consultants, periodSince, periodUntil);
 
   // --- Score distribution + conversation outcomes, scoped to this period ---
   const scoresThisPeriod = completedThisPeriod.filter((s) => s.score !== null).map((s) => s.score as number);
@@ -5084,10 +5130,11 @@ export function buildCommandCenterExtras(
     sessionsByUser,
     alertAcknowledgements,
   );
-  const liveFeed = buildLiveFeed(officeUsers, officeSessions, allScenarios, 12);
+  const liveFeed = buildLiveFeed(officeUsers, completedThisPeriod, allScenarios, 12);
   const popularScenarios = computePopularScenarios(completedThisPeriod, allScenarios, 5);
+  const periodSessionsByUser = groupSessionsByUser(completedThisPeriod);
   const leaderboardForBadges = consultants.map((u) => {
-    const scored = (sessionsByUser.get(u.id) ?? []).filter((s) => s.status === "completed" && s.score !== null);
+    const scored = (periodSessionsByUser.get(u.id) ?? []).filter((s) => s.score !== null);
     const averageScore = scored.length
       ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
       : null;
@@ -5154,12 +5201,12 @@ function sparklineByDay(completed: Session[], since: Date, until: Date): number[
 // only. Days with no scored session in a series simply carry null so the
 // chart shows a gap rather than a misleading dip to zero.
 function buildPerformanceOverTime(
-  officeSessions: Session[],
+  periodSessions: Session[],
   consultants: User[],
-  sessionsByUser: Map<number, Session[]>,
   since: Date,
   until: Date,
 ): { date: string; teamScore: number | null; top20: number | null }[] {
+  const sessionsByUser = groupSessionsByUser(periodSessions);
   const ranking = getOfficeRankings(consultants, sessionsByUser).filter((r) => r.averageScore !== null);
   const top20Count = Math.max(1, Math.ceil(ranking.length * 0.2));
   const top20Ids = new Set(ranking.slice(0, top20Count).map((r) => r.id));
@@ -5174,7 +5221,7 @@ function buildPerformanceOverTime(
 
   const byDayAll = new Map<string, { total: number; count: number }>();
   const byDayTop = new Map<string, { total: number; count: number }>();
-  for (const s of officeSessions) {
+  for (const s of periodSessions) {
     if (s.status !== "completed" || s.score === null || !s.completedAt) continue;
     const day = s.completedAt.slice(0, 10);
     if (!days.includes(day)) continue;
@@ -5371,6 +5418,66 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const { since, until } = readPeriodParams(req);
     const period = resolveDashboardPeriod(since, until, now);
     res.json({ sessions: buildConversationDrilldown(officeUsers, officeSessions, allScenarios, period) });
+  });
+
+  // Exact session rows behind one Score Distribution bar. The band is derived
+  // on the server from the same completed/scored period predicate used by the
+  // chart, never from a client-supplied or separately-seeded aggregate.
+  app.get("/api/manager/dashboard-command-center/score-distribution", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+    const band = typeof req.query.band === "string" ? req.query.band : "";
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+    const { since, until } = readPeriodParams(req);
+    const result = buildScoreDistributionDrilldown(
+      officeUsers,
+      officeSessions,
+      allScenarios,
+      resolveDashboardPeriod(since, until, new Date()),
+      band,
+    );
+    if (!result) return res.status(400).json({ message: "A valid score band is required" });
+    res.json(result);
+  });
+
+  // Exact scored-session history used for a Top Performer's displayed average.
+  app.get("/api/manager/dashboard-command-center/performers/:consultantId", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+    const consultantId = Number(req.params.consultantId);
+    if (!Number.isInteger(consultantId) || consultantId <= 0) {
+      return res.status(400).json({ message: "A valid consultant id is required" });
+    }
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+    const consultant = officeUsers.find((user) => user.id === consultantId && user.role === "consultant");
+    if (!consultant) return res.status(404).json({ message: "Consultant not found" });
+    const { since, until } = readPeriodParams(req);
+    res.json(
+      buildPerformerDrilldown(
+        consultant,
+        officeSessions,
+        allScenarios,
+        resolveDashboardPeriod(since, until, new Date()),
+      ),
+    );
   });
 
   // Certification events behind the Certifications KPI. One consultant can

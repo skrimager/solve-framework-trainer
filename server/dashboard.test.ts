@@ -178,6 +178,26 @@ describe("buildDashboardStats (pure aggregation)", () => {
     assert.equal(dave.sessionsCompleted, 0);
   });
 
+  test("leaderboard, score distribution, trend, and skill radar use the exact selected period", () => {
+    const { users, scenarios } = fixtures();
+    const sessions = [
+      // This old 95 must not bleed into a narrow range that contains only 62.
+      mkSession({ id: 301, userId: 3, scenarioId: 10, score: 95, rubricScores: CONSULTING_RUBRIC, completedAt: "2026-02-01T00:00:00.000Z" }),
+      mkSession({ id: 302, userId: 3, scenarioId: 10, score: 62, rubricScores: CONSULTING_RUBRIC, completedAt: "2026-03-02T00:00:00.000Z" }),
+    ];
+    const period = resolveDashboardPeriod("2026-03-02T00:00:00.000Z", "2026-03-02T23:59:59.999Z", now);
+    const stats = buildDashboardStats(users, sessions, scenarios, now, [], period);
+    const extras = buildCommandCenterExtras(users, sessions, scenarios, now, period);
+    assert.equal(stats.leaderboard.find((row) => row.id === 3)?.averageScore, 62);
+    assert.equal(stats.leaderboard.find((row) => row.id === 3)?.sessionsCompleted, 1);
+    assert.equal(extras.scoreDistribution.find((row) => row.band === "60-69")?.count, 1);
+    assert.equal(extras.scoreDistribution.find((row) => row.band === "90-100")?.count, 0);
+    assert.deepEqual(extras.performanceOverTime.filter((row) => row.teamScore !== null), [
+      { date: "2026-03-02", teamScore: 62, top20: 62 },
+    ]);
+    assert.equal(stats.discoveryDimensions?.find((row) => row.key === "needsDiscovery")?.average, 80);
+  });
+
   test("level distribution uses the four real tiers with certified at top", () => {
     const { users, sessions, scenarios } = fixtures();
     const stats = buildDashboardStats(users, sessions, scenarios, now);
@@ -749,7 +769,7 @@ describe("computeAlerts", () => {
 });
 
 describe("buildLiveFeed", () => {
-  test("includes certifications and completed sessions sorted newest first", () => {
+  test("includes only backed completed sessions sorted newest first", () => {
     const { scenarios } = fixtures();
     const users = [
       mkUser({ id: 3, role: "consultant", displayName: "Alice A", consultingCertifiedAt: "2026-03-04T00:00:00.000Z" }),
@@ -759,13 +779,11 @@ describe("buildLiveFeed", () => {
       mkSession({ id: 101, userId: 3, scenarioId: 10, score: 60, completedAt: "2026-03-01T00:00:00.000Z" }),
     ];
     const feed = buildLiveFeed(users, sessions, scenarios);
-    assert.equal(feed.length, 3);
+    assert.equal(feed.length, 2);
     assert.equal(feed[0].type, "high_score"); // 03-05, score 95
     assert.equal(feed[0].sessionId, 100);
-    assert.equal(feed[1].type, "certification"); // 03-04
-    assert.equal(feed[1].sessionId, null); // certifications have no backing session
-    assert.equal(feed[2].type, "session_completed"); // 03-01
-    assert.equal(feed[2].sessionId, 101);
+    assert.equal(feed[1].type, "session_completed"); // 03-01
+    assert.equal(feed[1].sessionId, 101);
   });
 
   test("respects the limit", () => {
@@ -1087,6 +1105,31 @@ describe("command center + widget-config HTTP endpoints", () => {
     );
     const body = await res.json();
     assert.equal(body.performanceOverTime.length, 2);
+  });
+
+  test("score-distribution drill-down returns the exact real sessions counted in its selected band", async () => {
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center/score-distribution?band=80-89&since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.band, "80-89");
+    assert.deepEqual(body.sessions.map((row: any) => row.sessionId).sort(), [101]);
+    assert.equal(body.sessions[0].score, 80);
+    assert.equal(body.sessions[0].consultantName, "Alice A");
+  });
+
+  test("top-performer history exposes the exact selected sessions and average calculation", async () => {
+    const res = await dashboardFetch(
+      `${baseUrl}/api/manager/dashboard-command-center/performers/3?since=2026-03-01T00:00:00.000Z&until=2026-03-02T23:59:59.999Z`,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.sessions.map((row: any) => row.sessionId).sort(), [100, 101, 102]);
+    assert.equal(body.sessionCount, 3);
+    assert.equal(body.sessions.reduce((sum: number, row: any) => sum + row.score, 0), 240);
+    assert.equal(body.scoreSum, 240);
+    assert.equal(body.averageScore, 80);
   });
 
   test("omitting since/until keeps the old 7-day-trailing conversations sparkline length", async () => {

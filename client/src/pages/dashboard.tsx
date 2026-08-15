@@ -146,12 +146,12 @@ type CommandCenterExtras = {
   alerts: { id: number; displayName: string; reasons: ("inactive" | "lowScore")[] }[];
   liveFeed: {
     id: string;
-    type: "certification" | "high_score" | "session_completed";
+    type: "high_score" | "session_completed";
     userId: number;
     displayName: string;
     detail: string;
     occurredAt: string;
-    sessionId: number | null;
+    sessionId: number;
   }[];
   performanceOverTime: { date: string; teamScore: number | null; top20: number | null }[];
   scoreDistribution: { band: string; count: number; percent: number }[];
@@ -1140,7 +1140,7 @@ function CommandCenterSection({
           )}
           {show("topPerformers") && (
             <Panel title="Top Performers" caption="Ranked by average discovery score" testId="panel-top-performers" accent={GREEN}>
-              <Leaderboard leaderboard={stats?.leaderboard ?? []} limit={5} />
+              <Leaderboard leaderboard={stats?.leaderboard ?? []} limit={5} dateRange={dateRange} />
             </Panel>
           )}
         </div>
@@ -1156,7 +1156,7 @@ function CommandCenterSection({
           )}
           {show("scoreDistribution") && (
             <Panel title="Score Distribution" caption={`Sessions by score band, ${label}`} testId="panel-score-distribution" accent={ORANGE}>
-              <ScoreDistributionChart data={extras.scoreDistribution} />
+              <ScoreDistributionChart data={extras.scoreDistribution} dateRange={dateRange} />
             </Panel>
           )}
           {show("achievements") && (
@@ -1212,7 +1212,6 @@ function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
     return <EmptyState message="No recent activity yet" testId="empty-live-feed" />;
   }
   const iconFor = (type: CommandCenterExtras["liveFeed"][number]["type"]) => {
-    if (type === "certification") return { Icon: Award, color: GOLD_LIGHT };
     if (type === "high_score") return { Icon: Star, color: PURPLE_LIGHT };
     return { Icon: MessageSquareText, color: BLUE_LIGHT };
   };
@@ -1626,28 +1625,96 @@ function ConversationOutcomesDonut({ data }: { data: CommandCenterExtras["conver
   );
 }
 
-function ScoreDistributionChart({ data }: { data: CommandCenterExtras["scoreDistribution"] }) {
+type ScoreBandSessionList = {
+  band: string;
+  sessions: {
+    sessionId: number;
+    consultantName: string;
+    scenarioTitle: string;
+    score: number;
+    completedAt: string;
+  }[];
+};
+
+function ScoreDistributionChart({
+  data,
+  dateRange,
+}: {
+  data: CommandCenterExtras["scoreDistribution"];
+  dateRange: DateRangeValue;
+}) {
+  const [selectedBand, setSelectedBand] = useState<string | null>(null);
+  const query = commandCenterRangeQuery(dateRange);
+  const { data: detail, isLoading, isError } = useQuery<ScoreBandSessionList>({
+    queryKey: [`/api/manager/dashboard-command-center/score-distribution?band=${selectedBand}&${query}`],
+    enabled: selectedBand !== null,
+  });
   const total = data.reduce((sum, d) => sum + d.count, 0);
   if (total === 0) {
     return <EmptyState message="No scored sessions yet" testId="empty-score-distribution" />;
   }
   const BAND_COLORS = [RED_LIGHT, ORANGE_LIGHT, GOLD_LIGHT, BLUE_LIGHT, GREEN_LIGHT];
   return (
-    <div className="h-72 min-w-0">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 16, right: 12, bottom: 4, left: -16 }}>
-          <CartesianGrid stroke={GRID} vertical={false} />
-          <XAxis dataKey="band" stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
-          <YAxis allowDecimals={false} stroke={AXIS} tick={{ fontSize: 11 }} />
-          <Tooltip {...chartTooltipStyle()} cursor={{ fill: "rgba(255,255,255,0.05)" }} formatter={(value: any, name: any, item: any) => [`${value} (${item.payload.percent}%)`, "Sessions"]} />
-          <Bar dataKey="count" name="Sessions" radius={[4, 4, 0, 0]}>
-            {data.map((_, i) => (
-              <Cell key={i} fill={BAND_COLORS[i % BAND_COLORS.length]} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
+    <>
+      <div className="h-72 min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 16, right: 12, bottom: 4, left: -16 }}>
+            <CartesianGrid stroke={GRID} vertical={false} />
+            <XAxis dataKey="band" stroke={AXIS} tick={{ fontSize: 11 }} tickMargin={8} />
+            <YAxis allowDecimals={false} stroke={AXIS} tick={{ fontSize: 11 }} />
+            <Tooltip {...chartTooltipStyle()} cursor={{ fill: "rgba(255,255,255,0.05)" }} formatter={(value: any, name: any, item: any) => [`${value} (${item.payload.percent}%)`, "Sessions"]} />
+            <Bar
+              dataKey="count"
+              name="Sessions"
+              radius={[4, 4, 0, 0]}
+              isAnimationActive={false}
+              cursor="pointer"
+              onClick={(entry: { band?: string; count?: number }) => {
+                if (entry?.band && entry.count && entry.count > 0) setSelectedBand(entry.band);
+              }}
+            >
+              {data.map((entry, i) => (
+                <Cell key={i} fill={BAND_COLORS[i % BAND_COLORS.length]} cursor={entry.count > 0 ? "pointer" : "default"} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <Dialog open={selectedBand !== null} onOpenChange={(open) => !open && setSelectedBand(null)}>
+        <DialogContent
+          className="border max-h-[85vh] overflow-y-auto"
+          style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+          data-testid="modal-score-distribution-sessions"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-white">{selectedBand} score sessions</DialogTitle>
+            <DialogDescription className="text-white/55">
+              Real completed sessions used for this score-distribution bar.
+            </DialogDescription>
+          </DialogHeader>
+          {isLoading && <Skeleton className="h-40 rounded-lg" />}
+          {isError && <p className="text-sm text-white/60">Couldn&apos;t load these sessions.</p>}
+          {detail && (detail.sessions.length === 0 ? (
+            <EmptyState message="No scored sessions in this band." testId="empty-score-distribution-detail" />
+          ) : (
+            <ul className="space-y-2" data-testid="list-score-distribution-sessions">
+              {detail.sessions.map((session) => (
+                <li key={session.sessionId} className="flex items-center justify-between gap-4 rounded-lg px-3 py-3" style={{ backgroundColor: PANEL }}>
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-white">{session.consultantName}</span>
+                    <span className="block truncate text-xs text-white/55">{session.scenarioTitle}</span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-sm font-semibold" style={{ color: ORANGE_LIGHT }}>{session.score}</span>
+                    <span className="block text-xs text-white/45">{fmtFullDate(session.completedAt)}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ))}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -1885,10 +1952,25 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
 function Leaderboard({
   leaderboard,
   limit,
+  dateRange,
 }: {
   leaderboard: DashboardStats["leaderboard"];
   limit?: number;
+  dateRange?: DateRangeValue;
 }) {
+  const [selectedConsultantId, setSelectedConsultantId] = useState<number | null>(null);
+  const query = dateRange ? commandCenterRangeQuery(dateRange) : "";
+  const { data: detail, isLoading, isError } = useQuery<{
+    consultantId: number;
+    consultantName: string;
+    averageScore: number | null;
+    sessionCount: number;
+    scoreSum: number;
+    sessions: { sessionId: number; scenarioTitle: string; score: number; completedAt: string }[];
+  }>({
+    queryKey: [`/api/manager/dashboard-command-center/performers/${selectedConsultantId}?${query}`],
+    enabled: selectedConsultantId !== null && !!dateRange,
+  });
   const ranked = leaderboard.filter((l) => l.averageScore !== null);
   const rows = limit ? ranked.slice(0, limit) : leaderboard;
   if (ranked.length === 0) {
@@ -1897,32 +1979,81 @@ function Leaderboard({
   const maxScore = Math.max(...rows.map((r) => r.averageScore ?? 0), 1);
   const RANK_COLORS = [GOLD_LIGHT, "#CBD5E1", "#D97757", GREEN_LIGHT, BLUE_LIGHT];
   return (
+    <>
     <ol className="space-y-2.5" data-testid="list-leaderboard">
       {rows.map((c, i) => (
         <li key={c.id} className="flex items-center gap-3" data-testid={`leaderboard-row-${c.id}`}>
           <span className="w-5 text-center text-sm font-bold" style={{ color: RANK_COLORS[i] ?? "rgba(255,255,255,0.5)" }}>
             {i + 1}
           </span>
-          <InitialsAvatar name={c.displayName} highlight={i === 0} color={GOLD} />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-white truncate">{c.displayName}</p>
-              <span className="text-sm font-bold text-white shrink-0">{c.averageScore ?? "—"}</span>
+          <button
+            type="button"
+            disabled={!dateRange}
+            onClick={() => dateRange && setSelectedConsultantId(c.id)}
+            className={`flex min-w-0 flex-1 items-center gap-3 rounded-md text-left ${dateRange ? "cursor-pointer hover:brightness-110 focus:outline-none focus-visible:ring-2" : ""}`}
+            data-testid={`button-performer-${c.id}`}
+          >
+            <InitialsAvatar name={c.displayName} highlight={i === 0} color={GOLD} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-white truncate">{c.displayName}</p>
+                <span className="text-sm font-bold text-white shrink-0">{c.averageScore ?? "—"}</span>
+              </div>
+              <div className="mt-1 h-1.5 w-full rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.08)" }}>
+                <div
+                  className="h-1.5 rounded-full"
+                  style={{
+                    width: `${Math.max(4, ((c.averageScore ?? 0) / maxScore) * 100)}%`,
+                    backgroundColor: GREEN_LIGHT,
+                    boxShadow: `0 0 6px ${GREEN_LIGHT}80`,
+                  }}
+                />
+              </div>
             </div>
-            <div className="mt-1 h-1.5 w-full rounded-full" style={{ backgroundColor: "rgba(255,255,255,0.08)" }}>
-              <div
-                className="h-1.5 rounded-full"
-                style={{
-                  width: `${Math.max(4, ((c.averageScore ?? 0) / maxScore) * 100)}%`,
-                  backgroundColor: GREEN_LIGHT,
-                  boxShadow: `0 0 6px ${GREEN_LIGHT}80`,
-                }}
-              />
-            </div>
-          </div>
+          </button>
         </li>
       ))}
     </ol>
+    {dateRange && (
+      <Dialog open={selectedConsultantId !== null} onOpenChange={(open) => !open && setSelectedConsultantId(null)}>
+        <DialogContent
+          className="border max-h-[85vh] overflow-y-auto"
+          style={{ backgroundColor: NAVY_DEEP, borderColor: BORDER, color: "white" }}
+          data-testid="modal-performer-history"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-white">{detail?.consultantName ?? "Performer"}'s session history</DialogTitle>
+            <DialogDescription className="text-white/55">
+              The real scored sessions used to calculate the displayed average for the selected date range.
+            </DialogDescription>
+          </DialogHeader>
+          {isLoading && <Skeleton className="h-40 rounded-lg" />}
+          {isError && <p className="text-sm text-white/60">Couldn&apos;t load this performer&apos;s session history.</p>}
+          {detail && (
+            <>
+              <div className="flex items-baseline justify-between rounded-lg px-3 py-2.5" style={{ backgroundColor: PANEL }}>
+                <span className="text-sm text-white/60" data-testid="text-performer-calculation">
+                  {detail.scoreSum} total points ÷ {detail.sessionCount} scored {detail.sessionCount === 1 ? "session" : "sessions"}
+                </span>
+                <span className="text-xl font-bold" style={{ color: GREEN_LIGHT }}>{detail.averageScore ?? "—"} average</span>
+              </div>
+              <ul className="space-y-2" data-testid="list-performer-sessions">
+                {detail.sessions.map((session) => (
+                  <li key={session.sessionId} className="flex items-center justify-between gap-4 rounded-lg px-3 py-3" style={{ backgroundColor: PANEL }}>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-white">{session.scenarioTitle}</span>
+                      <span className="block text-xs text-white/45">{fmtFullDate(session.completedAt)}</span>
+                    </span>
+                    <span className="shrink-0 text-lg font-bold" style={{ color: ORANGE_LIGHT }}>{session.score}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    )}
+    </>
   );
 }
 
