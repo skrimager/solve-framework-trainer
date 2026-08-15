@@ -91,6 +91,10 @@ import {
   remainingSessions,
   isUnlimitedDemoEmail,
   signDemoToken,
+  signDashboardDemoToken,
+  verifyDemoToken,
+  issueDemoVerificationCode,
+  consumeDemoVerificationCode,
   ctaSeatQuestion,
   isDisposableEmail,
   demoAbuseAnalytics,
@@ -2135,30 +2139,13 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       return res.status(400).json({ message: "Please use a permanent email address to start your free demo." });
     }
 
-    const now = new Date();
-
-    let signup = await storage.getDemoSignupByEmail(email);
-    if (signup && isSessionLimitReached(signup.sessionsUsed, email)) {
+    const existingSignup = await storage.getDemoSignupByEmail(email);
+    if (existingSignup && isSessionLimitReached(existingSignup.sessionsUsed, email)) {
       return res.json({ ok: true, limitReached: true, remaining: 0 });
     }
 
-    const code = generateVerificationCode();
-    const patch = { code, codeExpiresAt: codeExpiryFrom(now.getTime()), lastSentAt: now.toISOString() };
-    if (!signup) {
-      signup = await storage.createDemoSignup({
-        email,
-        code: patch.code,
-        codeExpiresAt: patch.codeExpiresAt,
-        verified: false,
-        sessionsUsed: 0,
-        createdAt: now.toISOString(),
-        lastSentAt: patch.lastSentAt,
-      });
-    } else {
-      await storage.updateDemoSignup(signup.id, patch);
-    }
-
-    const sent = await sendDemoVerificationCode(email, code);
+    const signup = await issueDemoVerificationCode(storage, email);
+    const sent = await sendDemoVerificationCode(email, signup.code!, "voice");
     if (!sent) {
       return res.status(502).json({ message: "We couldn't send your code just now. Please try again in a moment.", retryable: true });
     }
@@ -2181,13 +2168,10 @@ export function registerPublicAndAdminRoutes(app: Express): void {
       return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
     const email = normalizeEmail(parsed.data.email);
-    const signup = await storage.getDemoSignupByEmail(email);
-    if (!signup || !isCodeValid(signup, parsed.data.code)) {
+    const signup = await consumeDemoVerificationCode(storage, email, parsed.data.code);
+    if (!signup) {
       return res.status(400).json({ message: "That code is incorrect or has expired. Please try again." });
     }
-
-    // Consume the code (single-use) and mark verified.
-    await storage.updateDemoSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
 
     // Enroll into the demo-activation drip on the FIRST verification only (never
     // backfill an already-verified signup). Fire-and-forget: best-effort, never
@@ -5645,12 +5629,13 @@ export function registerConsultantDashboardRoutes(app: Express): void {
 }
 
 // ===========================================================================
-// Public, UNAUTHENTICATED demo dashboard.
+// Public, OTP-gated demo dashboard.
 //
 // Serves ONLY the seeded "Demo Office" (invite code DEMO2024) sample roster —
 // the same fabricated dataset used for live sales demos (Sofia Castellano et
 // al.), never a real customer's office. This route:
-//   - reads NO session/cookie and uses NO auth middleware, and
+//   - accepts only the short-lived, scope-limited demo cookie issued after an
+//     email + one-time-code verification, and
 //   - resolves a single fixed demo office by its known invite code, so there
 //     is no code path from here into any real office's data, and
 //   - is strictly read-only (returns data; exposes no mutation), and
@@ -5661,9 +5646,74 @@ export function registerConsultantDashboardRoutes(app: Express): void {
 // never issuing a second, authenticated request.
 // ===========================================================================
 const PUBLIC_DEMO_OFFICE_INVITE_CODE = "DEMO2024";
+const DASHBOARD_DEMO_SESSION_COOKIE = "solve_dashboard_demo_session";
+
+function setDashboardDemoCookie(res: Response, token: string): void {
+  res.cookie(DASHBOARD_DEMO_SESSION_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 1000 * 60 * 60,
+    path: "/",
+  });
+}
 
 export function registerPublicDemoDashboardRoute(app: Express): void {
-  app.get("/api/public/demo-dashboard", async (_req, res) => {
+  // Step 1: send a Command Center-specific OTP. This deliberately uses the
+  // existing demo_signups code fields and shared OTP helper, but does not apply
+  // the free-voice-demo session cap: this visitor is only viewing sample data.
+  app.post("/api/dashboard-demo/request-code", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({ email: z.string().trim().email("A valid email is required").max(200) });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid email" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    if (!isUnlimitedDemoEmail(email) && isDisposableEmail(email)) {
+      return res.status(400).json({ message: "Please use a permanent email address to view the demo." });
+    }
+
+    const signup = await issueDemoVerificationCode(storage, email);
+    const sent = await sendDemoVerificationCode(email, signup.code!, "dashboard");
+    if (!sent) {
+      return res.status(502).json({ message: "We couldn't send your code just now. Please try again in a moment.", retryable: true });
+    }
+    res.json({ ok: true });
+  });
+
+  // Step 2: consume the shared OTP and set an HttpOnly dashboard-only session
+  // cookie. A dashboard token cannot authorize the voice-demo routes.
+  app.post("/api/dashboard-demo/verify", async (req, res) => {
+    if (!demoLimiter.check(clientIp(req))) {
+      return res.status(429).json({ message: "Too many requests. Please try again shortly." });
+    }
+    const schema = z.object({
+      email: z.string().trim().email("A valid email is required").max(200),
+      code: z.string().trim().length(6, "Enter the 6-digit code"),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid input" });
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const signup = await consumeDemoVerificationCode(storage, email, parsed.data.code);
+    if (!signup) {
+      return res.status(400).json({ message: "That code is incorrect or has expired. Please try again." });
+    }
+
+    setDashboardDemoCookie(res, signDashboardDemoToken(email));
+    res.json({ verified: true });
+  });
+
+  app.get("/api/public/demo-dashboard", async (req, res) => {
+    const token = readCookie(req, DASHBOARD_DEMO_SESSION_COOKIE);
+    const session = verifyDemoToken(token);
+    if (!session || session.scope !== "dashboard") {
+      return res.status(401).json({ message: "Email verification is required to view this demo." });
+    }
     const office = await storage.getOfficeByInviteCode(PUBLIC_DEMO_OFFICE_INVITE_CODE);
     if (!office) {
       return res.status(503).json({ message: "Demo dashboard is temporarily unavailable." });

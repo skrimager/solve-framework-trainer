@@ -12,9 +12,11 @@
 //
 // Email verification is NOT duplicated. The client calls the existing
 // /api/demo/request-code and /api/demo/verify, which only touch demo_signups and
-// are flow-agnostic; the signed token they mint is accepted here unchanged. Lead
-// capture likewise reuses /api/demo/lead. Those three routes are registered in
-// server/routes.ts and are the only demo routes not defined in this file.
+// issue the voice-scoped token accepted here. The Command Center demo reuses the
+// same OTP helpers through its own routes, but its dashboard-scoped token is
+// deliberately rejected here. Lead capture likewise reuses /api/demo/lead.
+// Those three voice-demo routes are registered in server/routes.ts and are the
+// only voice-demo routes not defined in this file.
 import type { Express, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -145,7 +147,7 @@ export function registerDemoV2Routes(app: Express, deps: DemoV2Deps): void {
 
   async function requireDemoSignup(req: Request, res: Response): Promise<DemoSignup | null> {
     const payload = verifyDemoToken(req.body?.token ?? req.query?.token);
-    if (!payload) {
+    if (!payload || payload.scope !== "voice") {
       res.status(401).json({ message: "Your demo session has expired. Please verify your email again." });
       return null;
     }

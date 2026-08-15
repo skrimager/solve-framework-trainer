@@ -149,6 +149,59 @@ export function isCodeValid(
   return true;
 }
 
+// The email-code storage surface shared by the free voice demo and the
+// Command Center demo gate. Keeping this small lets both flows use the same
+// one-time-code persistence and expiry rules without adding a second table.
+export interface DemoVerificationStore {
+  getDemoSignupByEmail(email: string): Promise<DemoSignup | undefined>;
+  createDemoSignup(signup: InsertDemoSignup): Promise<DemoSignup>;
+  updateDemoSignup(id: number, patch: Partial<InsertDemoSignup>): Promise<DemoSignup | undefined>;
+}
+
+// Issue and persist a fresh code for an email. Product-specific routes decide
+// their own admission rules before calling this, such as the voice demo's
+// one-session cap. This helper only owns the shared OTP primitive.
+export async function issueDemoVerificationCode(
+  store: DemoVerificationStore,
+  email: string,
+  now = new Date(),
+): Promise<DemoSignup> {
+  const normalizedEmail = normalizeEmail(email);
+  const code = generateVerificationCode();
+  const patch = {
+    code,
+    codeExpiresAt: codeExpiryFrom(now.getTime()),
+    lastSentAt: now.toISOString(),
+  };
+  const existing = await store.getDemoSignupByEmail(normalizedEmail);
+  if (!existing) {
+    return store.createDemoSignup({
+      email: normalizedEmail,
+      ...patch,
+      verified: false,
+      sessionsUsed: 0,
+      createdAt: now.toISOString(),
+    });
+  }
+  await store.updateDemoSignup(existing.id, patch);
+  return { ...existing, ...patch };
+}
+
+// Validate and consume an OTP exactly once. The returned row is the state that
+// existed immediately before verification, which lets a caller preserve its
+// own first-verification behavior without another database read.
+export async function consumeDemoVerificationCode(
+  store: DemoVerificationStore,
+  email: string,
+  code: string,
+  now = Date.now(),
+): Promise<DemoSignup | null> {
+  const signup = await store.getDemoSignupByEmail(normalizeEmail(email));
+  if (!signup || !isCodeValid(signup, code, now)) return null;
+  await store.updateDemoSignup(signup.id, { verified: true, code: null, codeExpiresAt: null });
+  return signup;
+}
+
 // True once the email has consumed all of its free sessions. `email` is
 // optional so existing call sites keep working; pass it whenever available so
 // allowlisted emails (see isUnlimitedDemoEmail) are never capped.
@@ -360,17 +413,26 @@ export function isDisposableEmail(email: string): boolean {
 }
 
 // --- Signed demo access token (mirrors the admin HMAC session token) --------
-type DemoTokenPayload = { email: string; exp: number };
+export type DemoTokenScope = "voice" | "dashboard";
+export type DemoTokenPayload = { email: string; exp: number; scope: DemoTokenScope };
 
 function b64url(input: Buffer | string): string {
   return Buffer.from(input).toString("base64url");
 }
 
-export function signDemoToken(email: string, now = Date.now()): string {
-  const payload: DemoTokenPayload = { email: normalizeEmail(email), exp: now + DEMO_TOKEN_TTL_MS };
+export function signDemoToken(
+  email: string,
+  now = Date.now(),
+  scope: DemoTokenScope = "voice",
+): string {
+  const payload: DemoTokenPayload = { email: normalizeEmail(email), exp: now + DEMO_TOKEN_TTL_MS, scope };
   const body = b64url(JSON.stringify(payload));
   const sig = createHmac("sha256", demoSecret()).update(body).digest("base64url");
   return `${body}.${sig}`;
+}
+
+export function signDashboardDemoToken(email: string, now = Date.now()): string {
+  return signDemoToken(email, now, "dashboard");
 }
 
 export function verifyDemoToken(token: string | undefined, now = Date.now()): DemoTokenPayload | null {
@@ -384,10 +446,15 @@ export function verifyDemoToken(token: string | undefined, now = Date.now()): De
   const expBuf = Buffer.from(expected);
   if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) return null;
   try {
-    const payload = JSON.parse(Buffer.from(body, "base64url").toString()) as DemoTokenPayload;
-    if (typeof payload.exp !== "number" || payload.exp < now) return null;
-    if (typeof payload.email !== "string") return null;
-    return payload;
+    const parsed = JSON.parse(Buffer.from(body, "base64url").toString()) as Partial<DemoTokenPayload>;
+    if (typeof parsed.exp !== "number" || parsed.exp < now) return null;
+    if (typeof parsed.email !== "string") return null;
+    // Tokens issued before scopes were introduced authorized the voice demo.
+    // Treat those signed legacy tokens as voice-only rather than widening them
+    // into access to the Command Center demo.
+    const scope = parsed.scope ?? "voice";
+    if (scope !== "voice" && scope !== "dashboard") return null;
+    return { email: parsed.email, exp: parsed.exp, scope };
   } catch {
     return null;
   }
@@ -404,11 +471,21 @@ export function ctaSeatQuestion(track: string = "consulting"): string {
 
 // Verification email content. Reuses the existing Resend transport in
 // server/notifications.ts — this only builds the subject/html.
-export function buildVerificationEmail(code: string): { subject: string; html: string } {
-  const subject = `Your SOLVE Framework demo code: ${code}`;
+export function buildVerificationEmail(
+  code: string,
+  purpose: DemoTokenScope = "voice",
+): { subject: string; html: string } {
+  const dashboard = purpose === "dashboard";
+  const subject = dashboard
+    ? `Your SOLVE Command Center demo code: ${code}`
+    : `Your SOLVE Framework demo code: ${code}`;
+  const title = dashboard ? "Your Command Center demo code" : "Your free voice demo code";
+  const intro = dashboard
+    ? "Enter this code to view the SOLVE Command Center demo:"
+    : "Enter this code to start your free live voice roleplay:";
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#111;">
-  <h2 style="margin:0 0 12px;">Your free voice demo code</h2>
-  <p style="margin:0 0 16px;">Enter this code to start your free live voice roleplay:</p>
+  <h2 style="margin:0 0 12px;">${title}</h2>
+  <p style="margin:0 0 16px;">${intro}</p>
   <p style="font-size:30px;font-weight:bold;letter-spacing:6px;margin:0 0 16px;">${code}</p>
   <p style="margin:0;color:#555;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
 </div>`;

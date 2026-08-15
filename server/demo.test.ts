@@ -4,7 +4,7 @@ import express from "express";
 import type { Server } from "node:http";
 
 import { storage } from "./storage";
-import { registerPublicAndAdminRoutes } from "./routes";
+import { registerPublicAndAdminRoutes, registerPublicDemoDashboardRoute } from "./routes";
 import { __setFetchForTests } from "./notifications";
 import { hashPassword } from "./admin";
 import {
@@ -18,7 +18,10 @@ import {
   isUnlimitedDemoEmail,
   healUnlimitedDemoUsage,
   signDemoToken,
+  signDashboardDemoToken,
   verifyDemoToken,
+  issueDemoVerificationCode,
+  consumeDemoVerificationCode,
   ctaSeatQuestion,
   buildVerificationEmail,
   isDeviceLimitReached,
@@ -206,6 +209,44 @@ describe("demo token", () => {
     assert.equal(verifyDemoToken(undefined, now), null);
     assert.equal(verifyDemoToken("nodot", now), null);
   });
+
+  test("issues a dashboard-only token for the Command Center demo", () => {
+    const token = signDashboardDemoToken("Dana@Example.com", now);
+    const payload = verifyDemoToken(token, now + 1000);
+    assert.equal(payload?.email, "dana@example.com");
+    assert.equal(payload?.scope, "dashboard");
+  });
+});
+
+describe("shared demo verification-code helpers", () => {
+  test("issue and consume use the same single-use OTP fields for a dashboard visitor", async () => {
+    const rows: DemoSignup[] = [];
+    const store = {
+      async getDemoSignupByEmail(email: string) {
+        return rows.find((row) => row.email === email);
+      },
+      async createDemoSignup(row: any) {
+        const created = { id: 1, ...row } as DemoSignup;
+        rows.push(created);
+        return created;
+      },
+      async updateDemoSignup(id: number, patch: any) {
+        const row = rows.find((candidate) => candidate.id === id);
+        if (row) Object.assign(row, patch);
+        return row;
+      },
+    };
+
+    const issuedAt = new Date("2026-07-05T12:00:00.000Z");
+    const issued = await issueDemoVerificationCode(store, "Dashboard@Example.com", issuedAt);
+    assert.equal(issued.email, "dashboard@example.com");
+    assert.match(issued.code!, /^\d{6}$/);
+    const verified = await consumeDemoVerificationCode(store, issued.email, issued.code!, issuedAt.getTime() + 1_000);
+    assert.equal(verified?.id, issued.id);
+    assert.equal(rows[0].verified, true);
+    assert.equal(rows[0].code, null);
+    assert.equal(await consumeDemoVerificationCode(store, issued.email, issued.code!, issuedAt.getTime() + 1_000), null);
+  });
 });
 
 describe("ctaSeatQuestion", () => {
@@ -225,6 +266,12 @@ describe("buildVerificationEmail", () => {
     assert.match(subject, /987654/);
     assert.match(html, /987654/);
     assert.match(html, /10 minutes/);
+  });
+
+  test("uses Command Center wording when the shared OTP is requested for the dashboard demo", () => {
+    const { subject, html } = buildVerificationEmail("987654", "dashboard");
+    assert.match(subject, /Command Center/);
+    assert.match(html, /Command Center demo/);
   });
 });
 
@@ -388,6 +435,7 @@ describe("public demo endpoints", () => {
     const app = express();
     app.use(express.json());
     registerPublicAndAdminRoutes(app);
+    registerPublicDemoDashboardRoute(app);
     await new Promise<void>((resolve) => {
       server = app.listen(0, () => resolve());
     });
@@ -443,6 +491,15 @@ describe("public demo endpoints", () => {
       id === scenario.id
         ? scenario
         : Array.from(demoPool.values()).find((s) => s.id === id);
+    (storage as any).getOfficeByInviteCode = async () => ({
+      id: 999,
+      name: "Acme Sales",
+      inviteCode: "DEMO2024",
+      subscriptionStatus: "active",
+    });
+    (storage as any).listUsersByOffice = async () => [];
+    (storage as any).listSessionsByOffice = async () => [];
+    (storage as any).listScenarios = async () => [];
     (storage as any).getDemoSignupByEmail = async (email: string) =>
       signups.find((s) => s.email === email);
     (storage as any).createDemoSignup = async (row: any) => {
@@ -651,6 +708,39 @@ describe("public demo endpoints", () => {
     assert.equal(body.verified, true);
     assert.equal(body.limitReached, true);
     assert.equal(body.token, undefined);
+  });
+
+  test("Command Center demo data is inaccessible until an email OTP creates a dashboard-only cookie", async () => {
+    const locked = await fetch(`${baseUrl}/api/public/demo-dashboard`);
+    assert.equal(locked.status, 401);
+
+    const request = await post("/api/dashboard-demo/request-code", { email: "dashboard@example.com" });
+    assert.equal(request.status, 200);
+    assert.match(signups[0].code!, /^\d{6}$/);
+
+    const verify = await post("/api/dashboard-demo/verify", {
+      email: "dashboard@example.com",
+      code: signups[0].code,
+    });
+    assert.equal(verify.status, 200);
+    const cookie = verify.headers.get("set-cookie")?.split(";")[0];
+    assert.ok(cookie, "a short-lived dashboard demo cookie is set");
+
+    const unlocked = await fetch(`${baseUrl}/api/public/demo-dashboard`, {
+      headers: { Cookie: cookie! },
+    });
+    assert.equal(unlocked.status, 200);
+    const body = await unlocked.json();
+    assert.equal(body.office.name, "Acme Sales");
+    assert.equal(body.office.inviteCode, "DEMO");
+  });
+
+  test("a dashboard-only token cannot start a free voice-demo session", async () => {
+    const res = await post("/api/demo/session", {
+      token: signDashboardDemoToken("dashboard@example.com"),
+      industry: "auto",
+    });
+    assert.equal(res.status, 401);
   });
 
   test("verify creates exactly one Contact with source voice_demo on first verification", async () => {
