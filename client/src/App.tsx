@@ -80,9 +80,9 @@ function AppRouter() {
           MESSAGE_COACH_ENABLED is not "true", so the page renders its own "not
           available" state rather than a broken form when the flag is off. */}
       <Route path="/message-coach" component={MessageCoach} />
-      {/* Public, read-only demo of the manager dashboard: no auth, seeded
-          sample data only. Served by the no-auth GET /api/public/demo-dashboard
-          endpoint; intentionally outside RequireAuth and with no path into the
+      {/* Public, read-only manager dashboard demo: email + OTP verification
+          sets a short-lived dashboard-only cookie before the sample-data endpoint
+          responds. It stays outside RequireAuth and has no path into the
           authenticated app. */}
       <Route path="/dashboard-demo" component={DemoDashboard} />
       {/* Self-serve office setup from the welcome-email link: public, no auth. The

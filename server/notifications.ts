@@ -1,5 +1,9 @@
 import type { Lead } from "@shared/schema";
-import { buildVerificationEmail, buildMessageCoachVerificationEmail } from "./demo";
+import {
+  buildVerificationEmail,
+  buildMessageCoachVerificationEmail,
+  type DemoTokenScope,
+} from "./demo";
 import { APP_URL } from "./stripe";
 
 // Lead-notification emails via the Resend HTTP API. No SDK dependency: we POST
@@ -386,7 +390,11 @@ export async function sendConsultantEnrollmentEmail(
 // reusing the exact same Resend transport as sendLeadNotification. Unlike the
 // best-effort lead email, the code IS the demo's auth, so this returns whether
 // the send succeeded — the caller surfaces a retry to the visitor on false.
-export async function sendDemoVerificationCode(email: string, code: string): Promise<boolean> {
+export async function sendDemoVerificationCode(
+  email: string,
+  code: string,
+  purpose: DemoTokenScope = "voice",
+): Promise<boolean> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn(
@@ -396,7 +404,7 @@ export async function sendDemoVerificationCode(email: string, code: string): Pro
   }
 
   try {
-    const { subject, html } = buildVerificationEmail(code);
+    const { subject, html } = buildVerificationEmail(code, purpose);
     const res = await getFetch()(RESEND_API_URL, {
       method: "POST",
       headers: {

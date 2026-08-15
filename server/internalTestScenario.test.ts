@@ -274,7 +274,8 @@ describe("the seeded Testdummy account", () => {
 
     assert.equal(createdOffices.length, 1);
     assert.equal(createdOffices[0].name, OFFICE_NAME);
-    // /api/public/demo-dashboard serves the Demo Office roster unauthenticated.
+    // /api/public/demo-dashboard serves the Demo Office roster after its
+    // separate email-verification gate.
     assert.notEqual(createdOffices[0].inviteCode, "DEMO2024");
     assert.equal(createdUsers[0].officeId, offices[0].id);
     // Both office gates in checkSeatAccess must pass or the account cannot practise.
