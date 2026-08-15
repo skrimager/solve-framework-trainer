@@ -71,6 +71,7 @@ import {
   enrollInboundLead,
   SEQUENCE_STEPS,
 } from "./opportunities";
+import { startDemoRosterRefreshScheduler } from "./demoRosterScheduler";
 import { enrollDemoDrip } from "./demoDrip";
 import {
   verifyUnsubscribeToken,
@@ -1551,6 +1552,10 @@ export async function registerRoutes(
   // double-start inside startOutreachScheduler. Only booted here (the DB entry
   // point), never in the test harness which drives sendDueOutreach directly.
   startOutreachScheduler(storage);
+  // Keep only the shared Demo Office's six fabricated consultants fresh. The
+  // scheduler is allowlisted internally and never reaches Consultant Demo or
+  // any other office.
+  startDemoRosterRefreshScheduler(storage);
 
   return httpServer;
 }
