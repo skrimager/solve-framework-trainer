@@ -57,7 +57,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar } from "@/components/ui/calendar";
 import type { DateRange } from "react-day-picker";
 import { format as dateFnsFormat } from "date-fns";
-import { ConsultantRoster } from "@/components/consultant-roster";
+import { ConsultantRoster, type RosterReadOnlyData } from "@/components/consultant-roster";
 import { useAuth } from "@/lib/auth";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -103,7 +103,7 @@ function officeActive(office?: Office): boolean {
   return !!office && ACTIVE_STATUSES.includes(office.subscriptionStatus);
 }
 
-type DashboardStats = {
+export type DashboardStats = {
   period: { label: string; days: number; since: string; until?: string };
   earliestSessionAt?: string | null;
   kpis: {
@@ -138,7 +138,7 @@ type DashboardStats = {
 // Additive Command Center widget data — see server buildCommandCenterExtras.
 // Deliberately a separate query/type from DashboardStats so the original
 // dashboard-stats response and its consumers are untouched.
-type CommandCenterExtras = {
+export type CommandCenterExtras = {
   teamHealth: { score: number | null; deltaPercent: number | null };
   conversations: { count: number; deltaPercent: number | null; sparkline: number[] };
   completionRate: { percent: number | null; deltaPercent: number | null };
@@ -239,7 +239,7 @@ const NAV: { key: Section; label: string; icon: typeof LayoutDashboard }[] = [
 // more useful default than the old hardcoded 7-day window, though 7 days
 // remains one of the presets).
 // ---------------------------------------------------------------------------
-type DateRangeValue = { since: Date; until: Date; preset: DateRangePreset };
+export type DateRangeValue = { since: Date; until: Date; preset: DateRangePreset };
 type DateRangePreset = "7d" | "30d" | "90d" | "all" | "custom";
 
 function startOfDay(d: Date): Date {
@@ -601,7 +601,7 @@ function Panel({
 }) {
   return (
     <section
-      className={`rounded-xl border p-4 sm:p-5 ${className ?? ""}`}
+      className={`min-w-0 rounded-xl border p-4 sm:p-5 ${className ?? ""}`}
       style={{
         backgroundColor: NAVY,
         borderColor: accent ? `${accent}40` : BORDER,
@@ -771,7 +771,7 @@ function alertMessage(alert: CommandCenterExtras["alerts"][number], reason: "ina
 // The ALERTS KPI card. Clicking it opens a modal listing what the alerts
 // actually are, derived from real consultant data (session recency, score
 // trend) already computed server-side in computeAlerts.
-function AlertsCard({ alerts }: { alerts: CommandCenterExtras["alerts"] }) {
+function AlertsCard({ alerts, readOnly = false }: { alerts: CommandCenterExtras["alerts"]; readOnly?: boolean }) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
   const rows = alerts.flatMap((alert) =>
@@ -840,17 +840,19 @@ function AlertsCard({ alerts }: { alerts: CommandCenterExtras["alerts"] }) {
                   data-testid={`alert-row-${r.key}`}
                 >
                   <span className="flex-1">{r.text}</span>
-                  <button
-                    type="button"
-                    onClick={() => acknowledgeAlert.mutate({ consultantId: r.consultantId, reason: r.reason })}
-                    disabled={acknowledgeAlert.isPending}
-                    className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors disabled:opacity-60"
-                    style={{ borderColor: `${ORANGE_LIGHT}80`, color: ORANGE_LIGHT }}
-                    data-testid={`button-clear-alert-${r.consultantId}-${r.reason}`}
-                  >
-                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                    Clear
-                  </button>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => acknowledgeAlert.mutate({ consultantId: r.consultantId, reason: r.reason })}
+                      disabled={acknowledgeAlert.isPending}
+                      className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors disabled:opacity-60"
+                      style={{ borderColor: `${ORANGE_LIGHT}80`, color: ORANGE_LIGHT }}
+                      data-testid={`button-clear-alert-${r.consultantId}-${r.reason}`}
+                    >
+                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                      Clear
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -928,7 +930,7 @@ function RingGauge({ value, size = 76, color = GREEN_LIGHT }: { value: number | 
 // Respects the office's saved widgetConfig (missing keys default visible).
 // ---------------------------------------------------------------------------
 
-function CommandCenterSection({
+export function CommandCenterSection({
   stats,
   statsLoading,
   locked,
@@ -940,6 +942,7 @@ function CommandCenterSection({
   dateRange,
   onDateRangeChange,
   earliestSessionAt,
+  readOnlyData,
 }: {
   stats?: DashboardStats;
   statsLoading: boolean;
@@ -952,6 +955,7 @@ function CommandCenterSection({
   dateRange: DateRangeValue;
   onDateRangeChange: (next: DateRangeValue) => void;
   earliestSessionAt?: string | null;
+  readOnlyData?: CommandCenterReadOnlyData;
 }) {
   const [drilldown, setDrilldown] = useState<"conversations" | "certifications" | null>(null);
   const [openSessionId, setOpenSessionId] = useState<number | null>(null);
@@ -1052,7 +1056,7 @@ function CommandCenterSection({
               </button>
             )}
           </div>
-          {show("alerts") && <AlertsCard alerts={extras.alerts} />}
+          {show("alerts") && <AlertsCard alerts={extras.alerts} readOnly={!!readOnlyData} />}
         </div>
       )}
 
@@ -1105,7 +1109,7 @@ function CommandCenterSection({
           )}
           {show("liveFeed") && (
             <Panel title="Live Feed" caption="Recent activity across your office" testId="panel-live-feed" accent={GREEN}>
-              <LiveFeedList events={extras.liveFeed} />
+              <LiveFeedList events={extras.liveFeed} readOnlySessions={readOnlyData?.sessions} />
             </Panel>
           )}
         </div>
@@ -1140,7 +1144,7 @@ function CommandCenterSection({
           )}
           {show("topPerformers") && (
             <Panel title="Top Performers" caption="Ranked by average discovery score" testId="panel-top-performers" accent={GREEN}>
-              <Leaderboard leaderboard={stats?.leaderboard ?? []} limit={5} dateRange={dateRange} />
+              <Leaderboard leaderboard={stats?.leaderboard ?? []} limit={5} dateRange={dateRange} readOnlyPerformers={readOnlyData?.performers} />
             </Panel>
           )}
         </div>
@@ -1156,7 +1160,7 @@ function CommandCenterSection({
           )}
           {show("scoreDistribution") && (
             <Panel title="Score Distribution" caption={`Sessions by score band, ${label}`} testId="panel-score-distribution" accent={ORANGE}>
-              <ScoreDistributionChart data={extras.scoreDistribution} dateRange={dateRange} />
+              <ScoreDistributionChart data={extras.scoreDistribution} dateRange={dateRange} readOnlyScoreBands={readOnlyData?.scoreDistribution} />
             </Panel>
           )}
           {show("achievements") && (
@@ -1181,7 +1185,7 @@ function CommandCenterSection({
               <PopularScenariosGrid scenarios={extras.popularScenarios} />
             </Panel>
           )}
-          {show("ctaPanel") && <ElevateTeamCta onGoToScenarios={onGoToScenarios} />}
+          {show("ctaPanel") && !readOnlyData && <ElevateTeamCta onGoToScenarios={onGoToScenarios} />}
         </div>
       )}
 
@@ -1195,18 +1199,20 @@ function CommandCenterSection({
           setDrilldown(null);
           setOpenSessionId(sessionId);
         }}
+        readOnlySessions={readOnlyData?.conversations}
       />
       <CertificationListModal
         open={drilldown === "certifications"}
         dateRange={dateRange}
         onClose={() => setDrilldown(null)}
+        readOnlyCertifications={readOnlyData?.certifications}
       />
-      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
+      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} readOnlySessions={readOnlyData?.sessions} />
     </div>
   );
 }
 
-function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
+function LiveFeedList({ events, readOnlySessions }: { events: CommandCenterExtras["liveFeed"]; readOnlySessions?: Record<number, ManagerSessionDetail> }) {
   const [openSessionId, setOpenSessionId] = useState<number | null>(null);
   if (events.length === 0) {
     return <EmptyState message="No recent activity yet" testId="empty-live-feed" />;
@@ -1250,12 +1256,12 @@ function LiveFeedList({ events }: { events: CommandCenterExtras["liveFeed"] }) {
           );
         })}
       </ul>
-      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
+      <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} readOnlySessions={readOnlySessions} />
     </>
   );
 }
 
-type ConversationDrilldownItem = {
+export type ConversationDrilldownItem = {
   consultantName: string;
   scenarioTitle: string;
   score: number | null;
@@ -1263,7 +1269,7 @@ type ConversationDrilldownItem = {
   sessionId: number;
 };
 
-type CertificationDrilldownItem = {
+export type CertificationDrilldownItem = {
   consultantName: string;
   track: "consulting" | "leadership";
   certifiedAt: string;
@@ -1278,17 +1284,20 @@ function ConversationListModal({
   dateRange,
   onClose,
   onSelectSession,
+  readOnlySessions,
 }: {
   open: boolean;
   dateRange: DateRangeValue;
   onClose: () => void;
   onSelectSession: (sessionId: number) => void;
+  readOnlySessions?: ConversationDrilldownItem[];
 }) {
   const query = commandCenterRangeQuery(dateRange);
-  const { data, isLoading, isError } = useQuery<{ sessions: ConversationDrilldownItem[] }>({
+  const { data: fetchedData, isLoading, isError } = useQuery<{ sessions: ConversationDrilldownItem[] }>({
     queryKey: [`/api/manager/dashboard-command-center/conversations?${query}`],
-    enabled: open,
+    enabled: open && !readOnlySessions,
   });
+  const data = readOnlySessions ? { sessions: readOnlySessions } : fetchedData;
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -1342,16 +1351,19 @@ function CertificationListModal({
   open,
   dateRange,
   onClose,
+  readOnlyCertifications,
 }: {
   open: boolean;
   dateRange: DateRangeValue;
   onClose: () => void;
+  readOnlyCertifications?: CertificationDrilldownItem[];
 }) {
   const query = commandCenterRangeQuery(dateRange);
-  const { data, isLoading, isError } = useQuery<{ certifications: CertificationDrilldownItem[] }>({
+  const { data: fetchedData, isLoading, isError } = useQuery<{ certifications: CertificationDrilldownItem[] }>({
     queryKey: [`/api/manager/dashboard-command-center/certifications?${query}`],
-    enabled: open,
+    enabled: open && !readOnlyCertifications,
   });
+  const data = readOnlyCertifications ? { certifications: readOnlyCertifications } : fetchedData;
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -1392,7 +1404,7 @@ function CertificationListModal({
   );
 }
 
-type ManagerSessionDetail = {
+export type ManagerSessionDetail = {
   id: number;
   consultantId: number;
   consultantName: string;
@@ -1448,12 +1460,13 @@ function fmtFullDate(iso: string | null): string {
 // Session detail modal opened from a Live Feed entry. Fetches the full,
 // untruncated session record from the manager-scoped endpoint (own-office
 // consultants only, see GET /api/manager/session/:id in server/routes.ts).
-function SessionDetailModal({ sessionId, onClose }: { sessionId: number | null; onClose: () => void }) {
+function SessionDetailModal({ sessionId, onClose, readOnlySessions }: { sessionId: number | null; onClose: () => void; readOnlySessions?: Record<number, ManagerSessionDetail> }) {
   const { user } = useAuth();
-  const { data, isLoading, isError } = useQuery<ManagerSessionDetail>({
+  const { data: fetchedData, isLoading, isError } = useQuery<ManagerSessionDetail>({
     queryKey: [`/api/manager/session/${sessionId}`],
-    enabled: sessionId !== null && !!user,
+    enabled: sessionId !== null && !!user && !readOnlySessions,
   });
+  const data = sessionId !== null && readOnlySessions ? readOnlySessions[sessionId] : fetchedData;
 
   return (
     <Dialog open={sessionId !== null} onOpenChange={(o) => !o && onClose()}>
@@ -1625,7 +1638,7 @@ function ConversationOutcomesDonut({ data }: { data: CommandCenterExtras["conver
   );
 }
 
-type ScoreBandSessionList = {
+export type ScoreBandSessionList = {
   band: string;
   sessions: {
     sessionId: number;
@@ -1639,16 +1652,19 @@ type ScoreBandSessionList = {
 function ScoreDistributionChart({
   data,
   dateRange,
+  readOnlyScoreBands,
 }: {
   data: CommandCenterExtras["scoreDistribution"];
   dateRange: DateRangeValue;
+  readOnlyScoreBands?: Record<string, ScoreBandSessionList>;
 }) {
   const [selectedBand, setSelectedBand] = useState<string | null>(null);
   const query = commandCenterRangeQuery(dateRange);
-  const { data: detail, isLoading, isError } = useQuery<ScoreBandSessionList>({
+  const { data: fetchedDetail, isLoading, isError } = useQuery<ScoreBandSessionList>({
     queryKey: [`/api/manager/dashboard-command-center/score-distribution?band=${selectedBand}&${query}`],
-    enabled: selectedBand !== null,
+    enabled: selectedBand !== null && !readOnlyScoreBands,
   });
+  const detail = selectedBand !== null && readOnlyScoreBands ? readOnlyScoreBands[selectedBand] : fetchedDetail;
   const total = data.reduce((sum, d) => sum + d.count, 0);
   if (total === 0) {
     return <EmptyState message="No scored sessions yet" testId="empty-score-distribution" />;
@@ -1949,28 +1965,44 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
   );
 }
 
+export type PerformerDrilldown = {
+  consultantId: number;
+  consultantName: string;
+  averageScore: number | null;
+  sessionCount: number;
+  scoreSum: number;
+  sessions: { sessionId: number; scenarioTitle: string; score: number; completedAt: string }[];
+};
+
+// Public demo data uses the exact Command Center visual components while supplying
+// static fixture data for every drill-down. This avoids authenticated manager
+// requests and keeps the demonstration strictly read-only.
+export type CommandCenterReadOnlyData = {
+  conversations: ConversationDrilldownItem[];
+  certifications: CertificationDrilldownItem[];
+  sessions: Record<number, ManagerSessionDetail>;
+  scoreDistribution: Record<string, ScoreBandSessionList>;
+  performers: Record<number, PerformerDrilldown>;
+};
+
 function Leaderboard({
   leaderboard,
   limit,
   dateRange,
+  readOnlyPerformers,
 }: {
   leaderboard: DashboardStats["leaderboard"];
   limit?: number;
   dateRange?: DateRangeValue;
+  readOnlyPerformers?: Record<number, PerformerDrilldown>;
 }) {
   const [selectedConsultantId, setSelectedConsultantId] = useState<number | null>(null);
   const query = dateRange ? commandCenterRangeQuery(dateRange) : "";
-  const { data: detail, isLoading, isError } = useQuery<{
-    consultantId: number;
-    consultantName: string;
-    averageScore: number | null;
-    sessionCount: number;
-    scoreSum: number;
-    sessions: { sessionId: number; scenarioTitle: string; score: number; completedAt: string }[];
-  }>({
+  const { data: fetchedDetail, isLoading, isError } = useQuery<PerformerDrilldown>({
     queryKey: [`/api/manager/dashboard-command-center/performers/${selectedConsultantId}?${query}`],
-    enabled: selectedConsultantId !== null && !!dateRange,
+    enabled: selectedConsultantId !== null && !!dateRange && !readOnlyPerformers,
   });
+  const detail = selectedConsultantId !== null && readOnlyPerformers ? readOnlyPerformers[selectedConsultantId] : fetchedDetail;
   const ranked = leaderboard.filter((l) => l.averageScore !== null);
   const rows = limit ? ranked.slice(0, limit) : leaderboard;
   if (ranked.length === 0) {
@@ -2061,27 +2093,29 @@ function Leaderboard({
 // Team section: the existing roster, on the command-center chrome.
 // ---------------------------------------------------------------------------
 
-function TeamSection({
+export function TeamSection({
   office,
   isManager,
   userId,
   officeId,
+  readOnlyData,
 }: {
   office?: Office;
   isManager: boolean;
   userId?: number;
   officeId?: number;
+  readOnlyData?: RosterReadOnlyData;
 }) {
   return (
     <div className="space-y-6">
-      {isManager && office && officeActive(office) && <InviteCodeCard office={office} />}
-      {isManager && office && officeActive(office) && userId != null && (
+      {isManager && !readOnlyData && office && officeActive(office) && <InviteCodeCard office={office} />}
+      {isManager && !readOnlyData && office && officeActive(office) && userId != null && (
         <EmailInviteCard officeName={office.name} />
       )}
-      {userId != null && officeId != null && (
-        <div className="rounded-xl border overflow-hidden" style={{ borderColor: BORDER }}>
+      {(readOnlyData || (userId != null && officeId != null)) && (
+        <div className="rounded-xl border overflow-hidden" style={{ borderColor: BORDER }} data-testid="panel-team-roster">
           <div className="[&_*]:!text-inherit">
-            <ConsultantRoster officeId={officeId} />
+            <ConsultantRoster officeId={officeId ?? 0} readOnlyData={readOnlyData} />
           </div>
         </div>
       )}
