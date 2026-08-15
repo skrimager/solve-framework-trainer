@@ -733,6 +733,20 @@ describe("public demo endpoints", () => {
     const body = await unlocked.json();
     assert.equal(body.office.name, "Acme Sales");
     assert.equal(body.office.inviteCode, "DEMO");
+    // The existing compact shape remains available while the unlocked page also
+    // receives the shared Command Center data and every read-only drill-down.
+    assert.equal(body.stats.completed, 154);
+    assert.equal(body.commandCenter.stats.kpis.teamAverageScore, 84);
+    assert.equal(body.commandCenter.extras.teamHealth.score, 86);
+    assert.equal(body.commandCenter.extras.widgetConfig.teamHealth, true);
+    assert.equal(body.commandCenter.extras.alerts.length, 2);
+    assert.ok(body.commandCenter.extras.liveFeed.length > 0);
+    assert.equal(body.commandCenter.stats.discoveryDimensions.length, 5);
+    assert.ok(body.consultants.length >= 6);
+    assert.ok(body.details[101]);
+    assert.ok(body.commandCenter.readOnlyData.conversations.length > 0);
+    assert.ok(body.commandCenter.readOnlyData.sessions[501]);
+    assert.ok(body.commandCenter.readOnlyData.performers[101]);
   });
 
   test("a dashboard-only token cannot start a free voice-demo session", async () => {

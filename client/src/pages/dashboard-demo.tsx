@@ -2,11 +2,12 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ConsultantRoster, type RosterReadOnlyData } from "@/components/consultant-roster";
+import type { RosterReadOnlyData } from "@/components/consultant-roster";
+import { CommandCenterSection, TeamSection, type CommandCenterExtras, type CommandCenterReadOnlyData, type DashboardStats, type DateRangeValue } from "@/pages/dashboard";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 
 // Brand palette (shared with the rest of the app / marketing site).
@@ -17,6 +18,11 @@ const DASHBOARD_DEMO_QUERY_KEY = ["/api/public/demo-dashboard"];
 type DemoDashboardResponse = {
   office: { name: string; inviteCode: string; subscriptionStatus: string };
   stats: { completed: number; avgScore: number | null; inProgress: number };
+  commandCenter: {
+    stats: DashboardStats;
+    extras: CommandCenterExtras;
+    readOnlyData: CommandCenterReadOnlyData;
+  };
 } & RosterReadOnlyData;
 
 function errorMessage(error: Error): string {
@@ -28,6 +34,11 @@ function errorMessage(error: Error): string {
 // email-and-code gate instead of any sample company data.
 export default function DemoDashboard() {
   const queryClient = useQueryClient();
+  const [dateRange, setDateRange] = useState<DateRangeValue>(() => ({
+    since: new Date("2026-07-16T00:00:00.000Z"),
+    until: new Date("2026-08-15T23:59:59.999Z"),
+    preset: "30d",
+  }));
   const { data, isLoading, isError, error } = useQuery<DemoDashboardResponse | null>({
     queryKey: DASHBOARD_DEMO_QUERY_KEY,
     queryFn: getQueryFn({ on401: "returnNull" }),
@@ -69,11 +80,10 @@ export default function DemoDashboard() {
   }
 
   return (
-    <div className="min-h-dvh bg-background">
+    <div className="min-h-dvh" style={{ backgroundColor: "#050B18" }}>
       <DemoBanner />
-
-      <header className="border-b bg-card">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3">
+      <header className="border-b" style={{ backgroundColor: "#0A1428", borderColor: "rgba(255,255,255,0.09)" }}>
+        <div className="mx-auto flex max-w-[1400px] items-center gap-3 px-4 py-4 sm:px-6">
           <Link
             href="/"
             className="shrink-0 inline-flex items-center rounded-[10px]"
@@ -83,74 +93,50 @@ export default function DemoDashboard() {
             <img
               src="/solve-wordmark-bigtag-transparent.png"
               alt="SOLVE Framework - Practice. Performance. Period."
-              className="h-14 w-auto block"
+              className="h-11 w-auto block"
               data-testid="img-solve-logo"
             />
           </Link>
           <div className="min-w-0">
-            <h1 className="text-sm font-semibold leading-tight truncate" data-testid="text-page-title">
-              Manager overview
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-orange-300" data-testid="text-demo-read-only-label">
+              Read-only Command Center
+            </p>
+            <h1 className="text-lg font-semibold leading-tight text-white truncate" data-testid="text-page-title">
+              {data.office.name}
             </h1>
-            <p className="text-xs text-muted-foreground truncate">SOLVE Platform™ - discovery training</p>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-        <div className="space-y-6">
-          <Card className="border-2" style={{ borderColor: ORANGE }}>
-            <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
-              <div>
-                <p className="text-sm text-muted-foreground">Your office invite code</p>
-                <p className="text-2xl font-bold tracking-widest" data-testid="text-invite-code">
-                  {data.office.inviteCode}
-                </p>
-              </div>
-              <p className="text-xs text-muted-foreground max-w-xs">
-                Share this code with your consultants so they can join{" "}
-                <span className="font-medium">{data.office.name}</span> at sign-up.
-              </p>
-            </CardContent>
-          </Card>
-
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm text-muted-foreground font-normal">Sessions completed</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xl font-semibold" data-testid="text-completed-count">
-                  {data.stats.completed}
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm text-muted-foreground font-normal">Average discovery score</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xl font-semibold" data-testid="text-avg-score">
-                  {data.stats.avgScore ?? "-"}
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm text-muted-foreground font-normal">In progress</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xl font-semibold" data-testid="text-in-progress-count">
-                  {data.stats.inProgress}
-                </p>
-              </CardContent>
-            </Card>
+      <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:py-8" data-testid="demo-command-center">
+        <section className="space-y-6" aria-labelledby="demo-overview-heading" data-testid="section-demo-overview">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-orange-300">Overview</p>
+            <h2 id="demo-overview-heading" className="mt-1 text-xl font-bold text-white">What SOLVE is seeing</h2>
+            <p className="mt-1 text-sm text-white/60">Team health, discovery performance, conversation outcomes, and coaching signals for Acme Sales.</p>
           </div>
-
-          <ConsultantRoster
-            officeId={0}
-            readOnlyData={{ consultants: data.consultants, details: data.details }}
+          <CommandCenterSection
+            stats={data.commandCenter.stats}
+            statsLoading={false}
+            extras={data.commandCenter.extras}
+            extrasLoading={false}
+            isManager={false}
+            onGoToScenarios={() => undefined}
+            dateRange={dateRange}
+            onDateRangeChange={setDateRange}
+            earliestSessionAt={data.commandCenter.stats.earliestSessionAt}
+            readOnlyData={data.commandCenter.readOnlyData}
           />
-        </div>
+        </section>
+
+        <section className="mt-10 border-t pt-8" style={{ borderColor: "rgba(255,255,255,0.09)" }} aria-labelledby="demo-people-heading" data-testid="section-demo-people">
+          <div className="mb-6">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-orange-300">People</p>
+            <h2 id="demo-people-heading" className="mt-1 text-xl font-bold text-white">Consultant roster</h2>
+            <p className="mt-1 text-sm text-white/60">View tier, certification, progress, conversations, score, and recent activity. Demo data is illustrative and cannot be changed.</p>
+          </div>
+          <TeamSection isManager={false} officeId={0} readOnlyData={{ consultants: data.consultants, details: data.details }} />
+        </section>
       </main>
     </div>
   );

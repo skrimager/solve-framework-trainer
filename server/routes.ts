@@ -100,6 +100,7 @@ import {
   demoAbuseAnalytics,
 } from "./demo";
 import { registerDemoV2Routes } from "./demoV2Routes";
+import { buildAcmeDemoDashboardPayload } from "./demo-dashboard-fixture";
 import { DEMO_V2_ALL_SLUGS } from "./demoV2";
 import {
   isInternalTestScenario,
@@ -5714,89 +5715,9 @@ export function registerPublicDemoDashboardRoute(app: Express): void {
     if (!session || session.scope !== "dashboard") {
       return res.status(401).json({ message: "Email verification is required to view this demo." });
     }
-    const office = await storage.getOfficeByInviteCode(PUBLIC_DEMO_OFFICE_INVITE_CODE);
-    if (!office) {
-      return res.status(503).json({ message: "Demo dashboard is temporarily unavailable." });
-    }
-
-    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
-      storage.listUsersByOffice(office.id),
-      storage.listSessionsByOffice(office.id),
-      storage.listScenarios(),
-    ]);
-
-    const sessionsByUser = new Map<number, Session[]>();
-    for (const s of officeSessions) {
-      const list = sessionsByUser.get(s.userId) ?? [];
-      list.push(s);
-      sessionsByUser.set(s.userId, list);
-    }
-    const scenarioById = new Map(allScenarios.map((s) => [s.id, s]));
-
-    const consultantUsers = officeUsers.filter((u) => u.role === "consultant");
-    const consultants = consultantUsers.map((u) =>
-      buildConsultantSummary(u, sessionsByUser.get(u.id) ?? [], allScenarios),
-    );
-
-    // Per-consultant session history keyed by consultant id, mirroring the
-    // authenticated detail route's shape so the client's read-only drill-down
-    // panel needs no second call.
-    const details: Record<number, unknown> = {};
-    for (const u of consultantUsers) {
-      const userSessions = sessionsByUser.get(u.id) ?? [];
-      const sessions = userSessions
-        .map((s) => {
-          const scenario = scenarioById.get(s.scenarioId);
-          let rubricScores: unknown = null;
-          if (s.rubricScores) {
-            try {
-              rubricScores = JSON.parse(s.rubricScores);
-            } catch {
-              rubricScores = null;
-            }
-          }
-          return {
-            id: s.id,
-            scenarioTitle: scenario?.title ?? `Conversation #${s.scenarioId}`,
-            scenarioVertical: scenario?.vertical ?? null,
-            track: scenarioTrack(scenario?.track),
-            status: s.status,
-            score: s.score,
-            rubricScores,
-            createdAt: s.createdAt,
-            completedAt: s.completedAt,
-          };
-        })
-        .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt));
-      details[u.id] = {
-        consultant: buildConsultantSummary(u, userSessions, allScenarios),
-        sessions,
-      };
-    }
-
-    // Office-wide stat cards, mirroring the authenticated manager dashboard.
-    const completedSessions = officeSessions.filter((s) => s.status === "completed");
-    const scored = completedSessions.filter((s) => s.score !== null);
-    const avgScore = scored.length
-      ? Math.round(scored.reduce((sum, s) => sum + (s.score as number), 0) / scored.length)
-      : null;
-
-    res.json({
-      office: {
-        name: office.name,
-        // Literal override for the public route — the real seeded invite code
-        // (DEMO2024) is intentionally never sent to the client.
-        inviteCode: "DEMO",
-        subscriptionStatus: office.subscriptionStatus,
-      },
-      stats: {
-        completed: completedSessions.length,
-        avgScore,
-        inProgress: officeSessions.length - completedSessions.length,
-      },
-      consultants,
-      details,
-    });
+    // This public experience is deliberately backed by a fictional static
+    // fixture, never by a real office row or customer analytics.
+    res.json(buildAcmeDemoDashboardPayload());
   });
 }
 
