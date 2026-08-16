@@ -653,6 +653,40 @@
   box-shadow: 0 0 10px rgba(255, 122, 26, 0.5);
 }
 
+/* The public demo reuses the Command Center visual system but has a
+ * single-field OTP entry card. Keep its desktop composition compact enough
+ * that the primary action remains in the initial viewport. Manager login
+ * retains the more spacious two-field composition above. */
+.demoPageContent {
+  padding-top: 72px;
+  padding-bottom: 36px;
+}
+
+.demoPageContent .brand {
+  margin-bottom: 8px;
+}
+
+.demoPageContent .brandLockup {
+  margin-bottom: 18px;
+}
+
+.demoPageContent .loginHeading {
+  margin: 10px 0;
+}
+
+.demoLoginCard {
+  margin-top: 28px;
+  padding: 32px 46px 30px;
+}
+
+.demoLoginCard .cardTitleRow {
+  margin-bottom: 22px;
+}
+
+.demoLoginCard .formGroup {
+  margin-bottom: 22px;
+}
+
 @media (max-width: 850px) {
   .pageContent { padding-top: 56px; }
   .brandLockup { gap: 14px; margin-bottom: 30px; }
@@ -665,6 +699,13 @@
   .bottomNavigation { padding-top: 64px; }
   .bottomNavigation ul { gap: 14px; }
   .bottomNavigation li { font-size: 12px; letter-spacing: 0.14em; }
+  .demoPageContent { padding-top: 56px; padding-bottom: 56px; }
+  .demoPageContent .brand { margin-bottom: 20px; }
+  .demoPageContent .brandLockup { margin-bottom: 30px; }
+  .demoPageContent .loginHeading { margin: 24px 0 18px; }
+  .demoLoginCard { margin-top: 40px; padding: 36px 34px 32px; }
+  .demoLoginCard .cardTitleRow { margin-bottom: 34px; }
+  .demoLoginCard .formGroup { margin-bottom: 30px; }
 }
 
 @media (max-width: 560px) {
@@ -693,6 +734,12 @@
   .bottomNavigation ul { gap: 7px; }
   .bottomNavigation li { font-size: 9px; letter-spacing: 0.09em; }
   .separator { height: 20px; }
+  .demoPageContent { padding: 36px 14px 34px; }
+  .demoPageContent .brandLockup { margin-bottom: 24px; }
+  .demoPageContent .loginHeading { margin: 18px 0 14px; }
+  .demoLoginCard { margin-top: 28px; padding: 30px 22px 26px; }
+  .demoLoginCard .cardTitleRow { margin-bottom: 26px; }
+  .demoLoginCard .formGroup { margin-bottom: 22px; }
   .analyticsPanel, .worldMap { opacity: 0.2; }
   .chair { opacity: 0.7; }
   .consoleRoom { min-height: 220px; }

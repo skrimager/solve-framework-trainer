@@ -70,11 +70,11 @@ describe("post-free-session fork copy", () => {
     assert.match(copy, /practice/i);
   });
 
-  // Lime green is reserved for admin/vault, so the fork earns its emphasis from
-  // size, border and weight instead. Orange is the only hard-coded color here.
-  test("the demo page hard-codes no color other than brand orange", () => {
+  // Lime green is reserved for admin/vault. The free-scenario access surface is
+  // intentionally limited to the customer-facing SOLVE navy/orange pair.
+  test("the demo page hard-codes only the customer-facing navy and orange pair", () => {
     const hexes = new Set(demoPageSource.match(/#[0-9A-Fa-f]{3,8}/g) ?? []);
-    assert.deepEqual([...hexes], ["#E06D00"]);
+    assert.deepEqual([...hexes].sort(), ["#0A1A30", "#E06D00"]);
   });
 });
 

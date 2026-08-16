@@ -3,12 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { RosterReadOnlyData } from "@/components/consultant-roster";
 import { CommandCenterSection, TeamSection, type CommandCenterExtras, type CommandCenterReadOnlyData, type DashboardStats, type DateRangeValue } from "@/pages/dashboard";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
+import { LogoMark } from "@/pages/manager-login";
+import chromeStyles from "@/pages/manager-login.module.css";
 
 // Brand palette (shared with the rest of the app / marketing site).
 const NAVY = "#0A1A30";
@@ -175,37 +175,51 @@ function DashboardDemoGate({ onVerified }: { onVerified: () => void }) {
   });
 
   return (
-    <div className="min-h-dvh bg-background px-4 py-8">
-      <div className="mx-auto max-w-md space-y-6">
-        <div className="text-center">
-          <div
-            className="mx-auto inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold text-white"
-            style={{ backgroundColor: NAVY }}
-            data-testid="badge-dashboard-demo"
-          >
+    <main className={chromeStyles.page} data-testid="dashboard-demo-gate">
+      <div className={`${chromeStyles.pageContent} ${chromeStyles.demoPageContent}`}>
+        <header className={chromeStyles.brand}>
+          <div className={chromeStyles.brandLockup}>
+            <LogoMark />
+            <div className={chromeStyles.brandName}>
+              <div className={chromeStyles.solve}>
+                SOLVE<span className={chromeStyles.period}>.</span>
+              </div>
+              <span className={chromeStyles.framework}>FRAMEWORK</span>
+            </div>
+          </div>
+          <div className="mx-auto mb-4 inline-flex items-center rounded-full border border-orange-300/60 bg-[#0A1A30]/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-orange-100" data-testid="badge-dashboard-demo">
             SOLVE Command Center demo
           </div>
-          <h1 className="mt-4 text-3xl font-bold tracking-tight" data-testid="text-dashboard-demo-gate-heading">
-            See what team progress looks like
-          </h1>
-          <p className="mt-3 text-sm text-muted-foreground">
-            Verify your email to view the read-only Command Center demonstration. No password or account is required.
-          </p>
-        </div>
+          <h1 className={chromeStyles.headline} data-testid="text-dashboard-demo-gate-heading">COMMAND CENTER</h1>
+          <div className={chromeStyles.loginHeading}>DEMO ACCESS</div>
+          <p className={chromeStyles.tagline}>See what team progress looks like</p>
+        </header>
 
-        <Card>
-          <CardContent className="py-6">
-            {step === "email" ? (
-              <form
-                className="space-y-4"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (email.trim()) sendCode.mutate();
-                }}
-              >
-                <div className="space-y-1.5">
-                  <Label htmlFor="dashboard-demo-email">Work email</Label>
-                  <Input
+        <section className={`${chromeStyles.loginCard} ${chromeStyles.demoLoginCard}`} aria-labelledby="dashboard-demo-access-heading">
+          <div className={chromeStyles.cardCorners} />
+          <div className={chromeStyles.cardTitleRow}>
+            <span className={chromeStyles.lockSymbol} aria-hidden="true" />
+            <div>
+              <h2 id="dashboard-demo-access-heading">VIEW THE DEMO</h2>
+              <p>Verify your email to enter the read-only Command Center.</p>
+            </div>
+          </div>
+
+          {step === "email" ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (email.trim()) sendCode.mutate();
+              }}
+              noValidate
+            >
+              <div className={chromeStyles.formGroup}>
+                <label htmlFor="dashboard-demo-email">Work email</label>
+                <div className={chromeStyles.inputWrapper}>
+                  <span className={chromeStyles.fieldIcon} aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M3 6h18v12H3z" /><path d="m3 7 9 6 9-6" /></svg>
+                  </span>
+                  <input
                     id="dashboard-demo-email"
                     type="email"
                     autoComplete="email"
@@ -215,27 +229,33 @@ function DashboardDemoGate({ onVerified }: { onVerified: () => void }) {
                     data-testid="input-dashboard-demo-email"
                   />
                 </div>
-                {error && <p className="text-sm text-destructive" data-testid="text-dashboard-demo-email-error">{error}</p>}
-                <Button
-                  type="submit"
-                  className="w-full"
-                  disabled={!email.trim() || sendCode.isPending}
-                  data-testid="button-dashboard-demo-send-code"
-                >
-                  {sendCode.isPending ? "Sending code..." : "Send my code"}
-                </Button>
-              </form>
-            ) : (
-              <form
-                className="space-y-4"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (code.trim()) verifyCode.mutate();
-                }}
+              </div>
+              <p className="mb-5 text-sm text-[#aab8cb]">No password or account is required.</p>
+              {error && <p className={`${chromeStyles.statusMessage} ${chromeStyles.statusMessageVisible}`} data-testid="text-dashboard-demo-email-error">{error}</p>}
+              <button
+                type="submit"
+                className={chromeStyles.submitButton}
+                disabled={!email.trim() || sendCode.isPending}
+                data-testid="button-dashboard-demo-send-code"
               >
-                <div className="space-y-1.5">
-                  <Label htmlFor="dashboard-demo-code">6-digit access code</Label>
-                  <Input
+                {sendCode.isPending ? "Sending code..." : "Send my code"}
+              </button>
+            </form>
+          ) : (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (code.trim()) verifyCode.mutate();
+              }}
+              noValidate
+            >
+              <div className={chromeStyles.formGroup}>
+                <label htmlFor="dashboard-demo-code">6-digit access code</label>
+                <div className={chromeStyles.inputWrapper}>
+                  <span className={chromeStyles.fieldIcon} aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /><path d="M12 14v3" /></svg>
+                  </span>
+                  <input
                     id="dashboard-demo-code"
                     inputMode="numeric"
                     autoComplete="one-time-code"
@@ -245,48 +265,45 @@ function DashboardDemoGate({ onVerified }: { onVerified: () => void }) {
                     maxLength={6}
                     data-testid="input-dashboard-demo-code"
                   />
-                  <p className="text-sm text-muted-foreground">
-                    We sent a code to <span className="font-medium text-foreground">{email}</span>. It expires in 10 minutes.
-                  </p>
                 </div>
-                {error && <p className="text-sm text-destructive" data-testid="text-dashboard-demo-code-error">{error}</p>}
-                {resent && !error && <p className="text-sm text-muted-foreground">A new code is on its way.</p>}
-                <Button
-                  type="submit"
-                  className="w-full"
-                  disabled={code.length !== 6 || verifyCode.isPending}
-                  data-testid="button-dashboard-demo-verify-code"
+                <p className="mt-3 text-sm text-[#aab8cb]">We sent a code to <span className="font-medium text-white">{email}</span>. It expires in 10 minutes.</p>
+              </div>
+              {error && <p className={`${chromeStyles.statusMessage} ${chromeStyles.statusMessageVisible}`} data-testid="text-dashboard-demo-code-error">{error}</p>}
+              {resent && !error && <p className={`${chromeStyles.statusMessage} ${chromeStyles.statusMessageVisible}`}>A new code is on its way.</p>}
+              <button
+                type="submit"
+                className={chromeStyles.submitButton}
+                disabled={code.length !== 6 || verifyCode.isPending}
+                data-testid="button-dashboard-demo-verify-code"
+              >
+                {verifyCode.isPending ? "Verifying..." : "View the demo"}
+              </button>
+              <div className={chromeStyles.formLinks}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setStep("email");
+                  }}
+                  data-testid="button-dashboard-demo-change-email"
                 >
-                  {verifyCode.isPending ? "Verifying..." : "View the demo"}
-                </Button>
-                <div className="flex items-center justify-between gap-3 text-sm">
-                  <button
-                    type="button"
-                    className="text-muted-foreground underline underline-offset-4"
-                    onClick={() => {
-                      setError(null);
-                      setStep("email");
-                    }}
-                    data-testid="button-dashboard-demo-change-email"
-                  >
-                    Use a different email
-                  </button>
-                  <button
-                    type="button"
-                    className="text-primary underline underline-offset-4 disabled:opacity-50"
-                    onClick={() => sendCode.mutate()}
-                    disabled={sendCode.isPending}
-                    data-testid="button-dashboard-demo-resend-code"
-                  >
-                    {sendCode.isPending ? "Sending..." : "Resend code"}
-                  </button>
-                </div>
-              </form>
-            )}
-          </CardContent>
-        </Card>
+                  Use a different email
+                </button>
+                <span className={chromeStyles.formDivider} aria-hidden="true" />
+                <button
+                  type="button"
+                  onClick={() => sendCode.mutate()}
+                  disabled={sendCode.isPending}
+                  data-testid="button-dashboard-demo-resend-code"
+                >
+                  {sendCode.isPending ? "Sending..." : "Resend code"}
+                </button>
+              </div>
+            </form>
+          )}
+        </section>
       </div>
-    </div>
+    </main>
   );
 }
 
