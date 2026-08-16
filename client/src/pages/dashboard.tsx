@@ -1257,42 +1257,64 @@ function TeamHealthInsightsModal({
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
       <DialogContent
-        className="border max-h-[85vh] overflow-y-auto sm:max-w-2xl"
-        style={{ backgroundColor: NAVY_DEEP, borderColor: `${ORANGE}66`, color: "white" }}
+        className="max-h-[88vh] max-w-[calc(100%-2rem)] overflow-y-auto rounded-xl border p-4 font-['Plus_Jakarta_Sans'] shadow-2xl sm:max-w-5xl sm:p-7"
+        style={{ backgroundColor: NAVY_DEEP, borderColor: "rgba(224,109,0,0.5)", color: "white" }}
         data-testid="drilldown-team-health"
       >
-        <DialogHeader>
-          <DialogTitle className="text-white">What SOLVE is seeing</DialogTitle>
-          <DialogDescription className="text-white/60">
+        <DialogHeader className="border-b pb-5 pr-8 text-left sm:pb-6" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
+          <p className="text-xs font-bold uppercase tracking-[0.16em]" style={{ color: "#F6C453" }}>Team intelligence</p>
+          <DialogTitle className="text-xl font-bold tracking-[-0.02em] text-white">What SOLVE is seeing</DialogTitle>
+          <DialogDescription className="max-w-2xl text-sm leading-6 text-white/65">
             Data-derived signals from completed scored conversations in the selected period.
           </DialogDescription>
         </DialogHeader>
-        {isLoading && <Skeleton className="h-80 rounded-lg" />}
+        {isLoading && <Skeleton className="h-80 rounded-xl" />}
         {isError && <p className="text-sm text-white/60">Couldn&apos;t load Team Health insights right now.</p>}
         {insights && (
-          <>
-            <ul className="grid gap-2 sm:grid-cols-2" aria-label="Team Health insights">
-              {rows.map((row) => (
-                <li key={row.testId} className="rounded-lg border px-3 py-3" style={{ backgroundColor: PANEL, borderColor: "rgba(249,115,22,0.22)" }} data-testid={row.testId}>
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">{row.label}</p>
-                  <p className="mt-1 text-sm leading-5 text-white">{row.value}</p>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-5 border-t pt-4" style={{ borderColor: "rgba(249,115,22,0.22)" }} data-testid="insight-leaderboard">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">Top performers by conversation quality</p>
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1.06fr)_minmax(0,0.94fr)] lg:gap-7">
+            <section className="rounded-xl border p-4 sm:p-5" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} aria-labelledby="team-health-insights-heading">
+              <div className="mb-3 flex items-baseline justify-between gap-3">
+                <h3 id="team-health-insights-heading" className="text-xs font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>What SOLVE is seeing</h3>
+                <span className="text-xs text-white/45">8 signals</span>
+              </div>
+              <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.09)" }} aria-label="Team Health insights">
+                {rows.map((row) => (
+                  <li key={row.testId} className="grid gap-1 py-3 first:pt-1 last:pb-1 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:items-start sm:gap-5" data-testid={row.testId}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.09em] text-white/55">{row.label}</p>
+                    <p className="text-sm leading-5 text-white sm:text-right">{row.value}</p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+            <section className="rounded-xl border p-4 sm:p-5" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} data-testid="insight-leaderboard" aria-labelledby="team-health-leaderboard-heading">
+              <div className="mb-4">
+                <h3 id="team-health-leaderboard-heading" className="text-xs font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>Top performers by conversation quality</h3>
+                <p className="mt-1 text-xs leading-5 text-white/50">Average score across completed conversations</p>
+              </div>
               {insights.leaderboard.length ? (
-                <ol className="mt-2 space-y-2" data-testid="list-insight-leaderboard">
+                <ol className="space-y-3" data-testid="list-insight-leaderboard">
                   {insights.leaderboard.map((performer, index) => (
-                    <li key={performer.consultantId} className="flex items-center justify-between gap-4 rounded-md px-3 py-2" style={{ backgroundColor: PANEL }}>
-                      <span className="min-w-0 truncate text-sm text-white"><span className="mr-2 text-orange-200">#{index + 1}</span>{performer.consultantName}</span>
-                      <span className="shrink-0 font-semibold text-orange-200">{performer.averageScore}</span>
+                    <li key={performer.consultantId} className="grid grid-cols-[1.5rem_minmax(0,1fr)_2.25rem] items-center gap-2.5">
+                      <span className="text-xs font-bold tabular-nums text-white/45">{String(index + 1).padStart(2, "0")}</span>
+                      <div className="min-w-0">
+                        <div className="mb-1.5 flex items-center justify-between gap-3">
+                          <span className="truncate text-sm font-semibold text-white">{performer.consultantName}</span>
+                          <span className="shrink-0 text-xs text-white/45">quality</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-white/[0.09]" role="progressbar" aria-label={`${performer.consultantName} conversation quality`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={performer.averageScore}>
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-[#E06D00] via-[#F39416] to-[#F6C453] transition-[width] duration-500"
+                            style={{ width: `${Math.max(0, Math.min(100, performer.averageScore))}%` }}
+                          />
+                        </div>
+                      </div>
+                      <span className="text-right text-sm font-bold tabular-nums" style={{ color: "#F6C453" }}>{performer.averageScore}</span>
                     </li>
                   ))}
                 </ol>
-              ) : <p className="mt-2 text-sm text-white/60">{notEnough}</p>}
-            </div>
-          </>
+              ) : <p className="text-sm text-white/60">{notEnough}</p>}
+            </section>
+          </div>
         )}
       </DialogContent>
     </Dialog>
