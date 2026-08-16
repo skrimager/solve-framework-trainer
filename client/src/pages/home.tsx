@@ -1,108 +1,143 @@
 import { useLocation } from "wouter";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { GraduationCap, LayoutDashboard, PlayCircle, Building2, ArrowLeft, MessageSquareText } from "lucide-react";
+import { ArrowLeft, BarChart3, GraduationCap, UsersRound } from "lucide-react";
+import entranceSkylineBackground from "@/assets/entrance-skyline-bg.png";
 
-// Root chooser. Minimal, on-brand entry point that routes each kind of visitor to
-// the right place: consultants to practice, managers to the command center, and
-// prospects to the free demo. Uses the same dark navy + orange tokens as the rest
-// of the app so it reads as one product, not a new visual system.
+const ORANGE = "#E06D00";
+const COMMAND_BLUE = "#3B82F6";
+
 export default function Home() {
   const [, navigate] = useLocation();
 
-  const options = [
-    {
-      to: "/practice",
-      icon: GraduationCap,
-      title: "I'm here to practice",
-      description: "Consultant discovery practice and certification.",
-      testId: "link-choose-practice",
-    },
-    {
-      to: "/signup",
-      icon: Building2,
-      title: "Set up your office",
-      description: "Get your whole team practicing discovery conversations.",
-      testId: "link-choose-signup",
-    },
-    {
-      to: "/command-center",
-      icon: LayoutDashboard,
-      title: "I'm a manager",
-      description: "Command Center: see who's practicing and improving.",
-      testId: "link-choose-command-center",
-    },
-    {
-      to: "/demo",
-      icon: PlayCircle,
-      title: "Try the free demo",
-      description: "A guided taste of a live discovery conversation.",
-      testId: "link-choose-demo",
-    },
-    {
-      to: "/message-coach",
-      icon: MessageSquareText,
-      title: "Score a message",
-      description: "Paste outreach and get it scored, diagnosed, and rewritten.",
-      testId: "link-choose-message-coach",
-    },
-  ] as const;
-
   return (
-    <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-10">
-      <div className="w-full max-w-md mx-auto space-y-6">
-        <div className="text-center space-y-4">
-          <div className="inline-flex items-center justify-center rounded-[10px]" style={{ backgroundColor: "#050C1C", padding: "8px 16px" }}>
+    <main
+      className="relative isolate min-h-dvh overflow-hidden bg-[#050C1C] px-4 py-4 text-white sm:px-6 sm:py-8"
+      data-testid="page-entrance"
+    >
+      <img
+        src={entranceSkylineBackground}
+        alt=""
+        aria-hidden="true"
+        className="absolute inset-0 -z-20 h-full w-full object-cover object-center"
+      />
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 -z-10 bg-[linear-gradient(180deg,rgba(5,12,28,0.92)_0%,rgba(5,12,28,0.58)_24%,rgba(5,12,28,0.46)_70%,rgba(5,12,28,0.93)_100%)]"
+      />
+
+      <div className="mx-auto flex min-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col justify-center sm:min-h-[calc(100dvh-4rem)]">
+        <header className="mx-auto max-w-2xl text-center" data-testid="section-entrance-heading">
+          <div className="inline-flex items-center justify-center rounded-[10px] bg-[#050C1C]/90 px-3 py-1.5 shadow-lg shadow-black/25 backdrop-blur-sm">
             <img
               src="/solve-wordmark-bigtag-transparent.png"
               alt="SOLVE Framework - Practice. Performance. Period."
-              className="h-[72px] w-auto max-w-full block"
+              className="h-10 w-auto max-w-full sm:h-14"
               data-testid="img-solve-logo"
             />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-home-title">
+          <h1 className="mt-3 text-[clamp(1.75rem,1.45rem+1.4vw,2.35rem)] font-bold leading-tight tracking-tight text-white sm:mt-4" data-testid="text-home-title">
             Welcome to SOLVE Platform™
           </h1>
-          <p className="text-sm text-muted-foreground">Where would you like to go?</p>
-        </div>
+          <p className="mt-1 text-sm font-medium text-slate-200 sm:text-base" data-testid="text-home-subtitle">
+            Where would you like to go?
+          </p>
+        </header>
 
-        <Card className="border-2" style={{ borderColor: "#E06D00" }}>
-          <CardHeader>
-            <CardTitle className="text-lg">Choose your entrance</CardTitle>
-            <CardDescription>Pick the option that describes you.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {options.map((opt) => (
-              <Button
-                key={opt.to}
-                type="button"
-                variant="outline"
-                className="w-full h-auto justify-start gap-3 py-4 text-left"
-                onClick={() => navigate(opt.to)}
-                data-testid={opt.testId}
+        <section
+          className="mx-auto mt-4 grid w-full max-w-4xl gap-3 md:mt-8 md:grid-cols-2 md:gap-6"
+          aria-label="Choose an entrance"
+          data-testid="grid-entrance-options"
+        >
+          <article
+            className="rounded-2xl border bg-[#050C1C]/70 p-4 shadow-2xl shadow-black/25 backdrop-blur-md sm:p-6"
+            style={{ borderColor: "rgba(224, 109, 0, 0.86)" }}
+            data-testid="card-practice"
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-[#E06D00]/15 sm:h-11 sm:w-11"
+                style={{ borderColor: "rgba(224, 109, 0, 0.62)", color: ORANGE }}
+                aria-hidden="true"
               >
-                <opt.icon className="w-5 h-5 shrink-0" style={{ color: "#E06D00" }} />
-                <span className="flex flex-col min-w-0 flex-1">
-                  <span className="font-semibold whitespace-normal break-words">{opt.title}</span>
-                  <span className="text-xs text-muted-foreground whitespace-normal break-words">{opt.description}</span>
-                </span>
-              </Button>
-            ))}
-          </CardContent>
-        </Card>
+                <GraduationCap className="h-6 w-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold tracking-wide text-white">PRACTICE</h2>
+                <p className="mt-0.5 text-sm font-semibold" style={{ color: "#FF9A45" }}>
+                  Practice, Academy &amp; Certification
+                </p>
+              </div>
+            </div>
 
-        <div className="text-center">
+            <ul className="mt-4 space-y-1 text-sm leading-5 text-slate-100 sm:mt-5 sm:space-y-1.5" aria-label="Practice benefits">
+              <li>Sharpen your skills.</li>
+              <li>Complete scenarios.</li>
+              <li>Earn certifications.</li>
+              <li>Get better every day.</li>
+            </ul>
+
+            <button
+              type="button"
+              onClick={() => navigate("/practice")}
+              className="mt-4 flex min-h-11 w-full items-center justify-center rounded-lg px-4 py-2 text-sm font-bold text-white shadow-lg shadow-black/20 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white sm:mt-6 sm:py-2.5"
+              style={{ backgroundColor: ORANGE }}
+              data-testid="link-choose-practice"
+            >
+              Enter Practice
+            </button>
+          </article>
+
+          <article
+            className="rounded-2xl border bg-[#050C1C]/70 p-4 shadow-2xl shadow-black/25 backdrop-blur-md sm:p-6"
+            style={{ borderColor: "rgba(59, 130, 246, 0.9)" }}
+            data-testid="card-command-center"
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-[#3B82F6]/15 sm:h-11 sm:w-11"
+                style={{ borderColor: "rgba(59, 130, 246, 0.66)", color: COMMAND_BLUE }}
+                aria-hidden="true"
+              >
+                <UsersRound className="h-6 w-6" />
+                <BarChart3 className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-sm bg-[#050C1C] p-px" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold tracking-wide text-white">COMMAND CENTER</h2>
+                <p className="mt-0.5 text-sm font-semibold text-blue-300">
+                  Team performance, insights &amp; management
+                </p>
+              </div>
+            </div>
+
+            <ul className="mt-4 space-y-1 text-sm leading-5 text-slate-100 sm:mt-5 sm:space-y-1.5" aria-label="Command Center benefits">
+              <li>See what drives performance.</li>
+              <li>Coach with confidence.</li>
+              <li>Build a stronger team.</li>
+              <li>Win more together.</li>
+            </ul>
+
+            <button
+              type="button"
+              onClick={() => navigate("/command-center")}
+              className="mt-4 flex min-h-11 w-full items-center justify-center rounded-lg px-4 py-2 text-sm font-bold text-white shadow-lg shadow-black/20 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white sm:mt-6 sm:py-2.5"
+              style={{ backgroundColor: COMMAND_BLUE }}
+              data-testid="link-choose-command-center"
+            >
+              Enter Command Center
+            </button>
+          </article>
+        </section>
+
+        <div className="mt-4 text-center md:mt-7">
           <a
             href="https://solveframework.com"
-            className="inline-flex items-center gap-1.5 text-sm font-medium hover:underline"
-            style={{ color: "#E06D00" }}
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-100 transition hover:text-white hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
             data-testid="link-back-to-solveframework"
           >
-            <ArrowLeft className="w-4 h-4" />
+            <ArrowLeft className="h-4 w-4" />
             Back to SOLVE Framework
           </a>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

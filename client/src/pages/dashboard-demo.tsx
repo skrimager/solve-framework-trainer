@@ -190,7 +190,7 @@ function DashboardDemoGate({ onVerified }: { onVerified: () => void }) {
           <div className="mx-auto mb-4 inline-flex items-center rounded-full border border-orange-300/60 bg-[#0A1A30]/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-orange-100" data-testid="badge-dashboard-demo">
             SOLVE Command Center demo
           </div>
-          <h1 className={chromeStyles.headline} data-testid="text-dashboard-demo-gate-heading">COMMAND CENTER</h1>
+          <h1 className={chromeStyles.headline} data-testid="text-dashboard-demo-gate-heading">DASHBOARD DEMO</h1>
           <div className={chromeStyles.loginHeading}>DEMO ACCESS</div>
           <p className={chromeStyles.tagline}>See what team progress looks like</p>
         </header>
