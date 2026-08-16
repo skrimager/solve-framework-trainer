@@ -957,7 +957,7 @@ export function CommandCenterSection({
   earliestSessionAt?: string | null;
   readOnlyData?: CommandCenterReadOnlyData;
 }) {
-  const [drilldown, setDrilldown] = useState<"conversations" | "certifications" | null>(null);
+  const [drilldown, setDrilldown] = useState<"teamHealth" | "conversations" | "certifications" | null>(null);
   const [openSessionId, setOpenSessionId] = useState<number | null>(null);
   const rangeControl = (
     <DateRangePicker range={dateRange} onChange={onDateRangeChange} earliestSessionAt={earliestSessionAt} />
@@ -1001,15 +1001,22 @@ export function CommandCenterSection({
         <div className="grid gap-4 lg:grid-cols-6" data-testid="row-kpi-cards">
           <div className="grid gap-4 grid-cols-2 sm:grid-cols-4 lg:col-span-5 lg:grid-cols-4">
             {show("teamHealth") && (
-              <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: `${GREEN}30` }} data-testid="kpi-team-health">
+              <button
+                type="button"
+                onClick={() => setDrilldown("teamHealth")}
+                className="rounded-xl border p-4 text-left transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2"
+                style={{ backgroundColor: NAVY, borderColor: `${ORANGE}55` }}
+                data-testid="kpi-team-health"
+              >
                 <p className="text-[11px] uppercase tracking-wide text-white/45 leading-tight">Team Health Score</p>
                 <div className="mt-2 flex items-center gap-3">
-                  <RingGauge value={extras.teamHealth.score} color={GREEN_LIGHT} />
+                  <RingGauge value={extras.teamHealth.score} color={ORANGE_LIGHT} />
                   <div className="min-w-0">
                     <DeltaBadge value={extras.teamHealth.deltaPercent} testId="delta-team-health" />
+                    <p className="mt-1 text-[10px] uppercase tracking-wide text-orange-200">View insights</p>
                   </div>
                 </div>
-              </div>
+              </button>
             )}
             {show("conversations") && (
               <button
@@ -1191,6 +1198,12 @@ export function CommandCenterSection({
 
       {/* Row 6: Bottom summary strip */}
       {show("summaryStrip") && <SummaryStrip data={extras.summaryStrip} label={label} />}
+      <TeamHealthInsightsModal
+        open={drilldown === "teamHealth"}
+        dateRange={dateRange}
+        onClose={() => setDrilldown(null)}
+        readOnlyInsights={readOnlyData?.teamHealthInsights}
+      />
       <ConversationListModal
         open={drilldown === "conversations"}
         dateRange={dateRange}
@@ -1209,6 +1222,80 @@ export function CommandCenterSection({
       />
       <SessionDetailModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} readOnlySessions={readOnlyData?.sessions} />
     </div>
+  );
+}
+
+function TeamHealthInsightsModal({
+  open,
+  dateRange,
+  onClose,
+  readOnlyInsights,
+}: {
+  open: boolean;
+  dateRange: DateRangeValue;
+  onClose: () => void;
+  readOnlyInsights?: TeamHealthInsightsDrilldown;
+}) {
+  const query = commandCenterRangeQuery(dateRange);
+  const { data: fetchedInsights, isLoading, isError } = useQuery<TeamHealthInsightsDrilldown>({
+    queryKey: [`/api/manager/dashboard-command-center/team-health-insights?${query}`],
+    enabled: open && !readOnlyInsights,
+  });
+  const insights = readOnlyInsights ?? fetchedInsights;
+  const notEnough = "Not enough data yet";
+  const rows = insights ? [
+    { testId: "text-insight-top-performer", label: "Top conversational performer", value: insights.topPerformer ? `${insights.topPerformer.consultantName} · ${insights.topPerformer.averageScore} average` : notEnough },
+    { testId: "text-insight-strongest-discovery", label: "Strongest at discovery", value: insights.strongestDiscovery ? `${insights.strongestDiscovery.consultantName} · ${insights.strongestDiscovery.averageScore} in ${insights.strongestDiscovery.skill}` : notEnough },
+    { testId: "text-insight-strongest-commitment", label: "Strongest at commitment", value: insights.strongestCommitment ? `${insights.strongestCommitment.consultantName} · ${insights.strongestCommitment.averageScore} in ${insights.strongestCommitment.skill}` : notEnough },
+    { testId: "text-insight-strongest-resistance", label: "Strongest at resistance", value: insights.strongestResistance ? `${insights.strongestResistance.consultantName} · ${insights.strongestResistance.averageScore} in ${insights.strongestResistance.skill}` : notEnough },
+    { testId: "text-insight-hidden-strength", label: "Hidden team strength", value: insights.hiddenTeamStrength ? `${insights.hiddenTeamStrength.skill} · Team average ${insights.hiddenTeamStrength.averageScore}` : notEnough },
+    { testId: "text-insight-biggest-opportunity", label: "Biggest team opportunity", value: insights.biggestTeamOpportunity ? `${insights.biggestTeamOpportunity.skill} · Team average ${insights.biggestTeamOpportunity.averageScore}` : notEnough },
+    { testId: "text-insight-fastest-improving", label: "Fastest improving", value: insights.fastestImproving ? `${insights.fastestImproving.consultantName} · +${insights.fastestImproving.improvement} points from the first half to the second half` : notEnough },
+    { testId: "text-insight-coaching-priority", label: "Coaching priority", value: insights.coachingPriority ? `${insights.coachingPriority.consultantName} · Practice ${insights.coachingPriority.weakestSkill.toLowerCase()} next (${insights.coachingPriority.weakestSkillScore})` : notEnough },
+  ] : [];
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <DialogContent
+        className="border max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        style={{ backgroundColor: NAVY_DEEP, borderColor: `${ORANGE}66`, color: "white" }}
+        data-testid="drilldown-team-health"
+      >
+        <DialogHeader>
+          <DialogTitle className="text-white">What SOLVE is seeing</DialogTitle>
+          <DialogDescription className="text-white/60">
+            Data-derived signals from completed scored conversations in the selected period.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <Skeleton className="h-80 rounded-lg" />}
+        {isError && <p className="text-sm text-white/60">Couldn&apos;t load Team Health insights right now.</p>}
+        {insights && (
+          <>
+            <ul className="grid gap-2 sm:grid-cols-2" aria-label="Team Health insights">
+              {rows.map((row) => (
+                <li key={row.testId} className="rounded-lg border px-3 py-3" style={{ backgroundColor: PANEL, borderColor: "rgba(249,115,22,0.22)" }} data-testid={row.testId}>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">{row.label}</p>
+                  <p className="mt-1 text-sm leading-5 text-white">{row.value}</p>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-5 border-t pt-4" style={{ borderColor: "rgba(249,115,22,0.22)" }} data-testid="insight-leaderboard">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">Top performers by conversation quality</p>
+              {insights.leaderboard.length ? (
+                <ol className="mt-2 space-y-2" data-testid="list-insight-leaderboard">
+                  {insights.leaderboard.map((performer, index) => (
+                    <li key={performer.consultantId} className="flex items-center justify-between gap-4 rounded-md px-3 py-2" style={{ backgroundColor: PANEL }}>
+                      <span className="min-w-0 truncate text-sm text-white"><span className="mr-2 text-orange-200">#{index + 1}</span>{performer.consultantName}</span>
+                      <span className="shrink-0 font-semibold text-orange-200">{performer.averageScore}</span>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p className="mt-2 text-sm text-white/60">{notEnough}</p>}
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1965,6 +2052,18 @@ function VerticalBreakdown({ data }: { data: DashboardStats["verticalBreakdown"]
   );
 }
 
+export type TeamHealthInsightsDrilldown = {
+  topPerformer: { consultantId: number; consultantName: string; averageScore: number } | null;
+  strongestDiscovery: { consultantId: number; consultantName: string; averageScore: number; skill: string } | null;
+  strongestCommitment: { consultantId: number; consultantName: string; averageScore: number; skill: string } | null;
+  strongestResistance: { consultantId: number; consultantName: string; averageScore: number; skill: string } | null;
+  hiddenTeamStrength: { skill: string; averageScore: number } | null;
+  biggestTeamOpportunity: { skill: string; averageScore: number } | null;
+  fastestImproving: { consultantId: number; consultantName: string; averageScore: number; improvement: number } | null;
+  coachingPriority: { consultantId: number; consultantName: string; averageScore: number; weakestSkill: string; weakestSkillScore: number } | null;
+  leaderboard: { consultantId: number; consultantName: string; averageScore: number }[];
+};
+
 export type PerformerDrilldown = {
   consultantId: number;
   consultantName: string;
@@ -1983,6 +2082,7 @@ export type CommandCenterReadOnlyData = {
   sessions: Record<number, ManagerSessionDetail>;
   scoreDistribution: Record<string, ScoreBandSessionList>;
   performers: Record<number, PerformerDrilldown>;
+  teamHealthInsights: TeamHealthInsightsDrilldown;
 };
 
 function Leaderboard({

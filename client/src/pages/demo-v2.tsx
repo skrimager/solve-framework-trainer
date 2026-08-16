@@ -2,7 +2,7 @@
 // free conversation, and then lands on the membership / pay-per-session fork. It
 // began as a copy of the original single-scenario demo page, which has since been
 // removed.
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -54,15 +54,23 @@ import {
   Mic,
   MicOff,
   User,
-  Phone,
   CheckCircle2,
   X,
+  Eye,
+  BarChart3,
+  UsersRound,
+  Quote,
+  LockKeyhole,
+  ShieldCheck,
+  Zap,
+  type LucideIcon,
 } from "lucide-react";
 import type {
   RubricScores,
   LeadershipRubricScores,
   TranscriptMessage,
 } from "@shared/schema";
+import freeScenarioBackground from "@/assets/free-scenario-window-sunset.webp";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
@@ -154,45 +162,50 @@ export default function DemoV2() {
     window.history.replaceState({}, "", "#/demo");
   }, []);
 
+  const isAccessStep = step === "landing" || step === "email" || step === "code";
+
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto w-full max-w-2xl px-4 py-8">
-        {step === "landing" && (
-          <Landing
-            paidReturn={paidReturn}
-            // A visitor returning with a live token has already verified, so they
-            // go straight to the industry choice.
-            onStart={() => setStep(token ? "industry" : "email")}
-          />
-        )}
+    <div className="min-h-screen bg-[#0A1A30] text-foreground">
+      {isAccessStep ? (
+        <FreeScenarioAccessLayout>
+          {step === "landing" && (
+            <Landing
+              paidReturn={paidReturn}
+              // A visitor returning with a live token has already verified, so they
+              // go straight to the industry choice.
+              onStart={() => setStep(token ? "industry" : "email")}
+            />
+          )}
 
-        {step === "email" && (
-          <EmailStep
-            email={email}
-            setEmail={setEmail}
-            onSent={() => setStep("code")}
-            onLimitReached={() => {
-              setLimitReached(true);
-              setStep("results");
-            }}
-          />
-        )}
+          {step === "email" && (
+            <EmailStep
+              email={email}
+              setEmail={setEmail}
+              onSent={() => setStep("code")}
+              onLimitReached={() => {
+                setLimitReached(true);
+                setStep("results");
+              }}
+            />
+          )}
 
-        {step === "code" && (
-          <CodeStep
-            email={email}
-            onVerified={(tok) => {
-              setToken(tok);
-              setStep("industry");
-            }}
-            onLimitReached={() => {
-              setLimitReached(true);
-              setStep("results");
-            }}
-            onBack={() => setStep("email")}
-          />
-        )}
-
+          {step === "code" && (
+            <CodeStep
+              email={email}
+              onVerified={(tok) => {
+                setToken(tok);
+                setStep("industry");
+              }}
+              onLimitReached={() => {
+                setLimitReached(true);
+                setStep("results");
+              }}
+              onBack={() => setStep("email")}
+            />
+          )}
+        </FreeScenarioAccessLayout>
+      ) : (
+        <div className="mx-auto w-full max-w-2xl px-4 py-12">
         {step === "industry" && (
           <IndustryStep
             onChoose={(key) => {
@@ -235,55 +248,154 @@ export default function DemoV2() {
           />
         )}
       </div>
+      )}
+    </div>
+  );
+}
+
+function FreeScenarioAccessLayout({ children }: { children: ReactNode }) {
+  const trustItems = [
+    { icon: ShieldCheck, title: "No credit card", description: "100% free", testId: "trust-demo-v2-no-card" },
+    { icon: UsersRound, title: "No obligation", description: "Explore at your pace", testId: "trust-demo-v2-no-obligation" },
+    { icon: Zap, title: "Instant access", description: "Start your scenario", testId: "trust-demo-v2-instant-access" },
+    { icon: BarChart3, title: "Real insights", description: "See what to improve", testId: "trust-demo-v2-real-insights" },
+  ];
+
+  return (
+    <main className="min-h-screen bg-[#0A1A30]" data-testid="layout-demo-v2-access">
+      <div className="grid lg:min-h-[calc(100vh-84px)] lg:grid-cols-2">
+        <aside className="relative min-h-[680px] overflow-hidden lg:min-h-full" aria-label="SOLVE Framework free scenario overview">
+          <img
+            src={freeScenarioBackground}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover object-[42%_center]"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#0A1A30] via-[#0A1A30]/75 to-[#0A1A30]/15" />
+          <div className="relative z-10 flex min-h-[680px] flex-col px-6 py-7 sm:px-10 sm:py-9 lg:min-h-full lg:px-12 lg:py-10">
+            <img
+              src="/solve-wordmark-bigtag-transparent.png"
+              alt="SOLVE Framework"
+              className="h-auto w-36 object-contain sm:w-40"
+            />
+            <div className="mt-auto max-w-xl pt-16 lg:pt-24">
+              <h1 className="max-w-md text-4xl font-bold leading-[0.98] tracking-tight text-white sm:text-5xl lg:text-6xl" data-testid="text-demo-v2-heading">
+                See what you&apos;re <span className="block text-[#E06D00]">not seeing.</span>
+              </h1>
+              <p className="mt-5 max-w-md text-base leading-6 text-slate-100 sm:text-lg">
+                Experience the power of SOLVE with a free practice scenario.
+              </p>
+              <ul className="mt-8 space-y-5" aria-label="Free scenario benefits">
+                <Benefit icon={Eye} title="Real discovery conversations" description="AI customers with real motivation." />
+                <Benefit icon={BarChart3} title="Instant feedback and scoring" description="See exactly what to do next." />
+                <Benefit icon={UsersRound} title="Built for leaders" description="Insights that grow your entire team." />
+              </ul>
+            </div>
+            {/* Replace with an approved customer quote before broad public use. */}
+            <figure className="mt-8 max-w-md rounded-xl border border-white/15 bg-[#0A1A30]/75 p-5 shadow-2xl backdrop-blur-sm" data-testid="card-demo-v2-testimonial">
+              <Quote className="h-7 w-7 text-[#E06D00]" aria-hidden="true" />
+              <blockquote className="mt-3 text-sm leading-6 text-white">
+                SOLVE gives me visibility into my team that I never had before.
+              </blockquote>
+              <figcaption className="mt-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">
+                Sales Manager
+              </figcaption>
+            </figure>
+          </div>
+        </aside>
+
+        <section className="flex items-center bg-[#0A1A30] px-5 py-10 sm:px-10 lg:px-12 lg:py-12">
+          <div className="mx-auto w-full max-w-xl">{children}</div>
+        </section>
+      </div>
+
+      <section className="border-t border-white/10 bg-[#0A1A30] px-5 py-6 sm:px-10 lg:px-12" aria-label="Free scenario assurances">
+        <div className="mx-auto grid max-w-6xl gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          {trustItems.map(({ icon: Icon, title, description, testId }) => (
+            <div key={testId} className="flex items-center gap-3" data-testid={testId}>
+              <Icon className="h-5 w-5 shrink-0 text-[#E06D00]" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-semibold text-white">{title}</p>
+                <p className="text-xs text-slate-400">{description}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function Benefit({ icon: Icon, title, description }: { icon: LucideIcon; title: string; description: string }) {
+  return (
+    <li className="flex items-start gap-3">
+      <span className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#E06D00] bg-[#E06D00]/15 text-[#E06D00]">
+        <Icon className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <span>
+        <span className="block text-sm font-semibold text-white">{title}</span>
+        <span className="mt-0.5 block text-sm leading-5 text-slate-200">{description}</span>
+      </span>
+    </li>
+  );
+}
+
+function AccessCard({
+  eyebrow,
+  heading,
+  description,
+  headingTestId,
+  children,
+}: {
+  eyebrow: string;
+  heading: string;
+  description: string;
+  headingTestId?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/15 bg-[#0A1A30] p-6 shadow-2xl sm:p-8" data-testid="card-demo-v2-access">
+      <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#E06D00]">{eyebrow}</p>
+      <h2
+        className="mt-3 text-2xl font-bold tracking-tight text-white sm:text-3xl"
+        data-testid={headingTestId}
+      >
+        {heading}
+      </h2>
+      <p className="mt-3 max-w-lg text-sm leading-6 text-slate-300">{description}</p>
+      <div className="mt-8">{children}</div>
     </div>
   );
 }
 
 function Landing({ onStart, paidReturn }: { onStart: () => void; paidReturn: boolean }) {
   return (
-    <div className="space-y-6 text-center">
+    <AccessCard
+      eyebrow="One free practice conversation"
+      heading="Let&apos;s get you into your free scenario"
+      description="Choose an industry, practice a realistic customer conversation, and see where your discovery can go further."
+    >
       {paidReturn && (
         <div
-          className="rounded-lg border-2 p-4 text-left"
-          style={{ borderColor: ORANGE }}
+          className="mb-5 rounded-lg border border-[#E06D00]/70 bg-[#E06D00]/10 p-4"
           data-testid="banner-demo-v2-paid-return"
         >
-          <p className="font-semibold" style={{ color: ORANGE }}>
-            {PAID_RETURN_NOTICE.headline}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">{PAID_RETURN_NOTICE.body}</p>
+          <p className="font-semibold text-[#E06D00]">{PAID_RETURN_NOTICE.headline}</p>
+          <p className="mt-1 text-sm leading-5 text-slate-200">{PAID_RETURN_NOTICE.body}</p>
         </div>
       )}
-      <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-        <Phone className="h-3.5 w-3.5" /> Free AI practice conversation
-      </div>
-      <h1 className="text-3xl font-bold tracking-tight" data-testid="text-demo-v2-heading">
-        One free practice conversation. No credit card.
-      </h1>
-      <p className="mx-auto max-w-xl text-muted-foreground">
-        Pick your industry, and our AI plays a customer whose real motivation sits
-        underneath what they first ask for. Talk to them like a real call, dig for
-        what they actually need, and get scored on your discovery.
-      </p>
-
-      <ul className="mx-auto max-w-md space-y-2 text-left text-sm text-muted-foreground">
-        <li className="flex items-start gap-2">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          Choose the industry you actually sell in.
-        </li>
-        <li className="flex items-start gap-2">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          A customer whose real motivation is not what they open with.
-        </li>
-        <li className="flex items-start gap-2">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          Scored on the same rubric and the same standard as the full platform.
-        </li>
-      </ul>
-      <Button size="lg" onClick={onStart} data-testid="button-demo-v2-start">
+      <Button
+        size="lg"
+        onClick={onStart}
+        className="h-14 w-full bg-[#E06D00] text-base font-semibold text-white hover:brightness-90"
+        data-testid="button-demo-v2-start"
+      >
         Start my free practice
       </Button>
-    </div>
+      <p className="mt-4 flex items-center justify-center gap-2 text-xs text-slate-400">
+        <LockKeyhole className="h-3.5 w-3.5" aria-hidden="true" />
+        No credit card required. No obligation.
+      </p>
+    </AccessCard>
   );
 }
 
@@ -310,23 +422,23 @@ function EmailStep({
   });
 
   return (
-    <div className="mx-auto max-w-md space-y-4">
-      <h2 className="text-2xl font-semibold" data-testid="text-demo-v2-email-heading">
-        Where should we send your access code?
-      </h2>
-      <p className="text-sm text-muted-foreground">
-        Enter your email and we'll send a 6-digit code to start your free
-        conversation.
-      </p>
+    <AccessCard
+      eyebrow="Step 1 of 2"
+      heading="Let&apos;s get you into your free scenario"
+      description="Enter your email and we&apos;ll send a one-time code to access the free scenario."
+      headingTestId="text-demo-v2-email-heading"
+    >
       <form
-        className="space-y-3"
+        className="space-y-5"
         onSubmit={(e) => {
           e.preventDefault();
           if (email.trim()) requestCode.mutate();
         }}
       >
-        <div className="space-y-1.5">
-          <Label htmlFor="demo-v2-email">Email</Label>
+        <div className="space-y-2">
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#E06D00]">Step 1 of 2</p>
+          <Label htmlFor="demo-v2-email" className="text-base font-semibold text-white">Enter your email</Label>
+          <p className="text-sm text-slate-300">We&apos;ll send a one-time code to your inbox.</p>
           <Input
             id="demo-v2-email"
             type="email"
@@ -334,24 +446,29 @@ function EmailStep({
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@company.com"
+            className="h-12 border-white/15 bg-[#0A1A30] text-white placeholder:text-slate-500 focus-visible:ring-[#E06D00]"
             data-testid="input-demo-v2-email"
           />
         </div>
         {error && (
-          <p className="text-sm text-destructive" data-testid="text-demo-v2-email-error">
+          <p className="text-sm text-red-300" data-testid="text-demo-v2-email-error">
             {error}
           </p>
         )}
         <Button
           type="submit"
-          className="w-full"
+          className="h-14 w-full bg-[#E06D00] text-base font-semibold text-white hover:brightness-90"
           disabled={!email.trim() || requestCode.isPending}
           data-testid="button-demo-v2-send-code"
         >
           {requestCode.isPending ? "Sending code..." : "Send my code"}
         </Button>
       </form>
-    </div>
+      <p className="mt-4 flex items-center justify-center gap-2 text-xs text-slate-400">
+        <LockKeyhole className="h-3.5 w-3.5" aria-hidden="true" />
+        No credit card required. No obligation.
+      </p>
+    </AccessCard>
   );
 }
 
@@ -393,59 +510,62 @@ function CodeStep({
   });
 
   return (
-    <div className="mx-auto max-w-md space-y-4">
-      <h2 className="text-2xl font-semibold" data-testid="text-demo-v2-code-heading">
-        Enter your 6-digit code
-      </h2>
-      <p className="text-sm text-muted-foreground">
-        We sent a code to <span className="font-medium text-foreground">{email}</span>. It
-        expires in 10 minutes.
-      </p>
+    <AccessCard
+      eyebrow="Step 2 of 2"
+      heading="Let&apos;s get you into your free scenario"
+      description="Your access code is on its way. Enter it below to choose your scenario."
+      headingTestId="text-demo-v2-code-heading"
+    >
       <form
-        className="space-y-3"
+        className="space-y-5"
         onSubmit={(e) => {
           e.preventDefault();
           if (code.trim()) verify.mutate();
         }}
       >
-        <div className="space-y-1.5">
-          <Label htmlFor="demo-v2-code">Access code</Label>
+        <div className="space-y-2">
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#E06D00]">Step 2 of 2</p>
+          <Label htmlFor="demo-v2-code" className="text-base font-semibold text-white">Enter the code</Label>
+          <p className="text-sm leading-5 text-slate-300">
+            We sent a code to <span className="font-medium text-white">{email}</span>. It expires in 10 minutes.
+          </p>
           <Input
             id="demo-v2-code"
             inputMode="numeric"
             autoComplete="one-time-code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            placeholder="Enter your 6-digit code"
+            placeholder="0 0 0 0 0 0"
             maxLength={6}
+            className="h-14 border-white/15 bg-[#0A1A30] text-center text-xl font-semibold tracking-[0.45em] text-white placeholder:text-slate-500 focus-visible:ring-[#E06D00]"
             data-testid="input-demo-v2-code"
           />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm leading-5 text-slate-400">
             Check your email for your verification code. If it's not in your inbox,
             look in your spam or junk folder.
           </p>
         </div>
         {error && (
-          <p className="text-sm text-destructive" data-testid="text-demo-v2-code-error">
+          <p className="text-sm text-red-300" data-testid="text-demo-v2-code-error">
             {error}
           </p>
         )}
         {resent && !error && (
-          <p className="text-sm text-muted-foreground">A new code is on its way.</p>
+          <p className="text-sm text-slate-300">A new code is on its way.</p>
         )}
         <Button
           type="submit"
-          className="w-full"
+          className="h-14 w-full bg-[#E06D00] text-base font-semibold text-white hover:brightness-90"
           disabled={!code.trim() || verify.isPending}
           data-testid="button-demo-v2-verify-code"
         >
-          {verify.isPending ? "Verifying..." : "Verify & start"}
+          {verify.isPending ? "Verifying..." : "Access free scenario"}
         </Button>
       </form>
-      <div className="flex items-center justify-between text-sm">
+      <div className="mt-5 flex items-center justify-between text-sm">
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground"
+          className="text-slate-300 hover:text-white"
           onClick={onBack}
           data-testid="button-demo-v2-code-back"
         >
@@ -453,7 +573,7 @@ function CodeStep({
         </button>
         <button
           type="button"
-          className="text-primary hover:underline disabled:opacity-50"
+          className="text-[#E06D00] hover:underline disabled:opacity-50"
           onClick={() => resend.mutate()}
           disabled={resend.isPending}
           data-testid="button-demo-v2-resend-code"
@@ -461,7 +581,11 @@ function CodeStep({
           {resend.isPending ? "Resending..." : "Resend code"}
         </button>
       </div>
-    </div>
+      <p className="mt-5 flex items-center justify-center gap-2 text-xs text-slate-400">
+        <LockKeyhole className="h-3.5 w-3.5" aria-hidden="true" />
+        No credit card required. No obligation.
+      </p>
+    </AccessCard>
   );
 }
 

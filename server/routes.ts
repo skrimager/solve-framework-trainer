@@ -4540,6 +4540,160 @@ export function computeTeamHealthScore(input: {
   return Math.round(weighted / totalWeight);
 }
 
+// Human-readable skill names for the persisted consulting rubric. These labels
+// deliberately describe the behavior a manager can coach, rather than expose
+// the underlying storage keys in the Command Center.
+const TEAM_HEALTH_SKILLS = [
+  { key: "needsDiscovery", label: "Needs discovery" },
+  { key: "objectionPrevention", label: "Price resistance" },
+  { key: "trustBuilding", label: "Trust building" },
+  { key: "naturalClose", label: "Commitment" },
+  { key: "relationshipContinuity", label: "Relationship continuity" },
+] as const;
+
+type TeamHealthSkillKey = (typeof TEAM_HEALTH_SKILLS)[number]["key"];
+type TeamHealthSkillLabel = (typeof TEAM_HEALTH_SKILLS)[number]["label"];
+type TeamHealthSkillAverage = { skill: TeamHealthSkillLabel; averageScore: number };
+type TeamHealthConsultantAverage = { consultantId: number; consultantName: string; averageScore: number };
+
+export type TeamHealthInsightsDrilldown = {
+  topPerformer: TeamHealthConsultantAverage | null;
+  strongestDiscovery: (TeamHealthConsultantAverage & TeamHealthSkillAverage) | null;
+  strongestCommitment: (TeamHealthConsultantAverage & TeamHealthSkillAverage) | null;
+  strongestResistance: (TeamHealthConsultantAverage & TeamHealthSkillAverage) | null;
+  hiddenTeamStrength: TeamHealthSkillAverage | null;
+  biggestTeamOpportunity: TeamHealthSkillAverage | null;
+  fastestImproving: (TeamHealthConsultantAverage & { improvement: number }) | null;
+  coachingPriority: (TeamHealthConsultantAverage & { weakestSkill: TeamHealthSkillLabel; weakestSkillScore: number }) | null;
+  leaderboard: TeamHealthConsultantAverage[];
+};
+
+function parseTeamHealthRubric(value: string | null): Partial<Record<TeamHealthSkillKey, number>> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const rubric: Partial<Record<TeamHealthSkillKey, number>> = {};
+    for (const { key } of TEAM_HEALTH_SKILLS) {
+      if (typeof parsed[key] === "number" && Number.isFinite(parsed[key])) rubric[key] = parsed[key] as number;
+    }
+    return Object.keys(rubric).length ? rubric : null;
+  } catch {
+    return null;
+  }
+}
+
+function averageTeamHealthScores(values: number[]): number | null {
+  return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+}
+
+// The complete, pure explanation behind the Team Health KPI. It only reads
+// office-scoped people, completed session scores, persisted consulting rubrics,
+// scenarios, and the selected period. Missing data stays null so callers can
+// show an honest "Not enough data yet" state rather than invent an insight.
+export function buildTeamHealthInsightsDrilldown(
+  officeUsers: User[],
+  officeSessions: Session[],
+  allScenarios: Scenario[],
+  period: DashboardPeriod,
+): TeamHealthInsightsDrilldown {
+  const consultants = officeUsers.filter((user) => user.role === "consultant");
+  const consultantsById = new Map(consultants.map((consultant) => [consultant.id, consultant]));
+  const scenariosById = new Map(allScenarios.map((scenario) => [scenario.id, scenario]));
+  const scoredSessions = completedSessionsInPeriod(officeSessions, period)
+    .filter((session) => session.score !== null && consultantsById.has(session.userId));
+  const scoredByConsultant = new Map<number, Session[]>();
+  for (const session of scoredSessions) {
+    const entries = scoredByConsultant.get(session.userId) ?? [];
+    entries.push(session);
+    scoredByConsultant.set(session.userId, entries);
+  }
+
+  const consultantAverages = consultants
+    .map((consultant) => {
+      const averageScore = averageTeamHealthScores((scoredByConsultant.get(consultant.id) ?? []).map((session) => session.score as number));
+      return averageScore === null ? null : { consultantId: consultant.id, consultantName: consultant.displayName, averageScore };
+    })
+    .filter((row): row is TeamHealthConsultantAverage => row !== null)
+    .sort((a, b) => b.averageScore - a.averageScore || a.consultantName.localeCompare(b.consultantName));
+
+  const consultingRubricSessions = scoredSessions.flatMap((session) => {
+    if (scenarioTrack(scenariosById.get(session.scenarioId)?.track) !== "consulting") return [];
+    const rubric = parseTeamHealthRubric(session.rubricScores);
+    return rubric ? [{ session, rubric }] : [];
+  });
+
+  const consultantSkillAverage = (consultantId: number, key: TeamHealthSkillKey): number | null =>
+    averageTeamHealthScores(
+      consultingRubricSessions
+        .filter(({ session, rubric }) => session.userId === consultantId && typeof rubric[key] === "number")
+        .map(({ rubric }) => rubric[key] as number),
+    );
+
+  const strongestAt = (key: TeamHealthSkillKey) => {
+    const skill = TEAM_HEALTH_SKILLS.find((candidate) => candidate.key === key)!;
+    const ranked = consultantAverages
+      .map((consultant) => {
+        const averageScore = consultantSkillAverage(consultant.consultantId, key);
+        return averageScore === null ? null : { ...consultant, skill: skill.label, averageScore };
+      })
+      .filter((row): row is TeamHealthConsultantAverage & TeamHealthSkillAverage => row !== null)
+      .sort((a, b) => b.averageScore - a.averageScore || a.consultantName.localeCompare(b.consultantName));
+    return ranked[0] ?? null;
+  };
+
+  const teamSkillAverages = TEAM_HEALTH_SKILLS
+    .map(({ key, label }) => {
+      const averageScore = averageTeamHealthScores(
+        consultingRubricSessions
+          .filter(({ rubric }) => typeof rubric[key] === "number")
+          .map(({ rubric }) => rubric[key] as number),
+      );
+      return averageScore === null ? null : { skill: label, averageScore };
+    })
+    .filter((row): row is TeamHealthSkillAverage => row !== null);
+  const hiddenTeamStrength = [...teamSkillAverages].sort((a, b) => b.averageScore - a.averageScore || a.skill.localeCompare(b.skill))[0] ?? null;
+  const biggestTeamOpportunity = [...teamSkillAverages].sort((a, b) => a.averageScore - b.averageScore || a.skill.localeCompare(b.skill))[0] ?? null;
+
+  const midpoint = new Date((period.since.getTime() + period.until.getTime()) / 2);
+  const fastestImproving = consultantAverages
+    .map((consultant) => {
+      const sessions = (scoredByConsultant.get(consultant.consultantId) ?? []);
+      const firstHalf = averageTeamHealthScores(sessions.filter((session) => new Date(session.completedAt as string) <= midpoint).map((session) => session.score as number));
+      const secondHalf = averageTeamHealthScores(sessions.filter((session) => new Date(session.completedAt as string) > midpoint).map((session) => session.score as number));
+      if (firstHalf === null || secondHalf === null) return null;
+      const improvement = secondHalf - firstHalf;
+      return improvement > 0 ? { ...consultant, improvement } : null;
+    })
+    .filter((row): row is TeamHealthConsultantAverage & { improvement: number } => row !== null)
+    .sort((a, b) => b.improvement - a.improvement || b.averageScore - a.averageScore || a.consultantName.localeCompare(b.consultantName))[0] ?? null;
+
+  const coachingPriority = [...consultantAverages]
+    .sort((a, b) => a.averageScore - b.averageScore || a.consultantName.localeCompare(b.consultantName))
+    .map((consultant) => {
+      const weakest = TEAM_HEALTH_SKILLS
+        .map(({ key, label }) => {
+          const averageScore = consultantSkillAverage(consultant.consultantId, key);
+          return averageScore === null ? null : { skill: label, averageScore };
+        })
+        .filter((row): row is TeamHealthSkillAverage => row !== null)
+        .sort((a, b) => a.averageScore - b.averageScore || a.skill.localeCompare(b.skill))[0];
+      return weakest ? { ...consultant, weakestSkill: weakest.skill, weakestSkillScore: weakest.averageScore } : null;
+    })
+    .find((row): row is TeamHealthConsultantAverage & { weakestSkill: TeamHealthSkillLabel; weakestSkillScore: number } => row !== null) ?? null;
+
+  return {
+    topPerformer: consultantAverages[0] ?? null,
+    strongestDiscovery: strongestAt("needsDiscovery"),
+    strongestCommitment: strongestAt("naturalClose"),
+    strongestResistance: strongestAt("objectionPrevention"),
+    hiddenTeamStrength,
+    biggestTeamOpportunity,
+    fastestImproving,
+    coachingPriority,
+    leaderboard: consultantAverages.slice(0, 5),
+  };
+}
+
 // Score-band distribution across ALL scored completed sessions in the period
 // (not per-consultant), matching the reference "Score Distribution" bar chart.
 // Bands are fixed and always returned in order, even at zero, so the chart
@@ -5408,6 +5562,30 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const { since, until } = readPeriodParams(req);
     const period = resolveDashboardPeriod(since, until, now);
     res.json({ sessions: buildConversationDrilldown(officeUsers, officeSessions, allScenarios, period) });
+  });
+
+  // Data-derived explanation for the Team Health Score. The builder shares the
+  // same office-scoped sessions and exact selected-period handling as the KPI.
+  app.get("/api/manager/dashboard-command-center/team-health-insights", async (req, res) => {
+    const auth = await requireManagerOrQaDashboardUser(req, "Only a manager or QA can view dashboard analytics");
+    if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
+    const requester = auth.user;
+    const office = await storage.getOffice(requester.officeId);
+    if (!requester.isDemoAccount && !office?.managerItemId) {
+      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    }
+    const [officeUsers, officeSessions, allScenarios] = await Promise.all([
+      storage.listUsersByOffice(requester.officeId),
+      storage.listSessionsByOffice(requester.officeId),
+      storage.listScenarios(),
+    ]);
+    const { since, until } = readPeriodParams(req);
+    res.json(buildTeamHealthInsightsDrilldown(
+      officeUsers,
+      officeSessions,
+      allScenarios,
+      resolveDashboardPeriod(since, until, new Date()),
+    ));
   });
 
   // Exact session rows behind one Score Distribution bar. The band is derived

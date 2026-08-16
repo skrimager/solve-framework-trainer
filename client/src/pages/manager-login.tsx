@@ -34,7 +34,7 @@ import styles from "./manager-login.module.css";
 // as the rounded corners rather than a separate pseudo-element, so the
 // join has no kink or seam and is filled with the same single gradient
 // in the same pass as the rest of the border.
-function LogoMark() {
+export function LogoMark() {
   return (
     <div className={styles.logoIcon} aria-hidden="true">
       <svg className={styles.logoOutline} viewBox="0 0 140 150">

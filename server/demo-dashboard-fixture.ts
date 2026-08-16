@@ -1,3 +1,5 @@
+import { buildTeamHealthInsightsDrilldown } from "./routes";
+
 /**
  * Public, fictional data for the OTP-gated Command Center demonstration.
  * This is intentionally isolated from real office records: the public demo is
@@ -95,6 +97,31 @@ const performers = Object.fromEntries(consultants.slice(0, 5).map((consultant) =
   return [consultant.id, { consultantId: consultant.id, consultantName: consultant.displayName, averageScore: consultant.averageScore, sessionCount: sessions.length, scoreSum: sessions.reduce((sum, session) => sum + session.score, 0), sessions }];
 }));
 
+// The demo uses the same pure Command Center builder as the live manager
+// dashboard. These are the fixture's completed consulting sessions, shaped
+// only to the fields the builder reads, not a second hardcoded insight list.
+const demoInsightUsers = consultants.map((consultant) => ({
+  id: consultant.id,
+  displayName: consultant.displayName,
+  role: "consultant",
+}));
+const demoInsightScenarios = [{ id: 1, track: "consulting" }];
+const demoInsightSessions = sessionInfo.map((session) => ({
+  id: session.id,
+  userId: session.consultantId,
+  scenarioId: 1,
+  status: "completed",
+  score: session.score,
+  completedAt: session.completedAt,
+  rubricScores: JSON.stringify(sessionDetails[session.id].rubricScores),
+}));
+const demoInsightPeriod = {
+  since: new Date("2026-07-16T00:00:00.000Z"),
+  until: new Date(ISO.now),
+  days: 30,
+  label: "Last 30 days",
+};
+
 const widgetConfig = Object.fromEntries([
   "teamHealth", "conversations", "completionRate", "certifications", "alerts", "liveFeed", "performanceOverTime", "skillRadar", "topPerformers", "conversationOutcomes", "scoreDistribution", "achievements", "popularScenarios", "ctaPanel", "summaryStrip",
 ].map((key) => [key, true]));
@@ -139,6 +166,12 @@ export function buildAcmeDemoDashboardPayload() {
         widgetConfig,
       },
       readOnlyData: {
+        teamHealthInsights: buildTeamHealthInsightsDrilldown(
+          demoInsightUsers as any,
+          demoInsightSessions as any,
+          demoInsightScenarios as any,
+          demoInsightPeriod,
+        ),
         conversations: sessionInfo.map((session) => ({ consultantName: consultants.find((c) => c.id === session.consultantId)!.displayName, scenarioTitle: session.title, score: session.score, completedAt: session.completedAt, sessionId: session.id })),
         certifications: consultants.filter((consultant) => consultant.consultingCertified).map((consultant) => ({ consultantName: consultant.displayName, track: "consulting" as const, certifiedAt: consultant.consultingCertifiedAt! })),
         sessions: sessionDetails,

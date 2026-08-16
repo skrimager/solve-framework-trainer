@@ -115,10 +115,10 @@ describe("welcome screen styling stays on the existing scale", () => {
     );
   });
 
-  test("the continue button is orange with dark text and adds no new color", () => {
+  test("the continue button is orange with dark text and stays within the customer-facing palette", () => {
     assert.match(demoPageCode, /className="text-sidebar-primary-foreground"/);
     const hexes = new Set(demoPageSource.match(/#[0-9A-Fa-f]{3,8}/g) ?? []);
-    assert.deepEqual([...hexes], ["#E06D00"]);
+    assert.deepEqual([...hexes].sort(), ["#0A1A30", "#E06D00"]);
   });
 
   test("it reuses the sibling steps' typographic scale", () => {

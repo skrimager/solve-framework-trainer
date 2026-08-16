@@ -25,6 +25,7 @@ import {
   resolveDashboardWidgetConfig,
   DASHBOARD_WIDGET_KEYS,
   resolveDashboardPeriod,
+  buildTeamHealthInsightsDrilldown,
 } from "./routes";
 import type { User, Session, Scenario } from "@shared/schema";
 import { USER_SESSION_COOKIE, signUserSession } from "./userSession";
@@ -607,6 +608,68 @@ describe("percentDelta", () => {
 
   test("returns null when there is no baseline to compare against", () => {
     assert.equal(percentDelta(5, 0), null);
+  });
+});
+
+describe("buildTeamHealthInsightsDrilldown", () => {
+  const now = new Date("2026-03-31T12:00:00.000Z");
+  const period = resolveDashboardPeriod("2026-03-01T00:00:00.000Z", "2026-03-31T23:59:59.999Z", now);
+  const scenario = { id: 10, track: "consulting", title: "Discovery", vertical: "home_improvement" } as Scenario;
+  const rubric = (needsDiscovery: number, objectionPrevention: number, trustBuilding: number, naturalClose: number, relationshipContinuity: number) => JSON.stringify({ needsDiscovery, objectionPrevention, trustBuilding, naturalClose, relationshipContinuity });
+
+  test("derives all available insights from several consultants and varied scores", () => {
+    const users = [
+      mkUser({ id: 3, role: "consultant", displayName: "Alice A" }),
+      mkUser({ id: 4, role: "consultant", displayName: "Bob B" }),
+      mkUser({ id: 5, role: "consultant", displayName: "Dave D" }),
+    ];
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: 70, rubricScores: rubric(60, 65, 70, 70, 60), completedAt: "2026-03-05T12:00:00.000Z" }),
+      mkSession({ id: 2, userId: 3, scenarioId: 10, score: 95, rubricScores: rubric(92, 85, 88, 93, 84), completedAt: "2026-03-26T12:00:00.000Z" }),
+      mkSession({ id: 3, userId: 4, scenarioId: 10, score: 90, rubricScores: rubric(98, 95, 92, 97, 85), completedAt: "2026-03-06T12:00:00.000Z" }),
+      mkSession({ id: 4, userId: 4, scenarioId: 10, score: 93, rubricScores: rubric(99, 96, 94, 98, 86), completedAt: "2026-03-27T12:00:00.000Z" }),
+      mkSession({ id: 5, userId: 5, scenarioId: 10, score: 65, rubricScores: rubric(70, 50, 60, 55, 45), completedAt: "2026-03-12T12:00:00.000Z" }),
+    ];
+
+    const insights = buildTeamHealthInsightsDrilldown(users, sessions, [scenario], period);
+    assert.equal(insights.topPerformer?.consultantName, "Bob B");
+    assert.equal(insights.strongestDiscovery?.consultantName, "Bob B");
+    assert.equal(insights.strongestCommitment?.skill, "Commitment");
+    assert.equal(insights.strongestResistance?.skill, "Price resistance");
+    assert.equal(insights.hiddenTeamStrength?.skill, "Needs discovery");
+    assert.equal(insights.biggestTeamOpportunity?.skill, "Relationship continuity");
+    assert.equal(insights.fastestImproving?.consultantName, "Alice A");
+    assert.equal(insights.fastestImproving?.improvement, 25);
+    assert.equal(insights.coachingPriority?.consultantName, "Dave D");
+    assert.equal(insights.coachingPriority?.weakestSkill, "Relationship continuity");
+    assert.deepEqual(insights.leaderboard.map((row) => row.consultantName), ["Bob B", "Alice A", "Dave D"]);
+  });
+
+  test("handles a single consultant without fabricating a trend", () => {
+    const user = mkUser({ id: 3, role: "consultant", displayName: "Solo S" });
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: 82, rubricScores: rubric(84, 76, 80, 78, 74), completedAt: "2026-03-12T12:00:00.000Z" }),
+    ];
+    const insights = buildTeamHealthInsightsDrilldown([user], sessions, [scenario], period);
+    assert.equal(insights.topPerformer?.consultantName, "Solo S");
+    assert.equal(insights.coachingPriority?.weakestSkill, "Relationship continuity");
+    assert.equal(insights.fastestImproving, null);
+    assert.equal(insights.leaderboard.length, 1);
+  });
+
+  test("returns a sensible empty state when no completed scored sessions exist", () => {
+    const user = mkUser({ id: 3, role: "consultant", displayName: "No Data" });
+    const sessions = [
+      mkSession({ id: 1, userId: 3, scenarioId: 10, score: null, status: "in_progress", completedAt: null }),
+    ];
+    const insights = buildTeamHealthInsightsDrilldown([user], sessions, [scenario], period);
+    assert.equal(insights.topPerformer, null);
+    assert.equal(insights.strongestDiscovery, null);
+    assert.equal(insights.hiddenTeamStrength, null);
+    assert.equal(insights.biggestTeamOpportunity, null);
+    assert.equal(insights.fastestImproving, null);
+    assert.equal(insights.coachingPriority, null);
+    assert.deepEqual(insights.leaderboard, []);
   });
 });
 
