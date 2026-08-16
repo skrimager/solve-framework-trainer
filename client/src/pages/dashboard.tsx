@@ -1257,8 +1257,8 @@ function TeamHealthInsightsModal({
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
       <DialogContent
-        className="border max-h-[85vh] overflow-y-auto sm:max-w-2xl"
-        style={{ backgroundColor: NAVY_DEEP, borderColor: `${ORANGE}66`, color: "white" }}
+        className="border max-h-[85vh] overflow-y-auto sm:max-w-4xl"
+        style={{ backgroundColor: "#0A1A30", borderColor: "rgba(255,255,255,.2)", color: "white" }}
         data-testid="drilldown-team-health"
       >
         <DialogHeader>
@@ -1270,29 +1270,65 @@ function TeamHealthInsightsModal({
         {isLoading && <Skeleton className="h-80 rounded-lg" />}
         {isError && <p className="text-sm text-white/60">Couldn&apos;t load Team Health insights right now.</p>}
         {insights && (
-          <>
-            <ul className="grid gap-2 sm:grid-cols-2" aria-label="Team Health insights">
-              {rows.map((row) => (
-                <li key={row.testId} className="rounded-lg border px-3 py-3" style={{ backgroundColor: PANEL, borderColor: "rgba(249,115,22,0.22)" }} data-testid={row.testId}>
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">{row.label}</p>
-                  <p className="mt-1 text-sm leading-5 text-white">{row.value}</p>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-5 border-t pt-4" style={{ borderColor: "rgba(249,115,22,0.22)" }} data-testid="insight-leaderboard">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-200">Top performers by conversation quality</p>
+          <div className="grid gap-8 sm:grid-cols-[1.1fr_.9fr]" data-testid="team-health-command-card">
+            <div>
+              <h3
+                className="mb-4 text-sm font-semibold uppercase"
+                style={{ color: ORANGE_LIGHT, letterSpacing: "0.08em" }}
+                data-testid="heading-what-solve-is-seeing"
+              >
+                What SOLVE is seeing
+              </h3>
+              <dl className="grid gap-3" aria-label="Team Health insights">
+                {rows.map((row) => (
+                  <div
+                    key={row.testId}
+                    className="grid grid-cols-1 gap-1 border-b pb-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:gap-4"
+                    style={{ borderColor: "rgba(255,255,255,.13)" }}
+                    data-testid={row.testId}
+                  >
+                    <dt className="text-sm text-white/64">{row.label}</dt>
+                    <dd className="text-sm font-bold text-white sm:text-right">{row.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+            <div data-testid="insight-leaderboard">
+              <h3
+                className="mb-4 text-sm font-semibold uppercase"
+                style={{ color: ORANGE_LIGHT, letterSpacing: "0.08em" }}
+                data-testid="heading-top-performers-conversation-quality"
+              >
+                Top performers by conversation quality
+              </h3>
               {insights.leaderboard.length ? (
-                <ol className="mt-2 space-y-2" data-testid="list-insight-leaderboard">
-                  {insights.leaderboard.map((performer, index) => (
-                    <li key={performer.consultantId} className="flex items-center justify-between gap-4 rounded-md px-3 py-2" style={{ backgroundColor: PANEL }}>
-                      <span className="min-w-0 truncate text-sm text-white"><span className="mr-2 text-orange-200">#{index + 1}</span>{performer.consultantName}</span>
-                      <span className="shrink-0 font-semibold text-orange-200">{performer.averageScore}</span>
-                    </li>
-                  ))}
-                </ol>
+                <div className="grid gap-4" data-testid="list-insight-leaderboard">
+                  {(() => {
+                    const maxScore = Math.max(...insights.leaderboard.map((p) => p.averageScore ?? 0), 1);
+                    return insights.leaderboard.map((performer) => {
+                      const width = Math.max(4, ((performer.averageScore ?? 0) / maxScore) * 100);
+                      return (
+                      <div
+                        key={performer.consultantId}
+                        className="grid grid-cols-[minmax(72px,auto)_minmax(0,1fr)_30px] items-center gap-3 text-sm"
+                        data-testid={`insight-performer-row-${performer.consultantId}`}
+                      >
+                        <span className="truncate text-white" title={performer.consultantName}>{performer.consultantName}</span>
+                        <span className="block h-2 rounded-sm" style={{ backgroundColor: "rgba(255,255,255,.16)" }}>
+                          <span
+                            className="block h-full rounded-sm"
+                            style={{ width: `${width}%`, backgroundColor: "#7fbf6b" }}
+                          />
+                        </span>
+                        <strong className="text-right text-sm text-white">{performer.averageScore}</strong>
+                      </div>
+                      );
+                    });
+                  })()}
+                </div>
               ) : <p className="mt-2 text-sm text-white/60">{notEnough}</p>}
             </div>
-          </>
+          </div>
         )}
       </DialogContent>
     </Dialog>
