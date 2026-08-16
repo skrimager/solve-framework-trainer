@@ -85,6 +85,7 @@ const BLUE = "#3B82F6";
 const BLUE_LIGHT = "#60A5FA";
 const GREEN = "#22C55E";
 const GREEN_LIGHT = "#4ADE80";
+const LIME_GREEN = "#D4F521"; // matches marketing site's Command Center leaderboard bars
 const ORANGE = "#F97316";
 const ORANGE_LIGHT = "#FB923C";
 const PURPLE = "#A855F7";
@@ -1203,6 +1204,13 @@ export function CommandCenterSection({
         dateRange={dateRange}
         onClose={() => setDrilldown(null)}
         readOnlyInsights={readOnlyData?.teamHealthInsights}
+        summary={{
+          teamHealthScore: extras.teamHealth.score,
+          conversations: extras.conversations.count,
+          completionRatePercent: extras.completionRate.percent,
+          certifications: extras.certifications.count,
+          alertCount: extras.alerts.length,
+        }}
       />
       <ConversationListModal
         open={drilldown === "conversations"}
@@ -1230,11 +1238,19 @@ function TeamHealthInsightsModal({
   dateRange,
   onClose,
   readOnlyInsights,
+  summary,
 }: {
   open: boolean;
   dateRange: DateRangeValue;
   onClose: () => void;
   readOnlyInsights?: TeamHealthInsightsDrilldown;
+  summary?: {
+    teamHealthScore: number | null;
+    conversations: number;
+    completionRatePercent: number | null;
+    certifications: number;
+    alertCount: number;
+  };
 }) {
   const query = commandCenterRangeQuery(dateRange);
   const { data: fetchedInsights, isLoading, isError } = useQuery<TeamHealthInsightsDrilldown>({
@@ -1257,58 +1273,85 @@ function TeamHealthInsightsModal({
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
       <DialogContent
-        className="max-h-[88vh] max-w-[calc(100%-2rem)] overflow-y-auto rounded-xl border p-4 font-['Plus_Jakarta_Sans'] shadow-2xl sm:max-w-5xl sm:p-7"
+        className="max-h-[92vh] max-w-[calc(100%-1.5rem)] overflow-y-auto rounded-xl border p-5 font-['Plus_Jakarta_Sans'] shadow-2xl sm:max-w-6xl sm:p-9"
         style={{ backgroundColor: NAVY_DEEP, borderColor: "rgba(224,109,0,0.5)", color: "white" }}
         data-testid="drilldown-team-health"
       >
         <DialogHeader className="border-b pb-5 pr-8 text-left sm:pb-6" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
           <p className="text-xs font-bold uppercase tracking-[0.16em]" style={{ color: "#F6C453" }}>Team intelligence</p>
-          <DialogTitle className="text-xl font-bold tracking-[-0.02em] text-white">What SOLVE is seeing</DialogTitle>
-          <DialogDescription className="max-w-2xl text-sm leading-6 text-white/65">
+          <DialogTitle className="text-2xl font-bold tracking-[-0.02em] text-white sm:text-3xl">What SOLVE is seeing</DialogTitle>
+          <DialogDescription className="max-w-2xl text-sm leading-6 text-white/65 sm:text-base">
             Data-derived signals from completed scored conversations in the selected period.
           </DialogDescription>
         </DialogHeader>
+        {summary && (
+          <div className="grid grid-cols-2 gap-3 border-b pb-6 pt-6 sm:grid-cols-5 sm:gap-4" style={{ borderColor: "rgba(255,255,255,0.1)" }} data-testid="team-health-summary-strip">
+            <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-white/50">Team Health Score</p>
+              <p className="mt-2 text-3xl font-bold tabular-nums text-white sm:text-4xl">{summary.teamHealthScore ?? "\u2014"}</p>
+            </div>
+            <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-white/50">Conversations</p>
+              <p className="mt-2 text-3xl font-bold tabular-nums text-white sm:text-4xl">{summary.conversations}</p>
+            </div>
+            <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-white/50">Completion Rate</p>
+              <p className="mt-2 text-3xl font-bold tabular-nums text-white sm:text-4xl">
+                {summary.completionRatePercent !== null ? `${summary.completionRatePercent}%` : "\u2014"}
+              </p>
+            </div>
+            <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-white/50">Certifications Earned</p>
+              <p className="mt-2 text-3xl font-bold tabular-nums text-white sm:text-4xl">{summary.certifications}</p>
+            </div>
+            <div className="rounded-xl border p-4" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-white/50">Alerts</p>
+              <p className="mt-2 text-3xl font-bold tabular-nums text-white sm:text-4xl">{summary.alertCount}</p>
+              {summary.alertCount > 0 && <p className="mt-1 text-xs font-medium text-white/50">Needs attention</p>}
+            </div>
+          </div>
+        )}
         {isLoading && <Skeleton className="h-80 rounded-xl" />}
         {isError && <p className="text-sm text-white/60">Couldn&apos;t load Team Health insights right now.</p>}
         {insights && (
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1.06fr)_minmax(0,0.94fr)] lg:gap-7">
-            <section className="rounded-xl border p-4 sm:p-5" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} aria-labelledby="team-health-insights-heading">
-              <div className="mb-3 flex items-baseline justify-between gap-3">
-                <h3 id="team-health-insights-heading" className="text-xs font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>What SOLVE is seeing</h3>
+          <div className="grid gap-6 pt-6 lg:grid-cols-[minmax(0,1.06fr)_minmax(0,0.94fr)] lg:gap-8">
+            <section className="rounded-xl border p-5 sm:p-6" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} aria-labelledby="team-health-insights-heading">
+              <div className="mb-4 flex items-baseline justify-between gap-3">
+                <h3 id="team-health-insights-heading" className="text-sm font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>What SOLVE is seeing</h3>
                 <span className="text-xs text-white/45">8 signals</span>
               </div>
               <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.09)" }} aria-label="Team Health insights">
                 {rows.map((row) => (
-                  <li key={row.testId} className="grid gap-1 py-3 first:pt-1 last:pb-1 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:items-start sm:gap-5" data-testid={row.testId}>
-                    <p className="text-xs font-semibold uppercase tracking-[0.09em] text-white/55">{row.label}</p>
-                    <p className="text-sm leading-5 text-white sm:text-right">{row.value}</p>
+                  <li key={row.testId} className="grid gap-1.5 py-4 first:pt-1 last:pb-1 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:items-start sm:gap-5" data-testid={row.testId}>
+                    <p className="text-sm font-semibold uppercase tracking-[0.09em] text-white/55">{row.label}</p>
+                    <p className="text-base leading-6 text-white sm:text-right">{row.value}</p>
                   </li>
                 ))}
               </ul>
             </section>
-            <section className="rounded-xl border p-4 sm:p-5" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} data-testid="insight-leaderboard" aria-labelledby="team-health-leaderboard-heading">
-              <div className="mb-4">
-                <h3 id="team-health-leaderboard-heading" className="text-xs font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>Top performers by conversation quality</h3>
-                <p className="mt-1 text-xs leading-5 text-white/50">Average score across completed conversations</p>
+            <section className="rounded-xl border p-5 sm:p-6" style={{ backgroundColor: NAVY, borderColor: "rgba(255,255,255,0.1)" }} data-testid="insight-leaderboard" aria-labelledby="team-health-leaderboard-heading">
+              <div className="mb-5">
+                <h3 id="team-health-leaderboard-heading" className="text-sm font-bold uppercase tracking-[0.14em]" style={{ color: "#F6C453" }}>Top performers by conversation quality</h3>
+                <p className="mt-1 text-sm leading-5 text-white/50">Average score across completed conversations</p>
               </div>
               {insights.leaderboard.length ? (
-                <ol className="space-y-3" data-testid="list-insight-leaderboard">
+                <ol className="space-y-4" data-testid="list-insight-leaderboard">
                   {insights.leaderboard.map((performer, index) => (
-                    <li key={performer.consultantId} className="grid grid-cols-[1.5rem_minmax(0,1fr)_2.25rem] items-center gap-2.5">
-                      <span className="text-xs font-bold tabular-nums text-white/45">{String(index + 1).padStart(2, "0")}</span>
+                    <li key={performer.consultantId} className="grid grid-cols-[1.75rem_minmax(0,1fr)_2.75rem] items-center gap-3">
+                      <span className="text-sm font-bold tabular-nums text-white/45">{String(index + 1).padStart(2, "0")}</span>
                       <div className="min-w-0">
-                        <div className="mb-1.5 flex items-center justify-between gap-3">
-                          <span className="truncate text-sm font-semibold text-white">{performer.consultantName}</span>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <span className="truncate text-base font-semibold text-white">{performer.consultantName}</span>
                           <span className="shrink-0 text-xs text-white/45">quality</span>
                         </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-white/[0.09]" role="progressbar" aria-label={`${performer.consultantName} conversation quality`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={performer.averageScore}>
+                        <div className="h-2.5 overflow-hidden rounded-full bg-white/[0.09]" role="progressbar" aria-label={`${performer.consultantName} conversation quality`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={performer.averageScore}>
                           <div
-                            className="h-full rounded-full bg-gradient-to-r from-[#E06D00] via-[#F39416] to-[#F6C453] transition-[width] duration-500"
-                            style={{ width: `${Math.max(0, Math.min(100, performer.averageScore))}%` }}
+                            className="h-full rounded-full transition-[width] duration-500"
+                            style={{ width: `${Math.max(0, Math.min(100, performer.averageScore))}%`, backgroundColor: LIME_GREEN }}
                           />
                         </div>
                       </div>
-                      <span className="text-right text-sm font-bold tabular-nums" style={{ color: "#F6C453" }}>{performer.averageScore}</span>
+                      <span className="text-right text-base font-bold tabular-nums" style={{ color: LIME_GREEN }}>{performer.averageScore}</span>
                     </li>
                   ))}
                 </ol>
