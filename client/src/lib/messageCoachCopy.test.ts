@@ -112,9 +112,9 @@ describe("Message Coach page wiring", () => {
     assert.match(appSource, /import MessageCoach from "@\/pages\/message-coach";/);
   });
 
-  test("the root chooser links to it", () => {
-    assert.match(homeSource, /to: "\/message-coach"/);
-    assert.ok(homeSource.includes("link-choose-message-coach"));
+  test("the root chooser does not advertise the paid feature", () => {
+    assert.doesNotMatch(homeSource, /\/message-coach/);
+    assert.ok(!homeSource.includes("link-choose-message-coach"));
   });
 
   test("the page renders every part of the result, not just the score", () => {
