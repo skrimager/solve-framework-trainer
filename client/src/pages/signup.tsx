@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,8 +79,12 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [step]);
+
   return (
-    <main className="min-h-dvh overflow-x-hidden bg-[#050C1C] px-4 pb-7 pt-16 text-white sm:px-6 sm:pt-9 lg:px-10 lg:py-9">
+    <main className="min-h-dvh overflow-x-hidden bg-[#050C1C] px-4 pb-7 pt-7 text-white sm:px-6 sm:pt-9 lg:px-10 lg:py-9">
       <div className="mx-auto max-w-7xl">
         <header className="flex justify-center pb-7 sm:pb-9">
           <img
