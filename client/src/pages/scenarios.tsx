@@ -55,6 +55,19 @@ const LEVEL_LABELS: Record<Level, string> = {
 // Advanced, regardless of the order scenarios come back from the API/DB.
 const DIFFICULTY_ORDER: Level[] = ["beginner", "intermediate", "advanced"];
 
+// Randomly draws one scenario from a vertical's pool, restricted to the
+// consultant's current level so a Beginner never lands on an Advanced opening
+// (or vice versa) purely by chance of the random pick. Falls back to the full
+// pool when activeLevel is unset (certified consultants, who have moved past
+// the leveled path) or when this vertical has no scenario at the exact level
+// yet, so the button never goes dead for a real gap in scenario coverage.
+export function pickScenarioForLevel(pool: Scenario[], activeLevel: Level | undefined): Scenario | undefined {
+  if (pool.length === 0) return undefined;
+  const levelPool = activeLevel ? pool.filter((s) => s.difficulty === activeLevel) : [];
+  const effectivePool = levelPool.length > 0 ? levelPool : pool;
+  return effectivePool[Math.floor(Math.random() * effectivePool.length)];
+}
+
 type Track = "consulting" | "leadership";
 type PracticeModule = Track | "stall";
 
@@ -261,7 +274,8 @@ export default function Scenarios() {
     if (capBlocked) return;
     const pool = verticalGroups.get(vertical) ?? [];
     if (pool.length === 0) return;
-    const picked = pool[Math.floor(Math.random() * pool.length)];
+    const picked = pickScenarioForLevel(pool, activeLevel);
+    if (!picked) return;
     startSession.mutate(picked.id);
   };
 
