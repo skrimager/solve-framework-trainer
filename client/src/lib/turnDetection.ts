@@ -30,10 +30,13 @@ export type TurnCompleteness = "incomplete" | "neutral" | "complete";
 export const DEFAULT_SILENCE_MS = 2500;
 
 // Multipliers applied to the base wait for the non-neutral outcomes.
-// COMPLETE_RATIO was lowered as the base rose so a clearly finished sentence
-// still sends in about a second: the extra headroom is spent only on utterances
-// that might not be finished.
-const COMPLETE_RATIO = 0.4;
+// COMPLETE_RATIO was raised from 0.4 (a 1000ms wait) to 0.72 (~1800ms): 1000ms
+// was too fast for how people actually talk. A sentence that reads as
+// grammatically "complete" (ends on a period, or a short word like "okay"/
+// "good"/"right") is very often followed by a real beat of breath or a
+// continuing thought, not a handover, and the old ratio was auto-sending over
+// that beat. INCOMPLETE_RATIO is unchanged.
+const COMPLETE_RATIO = 0.72;
 const INCOMPLETE_RATIO = 1.7;
 
 // Absolute guardrails so an unusual base can never produce a jarring wait.

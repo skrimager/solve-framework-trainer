@@ -107,7 +107,7 @@ describe("recommendSilenceMs", () => {
   test("complete utterance waits less than the base", () => {
     const ms = recommendSilenceMs("Yes, that works for me.");
     assert.ok(ms < DEFAULT_SILENCE_MS, `expected < ${DEFAULT_SILENCE_MS}, got ${ms}`);
-    assert.equal(ms, 1000);
+    assert.equal(ms, 1800);
   });
 
   test("incomplete utterance waits more than the base", () => {
@@ -118,12 +118,12 @@ describe("recommendSilenceMs", () => {
 
   test("scales around a custom base", () => {
     assert.equal(recommendSilenceMs("we visited the property yesterday", 1000), 1000);
-    assert.equal(recommendSilenceMs("that works for me", 1000), 600);
+    assert.equal(recommendSilenceMs("that works for me", 1000), 720);
     assert.equal(recommendSilenceMs("the reason is because", 1000), 1700);
   });
 
   test("clamps to the minimum wait", () => {
-    // 800 * 0.4 = 320, clamped up to the 600ms floor.
+    // 800 * 0.72 = 576, clamped up to the 600ms floor.
     assert.equal(recommendSilenceMs("okay.", 800), 600);
   });
 
@@ -153,10 +153,13 @@ describe("required product-owner scenarios", () => {
     assert.ok(ms >= 2000, `expected the wait to ride over a ~1.5s pause, got ${ms}`);
   });
 
-  test("fast-response: a short complete sentence sends quickly", () => {
-    // "Yes, that works for me." is clearly finished, so the wait shrinks well
-    // below the neutral base to keep the reply snappy.
+  test("fast-response: a short complete sentence still sends noticeably faster than neutral", () => {
+    // "Yes, that works for me." is clearly finished, so the wait shrinks below
+    // the neutral base to keep the reply reasonably snappy — but not so short
+    // that an ordinary breath/thinking beat after a finished-sounding clause
+    // gets cut off (see COMPLETE_RATIO in turnDetection.ts).
     const ms = recommendSilenceMs("Yes, that works for me.");
-    assert.ok(ms <= 1000, `expected a short wait for a finished sentence, got ${ms}`);
+    assert.ok(ms < DEFAULT_SILENCE_MS, `expected a shorter wait than neutral, got ${ms}`);
+    assert.ok(ms >= 1500, `expected at least 1.5s of breathing room, got ${ms}`);
   });
 });
