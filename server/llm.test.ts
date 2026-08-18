@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import {
+  buildCustomerOpeningPrompt,
   buildCustomerReplyPrompt,
   buildCustomerReplyStablePrefix,
   buildTurnStateBlock,
   CONVERSATION_REALISM_RULES,
   CUSTOMER_ROLE_BOUNDARY_RULES,
+  DISCOVERY_ONLY_PRACTICE_RULES,
   HIDDEN_MOTIVATION_DISCOVERY_RULES,
   LOW_KEY_CUSTOMER_CONVERSATION_RULES,
   REACTIVE_ONLY_CUSTOMER_RULES,
@@ -83,6 +85,32 @@ describe("buildCustomerReplyPrompt - conversation realism (anti-looping)", () =>
   test("handles an empty transcript with a sensible placeholder", () => {
     const prompt = buildCustomerReplyPrompt(PERSONA, [], "beginner");
     assert.ok(prompt.includes("The consultant is about to greet you"));
+  });
+});
+
+describe("DISCOVERY_ONLY_PRACTICE_RULES - global no-inventory boundary", () => {
+  test("is the first instruction in every customer reply prompt", () => {
+    for (const difficulty of ["beginner", "intermediate", "advanced", "nonsense-level"]) {
+      const prefix = buildCustomerReplyStablePrefix(PERSONA, difficulty, 2);
+      assert.ok(prefix.startsWith(DISCOVERY_ONLY_PRACTICE_RULES), `${difficulty} must start with the boundary`);
+    }
+  });
+
+  test("is the first instruction in both consulting and leadership opening prompts", () => {
+    for (const track of ["consulting", "leadership"]) {
+      const prompt = buildCustomerOpeningPrompt(PERSONA, track, "A session-specific rendition.");
+      assert.ok(prompt.startsWith(DISCOVERY_ONLY_PRACTICE_RULES), `${track} opening must start with the boundary`);
+      assert.ok(prompt.includes(PERSONA));
+      assert.ok(prompt.endsWith("A session-specific rendition."));
+    }
+  });
+
+  test("forbids physical browsing/actions but permits verbal discovery behavior", () => {
+    assert.match(DISCOVERY_ONLY_PRACTICE_RULES, /NEVER ask to see, browse, view, or be shown/i);
+    assert.match(DISCOVERY_ONLY_PRACTICE_RULES, /specific SKUs, models, units, or options/i);
+    assert.match(DISCOVERY_ONLY_PRACTICE_RULES, /test drive/i);
+    assert.match(DISCOVERY_ONLY_PRACTICE_RULES, /general product-category interest or openness/i);
+    assert.match(DISCOVERY_ONLY_PRACTICE_RULES, /stay lukewarm or unconvinced/i);
   });
 });
 

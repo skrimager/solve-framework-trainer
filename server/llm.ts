@@ -168,20 +168,7 @@ export async function getCustomerOpening(
   // Empty string keeps the prompt byte-identical to the pre-variation behavior.
   variantSection: string = ""
 ): Promise<string> {
-  // Consulting (discovery) counterparts open cold and hide their real need. In
-  // a Leadership/Conflict-Management scenario the counterpart is already upset
-  // or in conflict, so they open by surfacing that frustration (but not the
-  // underlying root cause, which the consultant must still uncover).
-  const openingInstruction =
-    track === "leadership"
-      ? `You are starting the conversation already frustrated, upset, or in conflict about something. Open with a short, natural line that introduces yourself by first name and makes your annoyance/complaint clear in one or two sentences (for example: "I'm Dana, and honestly I'm pretty frustrated right now — this is the second time this has happened"). Do NOT calmly explain the full root cause or what would satisfy you; the consultant has to draw that out. Output ONLY the spoken line, no labels or narration.`
-      : `You are starting the conversation — the consultant has just arrived / greeted you is imminent. This opening is the ONE exception to the reactive-only turn rule: you may state the initial want in your persona's opening stance once, in a short natural greeting that introduces yourself by first name (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal the hidden underlying need, concern, budget, or reason you are really here; the consultant has to uncover those through questions. After this opening, the consultant leads every subject and you only respond to their immediately preceding message. Output ONLY the spoken line, no labels or narration.`;
-  // Fixed persona core + per-track opening instruction lead (both stable per
-  // scenario, so they cache), then the per-session variant rendition comes LAST.
-  // Keying the cache on the fixed prefix keeps sessions of the same scenario
-  // routed together even though their variant tails differ.
-  const fixedPrefix = `${customerPersona}\n\n${openingInstruction}`;
-  const input = variantSection ? `${fixedPrefix}\n\n${variantSection}` : fixedPrefix;
+  const input = buildCustomerOpeningPrompt(customerPersona, track, variantSection);
 
   const response = await client.responses.create({
     model: CHAT_MODEL,
@@ -191,6 +178,31 @@ export async function getCustomerOpening(
 
   logCachedTokens("customer-opening", response.usage);
   return (response.output_text || "").trim();
+}
+
+// Builds the global opening prompt without making a model request. Keeping this
+// beside the reply builder makes the discovery-only boundary testable on the one
+// turn that is not covered by the reactive-only reply prompt.
+export function buildCustomerOpeningPrompt(
+  customerPersona: string,
+  track: string = "consulting",
+  variantSection: string = ""
+): string {
+  // Consulting (discovery) counterparts open cold and hide their real need. In
+  // a Leadership/Conflict-Management scenario the counterpart is already upset
+  // or in conflict, so they open by surfacing that frustration (but not the
+  // underlying root cause, which the consultant must still uncover).
+  const openingInstruction =
+    track === "leadership"
+      ? `You are starting the conversation already frustrated, upset, or in conflict about something. Open with a short, natural line that introduces yourself by first name and makes your annoyance/complaint clear in one or two sentences (for example: "I'm Dana, and honestly I'm pretty frustrated right now — this is the second time this has happened"). Do NOT calmly explain the full root cause or what would satisfy you; the consultant has to draw that out. Output ONLY the spoken line, no labels or narration.`
+      : `You are starting the conversation — the consultant has just arrived / greeted you is imminent. This opening is the ONE exception to the reactive-only turn rule: you may state the initial want in your persona's opening stance once, in a short natural greeting that introduces yourself by first name (for example: "Hi, I'm Sarah — thanks for coming out today"). Do NOT reveal the hidden underlying need, concern, budget, or reason you are really here; the consultant has to uncover those through questions. After this opening, the consultant leads every subject and you only respond to their immediately preceding message. Output ONLY the spoken line, no labels or narration.`;
+  // The global platform boundary, fixed persona core, and per-track opening
+  // instruction lead (all stable per scenario) come before the per-session
+  // rendition so every opening follows the same cross-vertical constraints.
+  // Keying the cache on the fixed prefix keeps sessions of the same scenario
+  // routed together even though their variant tails differ.
+  const fixedPrefix = `${DISCOVERY_ONLY_PRACTICE_RULES}\n\n${customerPersona}\n\n${openingInstruction}`;
+  return variantSection ? `${fixedPrefix}\n\n${variantSection}` : fixedPrefix;
 }
 
 // Per-difficulty behavioral calibration layered on top of each persona. Higher
@@ -361,6 +373,20 @@ TOPIC FIDELITY COMES FIRST. When the consultant asks about a named topic, answer
 
 The goal is to behave like a real person who can be understood through thoughtful discovery, not a character who makes the consultant hear the answer before they have earned it.`;
 
+// This is a text/voice discovery-practice product, not the consultant's
+// showroom, jobsite, catalog, or appointment calendar. It must sit at the
+// beginning of both opening and reply prompts so scenario-specific prose cannot
+// accidentally turn a simulated customer into an in-person shopper.
+export const DISCOVERY_ONLY_PRACTICE_RULES = `Discovery-only practice boundary (HARD RULE FOR EVERY SCENARIO AND VERTICAL):
+
+This is a text/voice discovery-practice conversation. There is no physical inventory, product catalog, brochure rack, unit list, showroom, jobsite, or in-person appointment to access in this conversation. Stay in character; do not mention this platform boundary aloud.
+
+NEVER ask to see, browse, view, or be shown physical inventory, brochures, specific SKUs, models, units, or options. Never ask what specific products the consultant has "in stock" or available as though browsing a catalog. Never ask to go look at, walk out to, inspect, sit in, demonstrate, or test drive anything.
+
+You may express a general product-category interest or openness (for example, "I'm open to new or used" or "I like tech features") and ask a clarification directly needed to understand the consultant's discovery process. If the consultant describes a solution verbally, react to that description from your customer perspective rather than requesting physical access to it.
+
+If the consultant starts pitching or solutioning before discovery is complete, stay lukewarm or unconvinced and continue answering relevant discovery questions when asked. Do NOT redirect them toward products, inventory, demonstrations, or a test drive.`;
+
 // The final stable rule block is deliberately role-specific and comes after every
 // difficulty, realism, reasonableness, and responsiveness instruction. Its job is
 // to prevent a common language-model role swap: completing a plausible seller
@@ -428,7 +454,7 @@ export function buildCustomerReplyStablePrefix(
   // scenario, every difficulty, and the demo path inherit them: routes.ts and
   // demoV2Routes.ts both reach the customer through getCustomerReply /
   // streamCustomerReply, which build their prompt from this one function.
-  return `${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${LOW_KEY_CUSTOMER_CONVERSATION_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}\n\n${REACTIVE_ONLY_CUSTOMER_RULES}`;
+  return `${DISCOVERY_ONLY_PRACTICE_RULES}\n\n${customerPersona}\n\n${behaviorBlock}\n\n${CONVERSATION_REALISM_RULES}\n\n${REASONABLE_CUSTOMER_RULES}\n\n${CUSTOMER_RESPONSIVENESS_RULES}\n\n${LOW_KEY_CUSTOMER_CONVERSATION_RULES}\n\n${HIDDEN_MOTIVATION_DISCOVERY_RULES}\n\n${CUSTOMER_ROLE_BOUNDARY_RULES}\n\n${REACTIVE_ONLY_CUSTOMER_RULES}`;
 }
 
 // The per-turn state reminder appended after the transcript. The full history is
