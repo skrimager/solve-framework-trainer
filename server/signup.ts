@@ -31,7 +31,7 @@ export function canResendSignupCode(
 
 // Validate the office-setup inputs the verified buyer submits before payment
 // (step 3/4). Returns a typed error message string on failure, or null when the
-// inputs are valid. Seat count must map to a real self-serve tier; 36+ is
+// inputs are valid. Seat count must map to a real self-serve tier; 22+ is
 // Enterprise and routed to a custom quote (never self-serve checkout).
 export function validateOfficeSetupInput(input: {
   company: string;
@@ -48,7 +48,7 @@ export function validateOfficeSetupInput(input: {
     return "Choose at least one consultant seat.";
   }
   if (isEnterpriseSeatCount(input.seatCount)) {
-    return "36 or more consultants is Enterprise. Contact us for a custom quote.";
+    return "22 or more consultants is Enterprise. Contact us for a custom quote.";
   }
   if (!planForSeatCount(input.seatCount)) {
     return "That seat count is not available for self-serve checkout.";

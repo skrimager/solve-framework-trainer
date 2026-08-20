@@ -112,7 +112,7 @@ export function toCsv<T extends Record<string, unknown>>(
 export function calculateSeatMRR(seatCount: number): number {
   if (seatCount <= 0) return 0;
   const plan = planForSeatCount(seatCount);
-  if (!plan) return 0; // Enterprise (36+): custom quote, tracked separately
+  if (!plan) return 0; // Enterprise (22+): custom quote, tracked separately
   return seatCount * plan.seatRate;
 }
 

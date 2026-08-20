@@ -9,6 +9,9 @@ import {
   dashboardPriceIdForTier,
   isSeatPriceId,
   isDashboardPriceId,
+  STRIPE_EVALUATION_BASE_PRICE_ID,
+  STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID,
+  assertStripePriceId,
 } from "./stripe";
 import { generateUniqueInviteCode } from "./invite";
 import { sendPaidWelcomeEmail, sendPaidCheckoutAdminNotification } from "./notifications";
@@ -22,22 +25,29 @@ export {
   ENTERPRISE_MIN_SEATS,
   isEnterpriseSeatCount,
   planForSeatCount,
+  EVALUATION_PRICING,
+  quoteEvaluation,
+  meetsConversionSeatFloor,
 } from "@shared/pricing";
 export type { SelfServeTier, PlanTier } from "@shared/pricing";
 
 import {
   PLAN_TIERS,
+  ENTERPRISE_MIN_SEATS,
   isEnterpriseSeatCount,
   planForSeatCount,
+  EVALUATION_PRICING,
+  quoteEvaluation,
+  meetsConversionSeatFloor,
 } from "@shared/pricing";
 import type { SelfServeTier } from "@shared/pricing";
 
-// Thrown when a self-serve billing action would push an office to 36+ seats.
+// Thrown when a self-serve billing action would push an office to the 22+ Enterprise tier.
 // Callers should route the office to the custom-quote/contact flow instead.
 export class EnterpriseQuoteRequiredError extends Error {
   constructor(seatCount: number) {
     super(
-      `Enterprise pricing required: ${seatCount} seats is 36+, which is a custom ` +
+      `Enterprise pricing required: ${seatCount} seats is ${ENTERPRISE_MIN_SEATS}+, which is a custom ` +
         `quote. Contact sales instead of self-serve checkout.`,
     );
     this.name = "EnterpriseQuoteRequiredError";
@@ -128,7 +138,7 @@ export interface SelfServeCheckoutInput {
 export async function createSelfServeCheckoutSession(
   input: SelfServeCheckoutInput,
 ): Promise<string> {
-  const { officeName, seatCount, includeDashboard, email, setupToken, contactId, signupId } = input;
+  const { officeName, seatCount, email, setupToken, contactId, signupId } = input;
   if (isEnterpriseSeatCount(seatCount)) {
     throw new EnterpriseQuoteRequiredError(seatCount);
   }
@@ -139,11 +149,8 @@ export async function createSelfServeCheckoutSession(
   const stripe = getStripe();
 
   const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
-    { price: seatPriceIdForTier(plan.tier), quantity: seatCount },
+    { price: assertStripePriceId(seatPriceIdForTier(plan.tier), `seat price for ${plan.tier}`), quantity: seatCount },
   ];
-  if (includeDashboard) {
-    lineItems.push({ price: dashboardPriceIdForTier(plan.tier), quantity: 1 });
-  }
 
   // Metadata the webhook reads to provision the office. selfServe flags THIS flow
   // so the webhook does not confuse it with an existing-office manager checkout.
@@ -151,7 +158,9 @@ export async function createSelfServeCheckoutSession(
     selfServe: "true",
     officeName,
     seatCount: String(seatCount),
-    dashboard: includeDashboard ? "true" : "false",
+    dashboard: "false", // Command Center is included, not a billable add-on.
+    pricingTier: plan.tier,
+    kind: "self_serve_subscription",
   };
   if (email) provisioning.email = email;
   if (setupToken) provisioning.setupToken = setupToken;
@@ -192,7 +201,7 @@ export async function createBillingPortalSession(office: Office): Promise<string
 //
 // Flat-per-tier: the seat count determines the tier, and the seat line's PRICE is
 // set to that tier's flat rate — so crossing a boundary re-prices EVERY seat, not
-// just the marginal one. Reaching 36+ seats is Enterprise (custom quote) and is
+// just the marginal one. Reaching 22+ seats is Enterprise (custom quote) and is
 // rejected here so the caller can route to the contact/quote flow.
 export async function setSeatQuantity(office: Office, quantity: number): Promise<string> {
   if (!office.stripeSubscriptionId) {
@@ -288,12 +297,244 @@ export async function syncOfficeFromSubscription(
     if (isDashboardPriceId(priceId)) {
       patch.managerItemId = item.id;
     } else if (isSeatPriceId(priceId)) {
+      const quantity = item.quantity ?? 0;
+      const plan = planForSeatCount(quantity);
       patch.seatItemId = item.id;
-      patch.activeSeatCount = item.quantity ?? 0;
+      patch.activeSeatCount = quantity;
+      patch.pricingTier = plan?.tier ?? null;
+      patch.seatRateCents = plan?.seatRateCents ?? null;
+      patch.billingInterval = plan?.billingInterval ?? null;
     }
+  }
+  if (officeIsActive({ subscriptionStatus: subscription.status })) {
+    patch.commandCenterEntitled = true;
   }
 
   await storage.updateOffice(office.id, patch);
+}
+
+
+// An evaluation participant has time-boxed access separate from a recurring seat.
+// The office pointer prevents a stale participant record from granting access to a
+// later evaluation for the same office.
+export function evaluationHasAccess(
+  office: Pick<Office, "evaluationStatus" | "currentEvaluationPurchaseId">,
+  user: { evaluationPurchaseId: number | null; evaluationAccessExpiresAt: string | null },
+  now = Date.now(),
+): boolean {
+  return office.evaluationStatus === "active" &&
+    office.currentEvaluationPurchaseId === user.evaluationPurchaseId &&
+    user.evaluationAccessExpiresAt !== null &&
+    new Date(user.evaluationAccessExpiresAt).getTime() > now;
+}
+
+export interface EvaluationCheckoutInput {
+  officeName: string;
+  participantCount: number;
+  email: string;
+  signupId: number;
+}
+
+export async function createEvaluationCheckoutSession(input: EvaluationCheckoutInput): Promise<string> {
+  const quote = quoteEvaluation(input.participantCount);
+  const stripe = getStripe();
+  const customer = await stripe.customers.create({
+    name: input.officeName,
+    email: input.email,
+    metadata: { signupId: String(input.signupId), kind: "team_evaluation" },
+  });
+  const baseLine: Stripe.Checkout.SessionCreateParams.LineItem = quote.tier === "small"
+    ? {
+      price_data: {
+        currency: EVALUATION_PRICING.currency,
+        product_data: { name: EVALUATION_PRICING.productName },
+        unit_amount: quote.totalAmountCents,
+      },
+      quantity: 1,
+    }
+    : { price: assertStripePriceId(STRIPE_EVALUATION_BASE_PRICE_ID, "STRIPE_EVALUATION_BASE_PRICE_ID"), quantity: 1 };
+  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [baseLine];
+  if (quote.additionalParticipantCount > 0) {
+    lineItems.push({
+      price: assertStripePriceId(
+        STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID,
+        "STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID",
+      ),
+      quantity: quote.additionalParticipantCount,
+    });
+  }
+  const session = await stripe.checkout.sessions.create({
+    mode: "payment",
+    customer: customer.id,
+    line_items: lineItems,
+    metadata: {
+      kind: "team_evaluation",
+      officeName: input.officeName,
+      participantCount: String(quote.participantCount),
+      signupId: String(input.signupId),
+      expectedTotalAmountCents: String(quote.totalAmountCents),
+    },
+    success_url: `${APP_URL}/#/pricing?evaluation=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_URL}/#/pricing?evaluation=cancelled`,
+  });
+  if (!session.url) throw new Error("Stripe did not return a Checkout URL");
+  return session.url;
+}
+
+export async function createEvaluationConversionCheckoutSession(
+  evaluationPurchaseId: number,
+  paidSeatCount: number,
+): Promise<string> {
+  const purchase = await storage.getEvaluationPurchase(evaluationPurchaseId);
+  if (!purchase || purchase.conversionStatus !== "not_converted") {
+    throw new Error("This evaluation is not available for conversion.");
+  }
+  if (new Date(purchase.evaluationEndsAt).getTime() <= Date.now()) {
+    throw new Error("This evaluation has ended and is no longer available for conversion.");
+  }
+  if (!meetsConversionSeatFloor(paidSeatCount, purchase.participantCount)) {
+    throw new Error("Select a paid plan that retains your evaluated participants and supports the evaluation credit.");
+  }
+  if (isEnterpriseSeatCount(paidSeatCount)) throw new EnterpriseQuoteRequiredError(paidSeatCount);
+  const plan = planForSeatCount(paidSeatCount);
+  if (!plan) throw new Error("Invalid seat count for conversion.");
+  const office = await storage.getOffice(purchase.officeId);
+  if (!office?.stripeCustomerId) throw new Error("Evaluation office has no Stripe customer.");
+  const stripe = getStripe();
+  const coupon = await stripe.coupons.create({
+    amount_off: purchase.totalAmountCents,
+    currency: EVALUATION_PRICING.currency,
+    duration: "once",
+    name: "14-Day Team Evaluation credit",
+  });
+  const metadata = {
+    kind: "evaluation_conversion_subscription",
+    officeId: String(office.id),
+    seatCount: String(paidSeatCount),
+    pricingTier: plan.tier,
+    conversionEvaluationPurchaseId: String(purchase.id),
+  };
+  const session = await stripe.checkout.sessions.create({
+    mode: "subscription",
+    customer: office.stripeCustomerId,
+    line_items: [{ price: assertStripePriceId(seatPriceIdForTier(plan.tier), `seat price for ${plan.tier}`), quantity: paidSeatCount }],
+    discounts: [{ coupon: coupon.id }],
+    metadata,
+    subscription_data: { metadata },
+    success_url: `${APP_URL}/#/command-center?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_URL}/#/command-center?checkout=cancelled`,
+  });
+  if (!session.url) throw new Error("Stripe did not return a Checkout URL");
+  return session.url;
+}
+
+async function provisionEvaluationPayment(session: Stripe.Checkout.Session): Promise<void> {
+  if (session.mode !== "payment" || session.payment_status !== "paid" || session.metadata?.kind !== "team_evaluation") {
+    throw new Error("Invalid evaluation Checkout Session.");
+  }
+  const participantCount = Number(session.metadata.participantCount);
+  const quote = quoteEvaluation(participantCount);
+  if (session.amount_total !== quote.totalAmountCents || session.currency !== EVALUATION_PRICING.currency) {
+    throw new Error("Evaluation payment total does not match the server quote.");
+  }
+  if (await storage.getEvaluationPurchaseByCheckoutSessionId(session.id)) return;
+  const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+  if (!customerId) throw new Error("Evaluation Checkout Session is missing its customer.");
+  const signupId = Number(session.metadata.signupId);
+  const signup = Number.isInteger(signupId) ? await storage.getOfficeSignup(signupId) : undefined;
+  const now = new Date();
+  const started = now.toISOString();
+  const ends = new Date(now.getTime() + EVALUATION_PRICING.durationDays * 24 * 60 * 60 * 1000).toISOString();
+  const office = await storage.createOffice({
+    name: await uniqueOfficeName((session.metadata.officeName ?? signup?.company ?? "New Office").trim() || "New Office"),
+    inviteCode: await generateUniqueInviteCode(),
+    createdAt: started,
+    status: "active",
+    stripeCustomerId: customerId,
+    subscriptionStatus: "incomplete",
+    commandCenterEntitled: true,
+    evaluationStatus: "active",
+  });
+  const additional = quote.additionalParticipantCount * EVALUATION_PRICING.additionalParticipantAmountCents;
+  const purchase = await storage.createEvaluationPurchase({
+    officeId: office.id,
+    stripeCustomerId: customerId,
+    stripeCheckoutSessionId: session.id,
+    stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null,
+    baseAmountCents: quote.totalAmountCents - additional,
+    additionalParticipantAmountCents: additional,
+    totalAmountCents: quote.totalAmountCents,
+    participantCount,
+    evaluationStartedAt: started,
+    evaluationEndsAt: ends,
+    conversionStatus: "not_converted",
+    createdAt: started,
+    updatedAt: started,
+  });
+  await storage.createEvaluationCreditLedger({
+    evaluationPurchaseId: purchase.id,
+    officeId: office.id,
+    currency: EVALUATION_PRICING.currency,
+    creditAmountAvailableCents: purchase.totalAmountCents,
+    redeemed: false,
+    createdAt: started,
+    updatedAt: started,
+  });
+  await storage.updateOffice(office.id, { currentEvaluationPurchaseId: purchase.id });
+  if (signup?.username && signup.password && !(await storage.getUserByUsername(signup.username))) {
+    const username = await uniqueUsername(signup.username);
+    await storage.createUser({
+      officeId: office.id,
+      username,
+      password: await hashUserPassword(signup.password),
+      role: "manager",
+      displayName: (signup.managerName ?? "").trim() || username,
+      currentLevel: "beginner",
+      seatActive: false,
+      evaluationPurchaseId: purchase.id,
+      evaluationAccessExpiresAt: ends,
+    });
+    await storage.updateOfficeSignup(signup.id, { password: null, code: null, codeExpiresAt: null });
+  }
+}
+
+export async function expireEvaluations(now = new Date()): Promise<number> {
+  const expired = await storage.listExpiredUnconvertedEvaluations(now.toISOString());
+  for (const purchase of expired) {
+    await storage.markEvaluationExpired(purchase.id, now.toISOString());
+    await storage.updateOffice(purchase.officeId, {
+      evaluationStatus: "expired_unconverted",
+      commandCenterEntitled: false,
+    });
+  }
+  return expired.length;
+}
+
+// How often the scheduled sweep checks for evaluations that just crossed their
+// 14-day evaluationEndsAt without converting. Hourly keeps the gap between
+// "expired" and "access actually revoked" small without adding meaningful
+// load; there is no billing action here, so unlike the outreach drip there is
+// no external send-rate ceiling to respect.
+export const EVALUATION_EXPIRY_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+let evaluationExpirySchedulerHandle: ReturnType<typeof setInterval> | null = null;
+
+// Start the background sweep that calls expireEvaluations() on a timer.
+// Guarded so repeated calls (or a hot reload) never stack multiple intervals.
+// Never booted in the test harness, which calls expireEvaluations() directly.
+// This is what actually enforces "no automatic subscription after 14 days":
+// the sweep only revokes commandCenterEntitled and flips conversionStatus to
+// expired_unconverted — it never touches Stripe, never creates a charge, and
+// never creates a subscription.
+export function startEvaluationExpiryScheduler(): void {
+  if (evaluationExpirySchedulerHandle) return;
+  const tick = () => {
+    expireEvaluations().catch((error) => {
+      console.error("[billing] evaluation expiry sweep tick failed:", error);
+    });
+  };
+  evaluationExpirySchedulerHandle = setInterval(tick, EVALUATION_EXPIRY_SWEEP_INTERVAL_MS);
+  if (typeof evaluationExpirySchedulerHandle.unref === "function") evaluationExpirySchedulerHandle.unref();
 }
 
 // Resolve the office a Stripe object belongs to, trying the fields most likely to
@@ -352,6 +593,7 @@ export async function provisionSelfServeOffice(
     stripeCustomerId: customerId,
     stripeSubscriptionId: subscription.id,
     subscriptionStatus: subscription.status,
+    commandCenterEntitled: true,
   });
 
   // Map seat/dashboard line items back onto the office (item ids + seat count).
@@ -455,10 +697,14 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
+      if (session.metadata?.kind === "team_evaluation") {
+        const confirmed = await stripe.checkout.sessions.retrieve(session.id, { expand: ["payment_intent"] });
+        await provisionEvaluationPayment(confirmed);
+        break;
+      }
       const subId =
         typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
-      // Every checkout we create is subscription-mode, so no subscription means
-      // there is nothing to provision or sync.
+      // Every subscription-mode checkout has a subscription to provision or sync.
       if (!subId) break;
       // Re-fetch the subscription as the source of truth (see the note on this
       // function) rather than trusting the event payload. Its metadata is the
@@ -475,6 +721,19 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         subscription.metadata?.selfServe === "true" || session.metadata?.selfServe === "true";
       if (isSelfServe) {
         await provisionSelfServeOffice(session, subscription);
+        break;
+      }
+      if (session.metadata?.kind === "evaluation_conversion_subscription") {
+        const office = await resolveOffice({
+          officeId: session.metadata.officeId,
+          customerId: typeof session.customer === "string" ? session.customer : session.customer?.id,
+          subscriptionId: subId,
+        });
+        if (office) await syncOfficeFromSubscription(office, subscription);
+        const purchaseId = Number(session.metadata.conversionEvaluationPurchaseId);
+        if (Number.isInteger(purchaseId)) {
+          await storage.attachEvaluationConversionSubscription(purchaseId, subId, new Date().toISOString());
+        }
         break;
       }
       // Existing-office manager checkout: locate the office and sync it. The
@@ -530,6 +789,16 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       if (office && subId) {
         const subscription = await stripe.subscriptions.retrieve(subId);
         await syncOfficeFromSubscription(office, subscription);
+      }
+      const conversionMetadata = (invoice as any).subscription_details?.metadata;
+      if (subId && conversionMetadata?.kind === "evaluation_conversion_subscription") {
+        const purchase = await storage.getEvaluationPurchaseByConvertedSubscriptionId(subId);
+        if (purchase) {
+          const now = new Date().toISOString();
+          await storage.markEvaluationCreditRedeemed(purchase.id, subId, invoice.id, now);
+          await storage.markEvaluationConverted(purchase.id, subId, now);
+          await storage.updateOffice(purchase.officeId, { evaluationStatus: "converted", commandCenterEntitled: true });
+        }
       }
       break;
     }

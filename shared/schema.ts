@@ -21,6 +21,14 @@ export const offices = pgTable("offices", {
   managerItemId: text("manager_item_id"), // subscription item id for the flat annual Manager Dashboard line
   seatItemId: text("seat_item_id"), // subscription item id for the tiered monthly Consultant Seat line (added lazily on first seat)
   activeSeatCount: integer("active_seat_count").notNull().default(0), // number of paid seats currently reflected in Stripe quantity
+  // Current locked product terms for the office. Existing subscriptions retain
+  // their historical item ids; every new self-serve seat plan includes Command Center.
+  commandCenterEntitled: boolean("command_center_entitled").notNull().default(false),
+  pricingTier: text("pricing_tier"), // team | office | company | enterprise | null
+  seatRateCents: integer("seat_rate_cents"),
+  billingInterval: text("billing_interval"), // month
+  evaluationStatus: text("evaluation_status").notNull().default("none"), // none | active | expired_unconverted | converted
+  currentEvaluationPurchaseId: integer("current_evaluation_purchase_id"),
   // Soft-archive timestamp (nullable ISO string), mirroring contacts.archivedAt.
   // Null = active; a value = archived (hidden from the default Sales list but
   // reversible via unarchive). Never touches Stripe or dependent rows.
@@ -42,6 +50,49 @@ export const insertOfficeSchema = createInsertSchema(offices).omit({
 
 export type InsertOffice = z.infer<typeof insertOfficeSchema>;
 export type Office = typeof offices.$inferSelect;
+
+// One confirmed one-time evaluation checkout. The unique Checkout Session ID is
+// the business-level idempotency key for Stripe webhook retries.
+export const evaluationPurchases = pgTable("evaluation_purchases", {
+  id: serial("id").primaryKey(),
+  officeId: integer("office_id").notNull().references(() => offices.id),
+  stripeCustomerId: text("stripe_customer_id").notNull(),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id").notNull().unique(),
+  stripePaymentIntentId: text("stripe_payment_intent_id").unique(),
+  baseAmountCents: integer("base_amount_cents").notNull(),
+  additionalParticipantAmountCents: integer("additional_participant_amount_cents").notNull(),
+  totalAmountCents: integer("total_amount_cents").notNull(),
+  participantCount: integer("participant_count").notNull(),
+  evaluationStartedAt: text("evaluation_started_at").notNull(),
+  evaluationEndsAt: text("evaluation_ends_at").notNull(),
+  conversionStatus: text("conversion_status").notNull().default("not_converted"),
+  convertedAt: text("converted_at"),
+  convertedStripeSubscriptionId: text("converted_stripe_subscription_id").unique(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+export const insertEvaluationPurchaseSchema = createInsertSchema(evaluationPurchases).omit({ id: true });
+export type InsertEvaluationPurchase = z.infer<typeof insertEvaluationPurchaseSchema>;
+export type EvaluationPurchase = typeof evaluationPurchases.$inferSelect;
+
+// Commercial conversion credit ledger. This is intentionally separate from
+// academy_credits, which records user achievement credits.
+export const evaluationCreditLedger = pgTable("evaluation_credit_ledger", {
+  id: serial("id").primaryKey(),
+  evaluationPurchaseId: integer("evaluation_purchase_id").notNull().references(() => evaluationPurchases.id).unique(),
+  officeId: integer("office_id").notNull().references(() => offices.id),
+  currency: text("currency").notNull().default("usd"),
+  creditAmountAvailableCents: integer("credit_amount_available_cents").notNull(),
+  redeemed: boolean("redeemed").notNull().default(false),
+  redeemedAt: text("redeemed_at"),
+  redeemedStripeSubscriptionId: text("redeemed_stripe_subscription_id").unique(),
+  redeemedStripeInvoiceId: text("redeemed_stripe_invoice_id").unique(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+export const insertEvaluationCreditLedgerSchema = createInsertSchema(evaluationCreditLedger).omit({ id: true });
+export type InsertEvaluationCreditLedger = z.infer<typeof insertEvaluationCreditLedgerSchema>;
+export type EvaluationCreditLedger = typeof evaluationCreditLedger.$inferSelect;
 
 // Roles: manager (sees all reps' sessions + analytics), consultant (does role-plays),
 // qa (reviews transcripts/scores for quality assurance)
@@ -77,6 +128,9 @@ export const users = pgTable("users", {
   // earning behind the "seat active for at least 60 days" ToS rule (see
   // server/credits.ts). Null for users who never held a paid seat.
   seatActivatedAt: text("seat_activated_at"),
+  // Evaluation access never turns on a recurring paid seat.
+  evaluationPurchaseId: integer("evaluation_purchase_id").references(() => evaluationPurchases.id),
+  evaluationAccessExpiresAt: text("evaluation_access_expires_at"),
   // QA/demo accounts are permanently free: they never consume a paid seat nor count
   // toward activeSeatCount, and are exempt from the seat access gate.
   isDemoAccount: boolean("is_demo_account").notNull().default(false),
@@ -103,6 +157,8 @@ export const insertUserSchema = createInsertSchema(users).pick({
   leadershipLevel: true,
   seatActive: true,
   seatActivatedAt: true,
+  evaluationPurchaseId: true,
+  evaluationAccessExpiresAt: true,
   isDemoAccount: true,
   consultingCertified: true,
   consultingCertifiedAt: true,

@@ -281,6 +281,13 @@
       "when": 1783867142000,
       "tag": "0039_alert_acknowledgements",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1787068320000,
+      "tag": "0040_evaluation_pricing",
+      "breakpoints": true
     }
   ]
 }
