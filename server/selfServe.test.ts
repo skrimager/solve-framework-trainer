@@ -36,31 +36,31 @@ describe("shared/pricing tiers", () => {
   test("seat counts map to the right tier and rate", () => {
     assert.equal(planForSeatCount(1)?.tier, "team");
     assert.equal(planForSeatCount(5)?.tier, "team");
-    assert.equal(planForSeatCount(5)?.seatRate, 49);
+    assert.equal(planForSeatCount(5)?.seatRate, 129);
     assert.equal(planForSeatCount(6)?.tier, "office");
-    assert.equal(planForSeatCount(20)?.tier, "office");
-    assert.equal(planForSeatCount(20)?.seatRate, 45);
+    assert.equal(planForSeatCount(15)?.tier, "office");
+    assert.equal(planForSeatCount(15)?.seatRate, 115);
+    assert.equal(planForSeatCount(16)?.tier, "company");
     assert.equal(planForSeatCount(21)?.tier, "company");
-    assert.equal(planForSeatCount(35)?.tier, "company");
-    assert.equal(planForSeatCount(35)?.seatRate, 41);
+    assert.equal(planForSeatCount(21)?.seatRate, 99);
   });
 
-  test("dashboard rates match the tier sell lines", () => {
-    assert.equal(planForSeatCount(3)?.dashboardRate, 249);
-    assert.equal(planForSeatCount(10)?.dashboardRate, 389);
-    assert.equal(planForSeatCount(30)?.dashboardRate, 529);
+  test("Command Center is included at every tier", () => {
+    assert.equal(planForSeatCount(3)?.dashboardRate, 0);
+    assert.equal(planForSeatCount(10)?.dashboardRate, 0);
+    assert.equal(planForSeatCount(21)?.dashboardRate, 0);
   });
 
-  test("36+ seats is Enterprise (no self-serve plan)", () => {
-    assert.equal(isEnterpriseSeatCount(35), false);
-    assert.equal(isEnterpriseSeatCount(36), true);
-    assert.equal(planForSeatCount(36), null);
+  test("22+ seats is Enterprise (no self-serve plan)", () => {
+    assert.equal(isEnterpriseSeatCount(21), false);
+    assert.equal(isEnterpriseSeatCount(22), true);
+    assert.equal(planForSeatCount(22), null);
     assert.equal(planForSeatCount(100), null);
   });
 
-  test("PLAN_TIERS is contiguous from 1 to 35", () => {
+  test("PLAN_TIERS is contiguous from 1 to 21", () => {
     assert.equal(PLAN_TIERS[0].minSeats, 1);
-    assert.equal(PLAN_TIERS[PLAN_TIERS.length - 1].maxSeats, 35);
+    assert.equal(PLAN_TIERS[PLAN_TIERS.length - 1].maxSeats, 21);
   });
 });
 
@@ -99,7 +99,7 @@ describe("createSelfServeCheckoutSession", () => {
     assert.deepEqual(params.subscription_data.metadata, params.metadata);
   });
 
-  test("Office-tier with dashboard: seat line at Office price + one dashboard line", async () => {
+  test("Office-tier includes Command Center without a separate line", async () => {
     await createSelfServeCheckoutSession({
       officeName: "Bigco",
       seatCount: 10,
@@ -107,29 +107,27 @@ describe("createSelfServeCheckoutSession", () => {
       email: "buyer@example.com",
     });
     const params = created[0];
-    assert.equal(params.line_items.length, 2);
-    assert.deepEqual(params.line_items[0], { price: SEAT_OFFICE, quantity: 10 });
-    assert.equal(params.line_items[1].quantity, 1);
-    assert.equal(params.metadata.dashboard, "true");
+    assert.deepEqual(params.line_items, [{ price: SEAT_OFFICE, quantity: 10 }]);
+    assert.equal(params.metadata.dashboard, "false");
     assert.equal(params.metadata.email, "buyer@example.com");
     assert.equal(params.customer_email, "buyer@example.com");
   });
 
-  test("Company-tier seat price for 21+ seats", async () => {
+  test("Company-tier seat price for 16 through 21 seats", async () => {
     await createSelfServeCheckoutSession({
-      officeName: "Enterpriseish",
-      seatCount: 25,
+      officeName: "CompanyCo",
+      seatCount: 21,
       includeDashboard: false,
     });
-    assert.deepEqual(created[0].line_items[0], { price: SEAT_COMPANY, quantity: 25 });
+    assert.deepEqual(created[0].line_items[0], { price: SEAT_COMPANY, quantity: 21 });
   });
 
-  test("36+ seats is rejected (Enterprise custom quote) with no Stripe call", async () => {
+  test("22+ seats is rejected (Enterprise custom quote) with no Stripe call", async () => {
     await assert.rejects(
       () =>
         createSelfServeCheckoutSession({
           officeName: "Huge",
-          seatCount: 36,
+          seatCount: 22,
           includeDashboard: false,
         }),
       EnterpriseQuoteRequiredError,

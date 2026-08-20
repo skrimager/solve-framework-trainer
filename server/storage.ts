@@ -1,5 +1,5 @@
-import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, alertAcknowledgements, industryCertifications, academyCredits, coinAwards, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions } from '@shared/schema';
-import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, AlertAcknowledgement, InsertAlertAcknowledgement, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, CoinAward, InsertCoinAward, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression } from '@shared/schema';
+import { users, scenarios, sessions, offices, billingEvents, adminUsers, contacts, contactEvents, visitorPageViews, certificationAttempts, demoSignups, demoSessions, demoPaidSessions, messageCoachSignups, messageCoachScores, messageCoachPaidPurchases, prospectSearches, prospectCompanies, prospectContacts, prospectOutreach, prospectActivity, leadDripEmails, coachingMessages, alertAcknowledgements, industryCertifications, academyCredits, coinAwards, realConversations, officeSetupTokens, paidOfficeSignups, officeSignups, scoreCache, demoDripEmails, monthlyLifecycleEmails, emailSuppressions, evaluationPurchases, evaluationCreditLedger } from '@shared/schema';
+import type { User, InsertUser, Scenario, InsertScenario, Session, InsertSession, Office, InsertOffice, BillingEvent, InsertBillingEvent, AdminUser, InsertAdminUser, Contact, InsertContact, ContactEvent, InsertContactEvent, Lead, InsertLead, VisitorPageView, InsertVisitorPageView, CertificationAttempt, InsertCertificationAttempt, DemoSignup, InsertDemoSignup, DemoSession, InsertDemoSession, DemoPaidSession, InsertDemoPaidSession, MessageCoachSignup, InsertMessageCoachSignup, MessageCoachScore, InsertMessageCoachScore, MessageCoachPaidPurchase, InsertMessageCoachPaidPurchase, ProspectSearch, InsertProspectSearch, ProspectCompany, InsertProspectCompany, ProspectContact, InsertProspectContact, ProspectOutreach, InsertProspectOutreach, ProspectActivity, InsertProspectActivity, LeadDripEmail, InsertLeadDripEmail, CoachingMessage, InsertCoachingMessage, AlertAcknowledgement, InsertAlertAcknowledgement, IndustryCertification, InsertIndustryCertification, AcademyCredit, InsertAcademyCredit, CoinAward, InsertCoinAward, RealConversation, InsertRealConversation, OfficeSetupToken, InsertOfficeSetupToken, PaidOfficeSignup, InsertPaidOfficeSignup, OfficeSignup, InsertOfficeSignup, ScoreCache, InsertScoreCache, DemoDripEmail, InsertDemoDripEmail, MonthlyLifecycleEmail, InsertMonthlyLifecycleEmail, EmailSuppression, InsertEmailSuppression, EvaluationPurchase, InsertEvaluationPurchase, EvaluationCreditLedger, InsertEvaluationCreditLedger } from '@shared/schema';
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, inArray, and, or, desc, lte, isNull, sql } from "drizzle-orm";
@@ -104,6 +104,19 @@ export interface IStorage {
   // their own training seat), excluding demo/QA accounts. This is the source of truth
   // for the Stripe seat quantity.
   countPaidSeats(officeId: number): Promise<number>;
+  // Evaluation participants do not consume recurring paid seats. This count is
+  // the participant-cap backstop used before adding a consultant to an evaluation.
+  countEvaluationParticipants(evaluationPurchaseId: number): Promise<number>;
+  createEvaluationPurchase(purchase: InsertEvaluationPurchase): Promise<EvaluationPurchase>;
+  getEvaluationPurchase(id: number): Promise<EvaluationPurchase | undefined>;
+  getEvaluationPurchaseByCheckoutSessionId(sessionId: string): Promise<EvaluationPurchase | undefined>;
+  getEvaluationPurchaseByConvertedSubscriptionId(subscriptionId: string): Promise<EvaluationPurchase | undefined>;
+  listExpiredUnconvertedEvaluations(nowIso: string): Promise<EvaluationPurchase[]>;
+  markEvaluationExpired(id: number, nowIso: string): Promise<void>;
+  attachEvaluationConversionSubscription(id: number, subscriptionId: string, nowIso: string): Promise<void>;
+  markEvaluationConverted(id: number, subscriptionId: string, nowIso: string): Promise<void>;
+  createEvaluationCreditLedger(credit: InsertEvaluationCreditLedger): Promise<EvaluationCreditLedger>;
+  markEvaluationCreditRedeemed(evaluationPurchaseId: number, subscriptionId: string, invoiceId: string, nowIso: string): Promise<void>;
 
   getBillingEventByStripeId(stripeEventId: string): Promise<BillingEvent | undefined>;
   recordBillingEvent(event: InsertBillingEvent): Promise<BillingEvent>;
@@ -473,6 +486,80 @@ export class DatabaseStorage implements IStorage {
       .from(users)
       .where(and(eq(users.officeId, officeId), eq(users.seatActive, true), eq(users.isDemoAccount, false)));
     return rows.length;
+  }
+
+  async countEvaluationParticipants(evaluationPurchaseId: number): Promise<number> {
+    const rows = await db.select({ id: users.id }).from(users)
+      .where(eq(users.evaluationPurchaseId, evaluationPurchaseId));
+    return rows.length;
+  }
+
+  async createEvaluationPurchase(purchase: InsertEvaluationPurchase): Promise<EvaluationPurchase> {
+    const rows = await db.insert(evaluationPurchases).values(purchase).onConflictDoNothing().returning();
+    if (rows[0]) return rows[0];
+    const existing = await this.getEvaluationPurchaseByCheckoutSessionId(purchase.stripeCheckoutSessionId);
+    if (existing) return existing;
+    throw new Error("Failed to create or retrieve evaluation purchase");
+  }
+
+  async getEvaluationPurchase(id: number): Promise<EvaluationPurchase | undefined> {
+    const rows = await db.select().from(evaluationPurchases).where(eq(evaluationPurchases.id, id));
+    return rows[0];
+  }
+
+  async getEvaluationPurchaseByCheckoutSessionId(sessionId: string): Promise<EvaluationPurchase | undefined> {
+    const rows = await db.select().from(evaluationPurchases)
+      .where(eq(evaluationPurchases.stripeCheckoutSessionId, sessionId));
+    return rows[0];
+  }
+
+  async getEvaluationPurchaseByConvertedSubscriptionId(subscriptionId: string): Promise<EvaluationPurchase | undefined> {
+    const rows = await db.select().from(evaluationPurchases)
+      .where(eq(evaluationPurchases.convertedStripeSubscriptionId, subscriptionId));
+    return rows[0];
+  }
+
+  async listExpiredUnconvertedEvaluations(nowIso: string): Promise<EvaluationPurchase[]> {
+    return db.select().from(evaluationPurchases).where(and(
+      lte(evaluationPurchases.evaluationEndsAt, nowIso),
+      eq(evaluationPurchases.conversionStatus, "not_converted"),
+    ));
+  }
+
+  async markEvaluationExpired(id: number, nowIso: string): Promise<void> {
+    await db.update(evaluationPurchases).set({ conversionStatus: "expired_unconverted", updatedAt: nowIso })
+      .where(eq(evaluationPurchases.id, id));
+  }
+
+  async attachEvaluationConversionSubscription(id: number, subscriptionId: string, nowIso: string): Promise<void> {
+    await db.update(evaluationPurchases).set({ convertedStripeSubscriptionId: subscriptionId, updatedAt: nowIso })
+      .where(eq(evaluationPurchases.id, id));
+  }
+
+  async markEvaluationConverted(id: number, subscriptionId: string, nowIso: string): Promise<void> {
+    await db.update(evaluationPurchases).set({
+      conversionStatus: "converted", convertedAt: nowIso,
+      convertedStripeSubscriptionId: subscriptionId, updatedAt: nowIso,
+    }).where(eq(evaluationPurchases.id, id));
+  }
+
+  async createEvaluationCreditLedger(credit: InsertEvaluationCreditLedger): Promise<EvaluationCreditLedger> {
+    const rows = await db.insert(evaluationCreditLedger).values(credit).onConflictDoNothing().returning();
+    if (rows[0]) return rows[0];
+    const existing = await db.select().from(evaluationCreditLedger)
+      .where(eq(evaluationCreditLedger.evaluationPurchaseId, credit.evaluationPurchaseId));
+    if (existing[0]) return existing[0];
+    throw new Error("Failed to create or retrieve evaluation credit");
+  }
+
+  async markEvaluationCreditRedeemed(evaluationPurchaseId: number, subscriptionId: string, invoiceId: string, nowIso: string): Promise<void> {
+    await db.update(evaluationCreditLedger).set({
+      redeemed: true, redeemedAt: nowIso, redeemedStripeSubscriptionId: subscriptionId,
+      redeemedStripeInvoiceId: invoiceId, updatedAt: nowIso,
+    }).where(and(
+      eq(evaluationCreditLedger.evaluationPurchaseId, evaluationPurchaseId),
+      eq(evaluationCreditLedger.redeemed, false),
+    ));
   }
 
   async getBillingEventByStripeId(stripeEventId: string): Promise<BillingEvent | undefined> {

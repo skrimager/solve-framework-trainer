@@ -141,6 +141,10 @@ import {
   setSeatQuantity,
   handleStripeEvent,
   addDashboard,
+  createEvaluationCheckoutSession,
+  createEvaluationConversionCheckoutSession,
+  evaluationHasAccess,
+  startEvaluationExpiryScheduler,
 } from "./billing";
 import { handleDemoPaymentEvent } from "./demoPayments";
 import { handleMessageCoachPaymentEvent } from "./messageCoach";
@@ -442,6 +446,14 @@ export type RegisterRoutesOptions = {
   practiceSessionScorer?: typeof scoreTranscript;
 };
 
+function hasCommandCenterAccess(office: { commandCenterEntitled?: boolean; managerItemId?: string | null; subscriptionStatus?: string; evaluationStatus?: string; currentEvaluationPurchaseId?: number | null } | undefined, user: User): boolean {
+  if (!office) return false;
+  // Existing paid dashboard items remain entitled for their original subscriptions.
+  if (office.managerItemId) return true;
+  return Boolean(office.commandCenterEntitled) &&
+    (officeIsActive({ subscriptionStatus: office.subscriptionStatus ?? "incomplete" }) || evaluationHasAccess(office as any, user));
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
@@ -576,32 +588,22 @@ export async function registerRoutes(
     }
   });
 
-  // Add the optional Manager Dashboard to an already-active office (the friendly
-  // in-dashboard upsell). Adds the dashboard line to the existing Stripe
-  // subscription at the office's current tier; access follows the persisted
-  // managerItemId. Idempotent via addDashboard (no-op if already present).
+  // Compatibility endpoint for older dashboard clients. Command Center is now
+  // included with every active tier, so this confirms the entitlement without
+  // creating another Stripe subscription item or charging an add-on.
   app.post("/api/billing/add-dashboard", async (req, res) => {
-    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
     const { userId } = req.body ?? {};
     const user = await storage.getUser(Number(userId));
     if (!user || user.role !== "manager") {
-      return res.status(403).json({ message: "Only a manager can add the dashboard" });
+      return res.status(403).json({ message: "Only a manager can manage Command Center access" });
     }
     const office = await storage.getOffice(user.officeId);
     if (!office) return res.status(404).json({ message: "Office not found" });
     if (!officeIsActive(office)) {
       return res.status(402).json({ message: "Your office subscription is not active" });
     }
-    if (office.managerItemId) {
-      return res.status(409).json({ message: "The Manager Dashboard is already active for your office." });
-    }
-    try {
-      await addDashboard(office);
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error("Add dashboard failed:", err);
-      res.status(500).json({ message: err.message ?? "Could not add the dashboard" });
-    }
+    await storage.updateOffice(office.id, { commandCenterEntitled: true });
+    res.json({ ok: true, included: true });
   });
 
   // --- Self-serve manager signup (email-first, verify, office setup, pay) ------
@@ -774,6 +776,55 @@ export async function registerRoutes(
     }
   });
 
+  // --- 14-Day Team Evaluation -----------------------------------------------
+  // This is a one-time payment, not a subscription. The verified signup row is
+  // the only source of buyer credentials, and billing.ts owns all price math.
+  app.post("/api/evaluation/checkout", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const parsed = z.object({
+      email: z.string().trim().email(),
+      company: z.string().trim().min(1).max(200),
+      participantCount: z.coerce.number().int().min(3).max(10),
+    }).safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid evaluation input" });
+    const email = normalizeEmail(parsed.data.email);
+    const signup = await storage.getOfficeSignupByEmail(email);
+    if (!signup?.verified) {
+      return res.status(403).json({ message: "Verify your email before starting a 14-Day Team Evaluation." });
+    }
+    try {
+      const url = await createEvaluationCheckoutSession({
+        officeName: parsed.data.company,
+        participantCount: parsed.data.participantCount,
+        email,
+        signupId: signup.id,
+      });
+      res.json({ url });
+    } catch (err: any) {
+      console.error("Evaluation checkout creation failed:", err);
+      res.status(400).json({ message: err.message ?? "Could not start evaluation checkout" });
+    }
+  });
+
+  app.post("/api/evaluation/convert", async (req, res) => {
+    if (!isStripeConfigured()) return res.status(503).json({ message: "Billing is not configured" });
+    const parsed = z.object({
+      evaluationPurchaseId: z.coerce.number().int().positive(),
+      paidSeatCount: z.coerce.number().int().min(1),
+    }).safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0]?.message ?? "Invalid conversion input" });
+    try {
+      const url = await createEvaluationConversionCheckoutSession(
+        parsed.data.evaluationPurchaseId,
+        parsed.data.paidSeatCount,
+      );
+      res.json({ url });
+    } catch (err: any) {
+      const status = err?.name === "EnterpriseQuoteRequiredError" ? 400 : 409;
+      res.status(status).json({ message: err.message ?? "Could not start evaluation conversion checkout" });
+    }
+  });
+
   // --- Self-serve office setup (welcome-email link -> checkout -> provisioning) ---
   // Validate a setup token and return prefill data for the office setup page.
   app.get("/api/office-setup/:token", async (req, res) => {
@@ -805,8 +856,8 @@ export async function registerRoutes(
     }
     const { token, officeName, seatCount, includeDashboard, email } = parsed.data;
 
-    if (seatCount >= 36) {
-      return res.status(400).json({ message: "36+ consultants is Enterprise. Contact us for a custom quote." });
+    if (seatCount >= 22) {
+      return res.status(400).json({ message: "22+ consultants is Enterprise. Contact us for a custom quote." });
     }
 
     // Resolve token (if any) for the originating lead + verified email.
@@ -1561,6 +1612,11 @@ export async function registerRoutes(
   // scheduler is allowlisted internally and never reaches Consultant Demo or
   // any other office.
   startDemoRosterRefreshScheduler(storage);
+  // Sweep for 14-Day Team Evaluations that crossed evaluationEndsAt without
+  // converting, and revoke their Command Center access. This never touches
+  // Stripe and never creates a subscription — it only flips conversionStatus
+  // to expired_unconverted and commandCenterEntitled to false.
+  startEvaluationExpiryScheduler();
 
   return httpServer;
 }
@@ -1661,12 +1717,25 @@ export function registerUserAuthRoutes(app: Express): void {
       return res.status(404).json({ message: "That invite code doesn't match any office. Double-check it with your manager." });
     }
 
-    // A consultant may join an office that is active OR a free-path office still
-    // pending admin activation (so the team can be assembled before go-live; they
-    // are gated from practice by office.status in checkSeatAccess). Any other
-    // inactive office (e.g. a lapsed paid subscription) still blocks joining.
-    if (!officeIsActive(office) && office.status !== "pending") {
-      return res.status(402).json({ message: "This office's subscription isn't active yet. Ask your manager to complete billing setup." });
+    // Evaluation participants are separate from recurring paid seats. A team can
+    // join only during its current 14-day window and never beyond its paid cap.
+    const evaluationPurchase = office.evaluationStatus === "active" && office.currentEvaluationPurchaseId
+      ? await storage.getEvaluationPurchase(office.currentEvaluationPurchaseId)
+      : undefined;
+    const evaluationIsActive = Boolean(
+      evaluationPurchase &&
+      evaluationPurchase.conversionStatus === "not_converted" &&
+      new Date(evaluationPurchase.evaluationEndsAt).getTime() > Date.now(),
+    );
+    // Existing free-path pending offices remain joinable exactly as before.
+    if (!officeIsActive(office) && office.status !== "pending" && !evaluationIsActive) {
+      return res.status(402).json({ message: "This office's subscription or evaluation is not active. Ask your manager to complete billing setup." });
+    }
+    if (evaluationPurchase) {
+      const participantCount = await storage.countEvaluationParticipants(evaluationPurchase.id);
+      if (participantCount >= evaluationPurchase.participantCount) {
+        return res.status(409).json({ message: "This evaluation has reached its participant limit." });
+      }
     }
 
     const existing = await storage.getUserByUsername(username);
@@ -1677,8 +1746,8 @@ export function registerUserAuthRoutes(app: Express): void {
     // Increment the Stripe seat quantity BEFORE creating the user, so a billing
     // failure never yields a free seat. Skipped only when Stripe isn't configured
     // (dev/demo), in which case the seat is granted locally.
-    let seatActive = true;
-    if (isStripeConfigured() && office.stripeSubscriptionId) {
+    let seatActive = !evaluationIsActive;
+    if (!evaluationIsActive && isStripeConfigured() && office.stripeSubscriptionId) {
       try {
         const targetQty = (await storage.countPaidSeats(office.id)) + 1;
         await setSeatQuantity(office, targetQty);
@@ -1700,6 +1769,8 @@ export function registerUserAuthRoutes(app: Express): void {
       // Stamp seat activation now so the 60-day credit-eligibility clock starts
       // the moment the consultant's paid seat goes live.
       seatActivatedAt: seatActive ? new Date().toISOString() : null,
+      evaluationPurchaseId: evaluationPurchase?.id ?? null,
+      evaluationAccessExpiresAt: evaluationPurchase?.evaluationEndsAt ?? null,
     });
 
     res.json({ user: publicUser(user) });
@@ -5449,8 +5520,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     // live sales-demo office is billing-active but never bought the add-on, and
     // must keep showing the full dashboard.
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
 
     const [officeUsers, officeSessions, allScenarios, officeCredits] = await Promise.all([
@@ -5488,8 +5559,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
 
     const [officeUsers, officeSessions, allScenarios, alertAcknowledgements] = await Promise.all([
@@ -5549,8 +5620,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
 
     const [officeUsers, officeSessions, allScenarios] = await Promise.all([
@@ -5571,8 +5642,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
     const requester = auth.user;
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
     const [officeUsers, officeSessions, allScenarios] = await Promise.all([
       storage.listUsersByOffice(requester.officeId),
@@ -5596,8 +5667,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
     const requester = auth.user;
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
     const band = typeof req.query.band === "string" ? req.query.band : "";
     const [officeUsers, officeSessions, allScenarios] = await Promise.all([
@@ -5623,8 +5694,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     if (!auth.ok) return res.status(auth.status).json({ message: auth.message });
     const requester = auth.user;
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
     const consultantId = Number(req.params.consultantId);
     if (!Number.isInteger(consultantId) || consultantId <= 0) {
@@ -5656,8 +5727,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
 
     const officeUsers = await storage.listUsersByOffice(requester.officeId);
@@ -5724,8 +5795,8 @@ export function registerManagerDashboardRoutes(app: Express): void {
     const requester = auth.user;
 
     const office = await storage.getOffice(requester.officeId);
-    if (!requester.isDemoAccount && !office?.managerItemId) {
-      return res.status(403).json({ message: "The Manager Dashboard add-on is not active for this office." });
+    if (!requester.isDemoAccount && !hasCommandCenterAccess(office, requester)) {
+      return res.status(403).json({ message: "Command Center access is not active for this office." });
     }
 
     const session = await storage.getSession(Number(req.params.id));
@@ -5793,7 +5864,7 @@ export function registerConsultantDashboardRoutes(app: Express): void {
     if (!user) return res.status(401).json({ message: "Unknown user" });
 
     const office = await storage.getOffice(user.officeId);
-    if (!user.isDemoAccount && !office?.managerItemId) {
+    if (!user.isDemoAccount && !hasCommandCenterAccess(office, user)) {
       return res.json({ entitled: false });
     }
 
@@ -5936,11 +6007,10 @@ async function checkSeatAccess(
   if (office.status === "pending") {
     return { ok: false, status: 403, message: "Your office activates as soon as payment is complete. Once it is, you can start practicing right away." };
   }
-  if (!officeIsActive(office)) {
-    return { ok: false, status: 402, message: "Your office subscription is inactive. Billing must be brought current to continue practicing." };
-  }
-  if (!user.seatActive) {
-    return { ok: false, status: 402, message: "You don't have an active training seat yet." };
+  const subscriptionAccess = officeIsActive(office) && user.seatActive;
+  const evaluationAccess = evaluationHasAccess(office, user);
+  if (!subscriptionAccess && !evaluationAccess) {
+    return { ok: false, status: 402, message: "Your office subscription or evaluation access is inactive." };
   }
   return { ok: true };
 }

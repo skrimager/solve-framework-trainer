@@ -3,24 +3,23 @@ import Stripe from "stripe";
 // Central Stripe configuration. All billing code imports the client and env
 // helpers from here so there is a single place that knows about keys/price IDs.
 //
-// Pricing v2 (flat-per-tier): consultant seats and the optional Manager Dashboard
-// each have ONE monthly Stripe Price per plan tier (Team / Office / Company).
-// Enterprise (36+ seats) is a custom quote with no self-serve Price object. The
-// app switches an office's seat item between these prices as its seat count moves
-// tiers (see billing.setSeatQuantity). Create the Price objects with
-// scripts/stripe-setup.ts and paste the printed ids into these env vars.
+// Locked pricing: consultant seats are Team (1-5, $129), Office (6-15, $115),
+// and Company (16-21, $99), all per person/month. Command Center is included
+// with every current tier. Enterprise begins at 22 seats and has no self-serve
+// Stripe Price. Legacy dashboard IDs remain only to classify historical items.
+// Evaluation pricing uses the configured 3-5 base and additional-participant
+// Price IDs; the internal 1-2 participant rate is authored server-side in Checkout.
 //
 // No secrets are committed. In every environment these come from process.env:
-//   STRIPE_SECRET_KEY                sk_test_... (or sk_live_... in prod)
-//   STRIPE_WEBHOOK_SECRET            whsec_...
-//   STRIPE_SEAT_TEAM_PRICE_ID        price_... ($49/seat/mo, Team 1-5)
-//   STRIPE_SEAT_OFFICE_PRICE_ID      price_... ($45/seat/mo, Office 6-20)
-//   STRIPE_SEAT_COMPANY_PRICE_ID     price_... ($41/seat/mo, Company 21-35)
-//   STRIPE_DASHBOARD_TEAM_PRICE_ID   price_... ($249/mo optional dashboard, Team)
-//   STRIPE_DASHBOARD_OFFICE_PRICE_ID price_... ($389/mo optional dashboard, Office)
-//   STRIPE_DASHBOARD_COMPANY_PRICE_ID price_... ($529/mo optional dashboard, Company)
-//   APP_URL                          base URL for Checkout/Portal redirects
-import type { SelfServeTier } from "./billing";
+//   STRIPE_SECRET_KEY                              Stripe secret key
+//   STRIPE_WEBHOOK_SECRET                          Checkout webhook secret
+//   STRIPE_SEAT_TEAM_PRICE_ID                      Team seat price
+//   STRIPE_SEAT_OFFICE_PRICE_ID                    Office seat price
+//   STRIPE_SEAT_COMPANY_PRICE_ID                   Company seat price
+//   STRIPE_EVALUATION_BASE_PRICE_ID                $249 3-5 participant price
+//   STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID  $50 participant price
+//   APP_URL                                        base URL for Checkout redirects
+import type { SelfServeTier } from "@shared/pricing";
 
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? "";
@@ -32,6 +31,8 @@ const SEAT_PRICE_ID_BY_TIER: Record<SelfServeTier, string> = {
   company: process.env.STRIPE_SEAT_COMPANY_PRICE_ID ?? "",
 };
 
+// Retained only for legacy subscriptions already carrying a dashboard item. New
+// checkout paths do not use these prices because Command Center is included.
 const DASHBOARD_PRICE_ID_BY_TIER: Record<SelfServeTier, string> = {
   team: process.env.STRIPE_DASHBOARD_TEAM_PRICE_ID ?? "",
   office: process.env.STRIPE_DASHBOARD_OFFICE_PRICE_ID ?? "",
@@ -44,6 +45,18 @@ export function seatPriceIdForTier(tier: SelfServeTier): string {
 }
 export function dashboardPriceIdForTier(tier: SelfServeTier): string {
   return DASHBOARD_PRICE_ID_BY_TIER[tier];
+}
+
+// One-time 14-Day Team Evaluation prices. The hidden 1–2 participant tier uses
+// server-authored Checkout price_data; these ids cover the public 3–5 base and
+// each additional participant.
+export const STRIPE_EVALUATION_BASE_PRICE_ID = process.env.STRIPE_EVALUATION_BASE_PRICE_ID ?? "";
+export const STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID =
+  process.env.STRIPE_EVALUATION_ADDITIONAL_PARTICIPANT_PRICE_ID ?? "";
+
+export function assertStripePriceId(priceId: string, name: string): string {
+  if (!priceId) throw new Error(`Stripe configuration is missing ${name}.`);
+  return priceId;
 }
 
 // Reverse lookup: is this price id one of our seat / dashboard prices? Used by the

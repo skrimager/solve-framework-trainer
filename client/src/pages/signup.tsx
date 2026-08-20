@@ -28,7 +28,7 @@ import {
 // Self-serve manager signup. One page, three steps, email first:
 //   1. capture: email + company (every started signup becomes a real contact)
 //   2. verify: 6-digit code emailed to that address
-//   3. setup: office name, manager name, login, seats, dashboard, then pay
+//   3. setup: office name, manager name, login, and seats, then pay
 // Payment (the Stripe redirect) is the sole activation trigger; the office and
 // the manager login are created by the payment webhook, never here.
 
@@ -38,12 +38,11 @@ const GLASS_INPUT = "border-white/15 bg-[#061326]/55 text-white placeholder:text
 
 type Step = "capture" | "verify" | "setup";
 
-function priceSummary(seatCount: number, includeDashboard: boolean) {
+function priceSummary(seatCount: number) {
   const plan = planForSeatCount(seatCount);
   if (!plan) return null;
   const seats = seatCount * plan.seatRate;
-  const dashboard = includeDashboard ? plan.dashboardRate : 0;
-  return { plan, seats, dashboard, total: seats + dashboard };
+  return { plan, seats, total: seats };
 }
 
 function tierLabel(tier: string): string {
@@ -360,11 +359,10 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
   // clearing "1" before typing "7") without snapping back to 1 on every
   // keystroke.
   const [seatCountText, setSeatCountText] = useState("1");
-  const [includeDashboard, setIncludeDashboard] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const enterprise = isEnterpriseSeatCount(seatCount);
-  const summary = useMemo(() => priceSummary(seatCount, includeDashboard), [seatCount, includeDashboard]);
+  const summary = useMemo(() => priceSummary(seatCount), [seatCount]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -378,7 +376,7 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
         username: username.trim(),
         password,
         seatCount,
-        includeDashboard,
+        includeDashboard: false,
       });
       const data = await res.json();
       if (data.url) {
@@ -453,34 +451,15 @@ function SetupStep({ email, company, toast }: { email: string; company: string; 
           )}
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="dashboard" className="text-sm font-semibold text-slate-100">Manager Dashboard</Label>
-            <button
-              type="button"
-              id="dashboard"
-              role="switch"
-              aria-checked={includeDashboard}
-              onClick={() => setIncludeDashboard((v) => !v)}
-              className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border border-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E06D00]"
-              style={{ backgroundColor: includeDashboard ? ORANGE : "#334155" }}
-              data-testid="toggle-dashboard"
-            >
-              <span className="inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform" style={{ transform: includeDashboard ? "translateX(22px)" : "translateX(2px)" }} />
-            </button>
-          </div>
-          {!enterprise && summary && (
-            <p className="text-xs leading-4 text-slate-300" data-testid="text-dashboard-line">
-              See every consultant&apos;s progress, scores, and coaching in one place for ${summary.plan.dashboardRate}/month.
-            </p>
-          )}
+        <div className="space-y-2 rounded-lg border border-white/10 bg-white/5 p-3">
+          <p className="text-sm font-semibold text-white">Command Center included</p>
+          <p className="text-xs leading-4 text-slate-300">See team practice progress, scores, and coaching in one place with every tier.</p>
         </div>
       </div>
 
       {!enterprise && summary && (
         <div className="space-y-1 rounded-lg border border-white/15 bg-[#061326]/45 p-3 text-sm text-slate-200" data-testid="price-summary">
           <div className="flex justify-between gap-4"><span>{seatCount} consultant{seatCount === 1 ? "" : "s"} x ${summary.plan.seatRate}</span><span>${summary.seats}/mo</span></div>
-          {includeDashboard && <div className="flex justify-between gap-4"><span>Manager Dashboard</span><span>${summary.dashboard}/mo</span></div>}
           <div className="flex justify-between gap-4 border-t border-white/10 pt-1.5 font-bold text-white"><span>Total</span><span data-testid="text-total">${summary.total}/mo</span></div>
         </div>
       )}

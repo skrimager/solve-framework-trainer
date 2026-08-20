@@ -19,14 +19,13 @@ import {
 const NAVY = "#0A1A30";
 const ORANGE = "#E06D00";
 
-// Live tier + price summary for the chosen consultant count. Enterprise (36+) has
+// Live tier + price summary for the chosen consultant count. Enterprise (22+) has
 // no self-serve price, so callers render a "contact us" path instead of a total.
-function priceSummary(seatCount: number, includeDashboard: boolean) {
+function priceSummary(seatCount: number) {
   const plan = planForSeatCount(seatCount);
   if (!plan) return null;
   const seats = seatCount * plan.seatRate;
-  const dashboard = includeDashboard ? plan.dashboardRate : 0;
-  return { plan, seats, dashboard, total: seats + dashboard };
+  return { plan, seats, total: seats };
 }
 
 function tierLabel(tier: string): string {
@@ -49,7 +48,6 @@ export default function OfficeSetup() {
   // clearing "1" before typing "7") without snapping back to 1 on every
   // keystroke.
   const [seatCountText, setSeatCountText] = useState("1");
-  const [includeDashboard, setIncludeDashboard] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -73,7 +71,7 @@ export default function OfficeSetup() {
   }, [token]);
 
   const enterprise = isEnterpriseSeatCount(seatCount);
-  const summary = useMemo(() => priceSummary(seatCount, includeDashboard), [seatCount, includeDashboard]);
+  const summary = useMemo(() => priceSummary(seatCount), [seatCount]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -84,7 +82,7 @@ export default function OfficeSetup() {
         token,
         officeName,
         seatCount,
-        includeDashboard,
+        includeDashboard: false,
         email: email || undefined,
       });
       const data = await res.json();
@@ -196,31 +194,9 @@ export default function OfficeSetup() {
                   )}
                 </div>
 
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="dashboard">Manager Dashboard</Label>
-                    <button
-                      type="button"
-                      id="dashboard"
-                      role="switch"
-                      aria-checked={includeDashboard}
-                      onClick={() => setIncludeDashboard((v) => !v)}
-                      className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
-                      style={{ backgroundColor: includeDashboard ? ORANGE : "#cbd5e1" }}
-                      data-testid="toggle-dashboard"
-                    >
-                      <span
-                        className="inline-block h-5 w-5 transform rounded-full bg-white transition-transform"
-                        style={{ transform: includeDashboard ? "translateX(22px)" : "translateX(2px)" }}
-                      />
-                    </button>
-                  </div>
-                  {!enterprise && summary && (
-                    <p className="text-sm text-muted-foreground" data-testid="text-dashboard-line">
-                      See every consultant's progress, scores, and coaching in one place for $
-                      {summary.plan.dashboardRate}/month.
-                    </p>
-                  )}
+                <div className="rounded-md border p-3" style={{ borderColor: NAVY }}>
+                  <p className="text-sm font-semibold" style={{ color: NAVY }}>Command Center included</p>
+                  <p className="mt-1 text-sm text-muted-foreground">See team practice progress, scores, and coaching in one place with every tier.</p>
                 </div>
 
                 {!enterprise && summary && (
@@ -231,12 +207,6 @@ export default function OfficeSetup() {
                       </span>
                       <span>${summary.seats}/mo</span>
                     </div>
-                    {includeDashboard && (
-                      <div className="flex justify-between text-sm">
-                        <span>Manager Dashboard</span>
-                        <span>${summary.dashboard}/mo</span>
-                      </div>
-                    )}
                     <div className="flex justify-between font-bold pt-1" style={{ color: NAVY }}>
                       <span>Total</span>
                       <span data-testid="text-total">${summary.total}/mo</span>
@@ -349,7 +319,7 @@ export function OfficeSetupComplete() {
                 {data.officeName} is live now. Here is your code for {data.seatCount} consultant
                 {data.seatCount === 1 ? "" : "s"}.
                 {data.dashboard
-                  ? " Your Manager Dashboard is ready and fills in as your team joins."
+                  ? " Command Center is ready and fills in as your team joins."
                   : ""}
               </CardDescription>
             </CardHeader>

@@ -12,8 +12,12 @@ import {
   removeDashboard,
   handleStripeEvent,
   EnterpriseQuoteRequiredError,
+  createEvaluationCheckoutSession,
+  createEvaluationConversionCheckoutSession,
+  evaluationHasAccess,
+  expireEvaluations,
 } from "./billing";
-import type { Office, BillingEvent } from "@shared/schema";
+import type { Office, BillingEvent, EvaluationPurchase } from "@shared/schema";
 
 // billing.ts (via stripe.ts) reads the per-tier price ids from env at module load.
 // The npm test script sets them; these fallbacks keep the file runnable directly.
@@ -338,5 +342,202 @@ describe("webhook signature verification", () => {
     assert.throws(() =>
       stripe.webhooks.constructEvent(Buffer.from(payload + "tamper"), header, secret),
     );
+  });
+});
+
+
+// Evaluation checkout is intentionally separate from a recurring seat subscription:
+// one paid checkout opens a 14-day window, and conversion applies the stored credit
+// only when the buyer retains evaluated participants and the first invoice can absorb the credit.
+describe("14-Day Team Evaluation billing", () => {
+  test("creates the hidden 1-2 participant checkout with server-authored $175 price data", async () => {
+    let customerParams: any;
+    let sessionParams: any;
+    __setStripeForTests({
+      customers: {
+        create: async (params: any) => {
+          customerParams = params;
+          return { id: "cus_eval" };
+        },
+      },
+      checkout: {
+        sessions: {
+          create: async (params: any) => {
+            sessionParams = params;
+            return { id: "cs_eval", url: "https://checkout.stripe.test/evaluation" };
+          },
+        },
+      },
+    } as any);
+
+    const url = await createEvaluationCheckoutSession({
+      officeName: "Acme Practice Group",
+      participantCount: 2,
+      email: "owner@example.com",
+      signupId: 42,
+    });
+
+    assert.equal(url, "https://checkout.stripe.test/evaluation");
+    assert.equal(customerParams.email, "owner@example.com");
+    assert.equal(sessionParams.mode, "payment");
+    assert.deepEqual(sessionParams.line_items, [{
+      price_data: {
+        currency: "usd",
+        product_data: { name: "14-Day Team Evaluation" },
+        unit_amount: 17_500,
+      },
+      quantity: 1,
+    }]);
+    assert.equal(sessionParams.metadata.participantCount, "2");
+    assert.equal(sessionParams.metadata.expectedTotalAmountCents, "17500");
+  });
+
+  test("conversion requires at least as many paid seats as evaluation participants", async () => {
+    const purchase = {
+      id: 8,
+      officeId: 1,
+      participantCount: 6,
+      totalAmountCents: 29_900,
+      conversionStatus: "not_converted",
+      evaluationEndsAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    (storage as any).getEvaluationPurchase = async () => purchase;
+    let couponCalled = false;
+    __setStripeForTests({ coupons: { create: async () => { couponCalled = true; return { id: "coupon_eval" }; } } } as any);
+
+    await assert.rejects(
+      () => createEvaluationConversionCheckoutSession(8, 5),
+      /retains your evaluated participants/,
+    );
+    assert.equal(couponCalled, false, "conversion is rejected before any Stripe side effect");
+  });
+
+  test("conversion applies the recorded evaluation credit to a subscription checkout", async () => {
+    const purchase = {
+      id: 8,
+      officeId: 1,
+      participantCount: 6,
+      totalAmountCents: 29_900,
+      conversionStatus: "not_converted",
+      evaluationEndsAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    offices.set(1, makeOffice({ stripeCustomerId: "cus_eval" }));
+    (storage as any).getEvaluationPurchase = async () => purchase;
+    let couponParams: any;
+    let sessionParams: any;
+    __setStripeForTests({
+      coupons: { create: async (params: any) => { couponParams = params; return { id: "coupon_eval" }; } },
+      checkout: { sessions: { create: async (params: any) => { sessionParams = params; return { url: "https://checkout.stripe.test/convert" }; } } },
+    } as any);
+
+    const url = await createEvaluationConversionCheckoutSession(8, 6);
+    assert.equal(url, "https://checkout.stripe.test/convert");
+    assert.equal(couponParams.amount_off, 29_900);
+    assert.equal(sessionParams.mode, "subscription");
+    assert.deepEqual(sessionParams.line_items, [{ price: SEAT_OFFICE, quantity: 6 }]);
+    assert.deepEqual(sessionParams.discounts, [{ coupon: "coupon_eval" }]);
+    assert.equal(sessionParams.metadata.conversionEvaluationPurchaseId, "8");
+  });
+
+  test("evaluation access requires the current purchase and an unexpired participant record", () => {
+    const office = { evaluationStatus: "active", currentEvaluationPurchaseId: 8 } as Office;
+    const activeUser = { evaluationPurchaseId: 8, evaluationAccessExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    assert.equal(evaluationHasAccess(office, activeUser), true);
+    assert.equal(evaluationHasAccess(office, { ...activeUser, evaluationPurchaseId: 9 }), false);
+    assert.equal(evaluationHasAccess(office, { ...activeUser, evaluationAccessExpiresAt: new Date(Date.now() - 1).toISOString() }), false);
+  });
+
+  // This is the test that actually simulates time passing rather than just
+  // exercising the pure gate function above. It seeds real evaluationPurchase
+  // rows with evaluationEndsAt timestamps in the past and future, runs the
+  // exact sweep the scheduler calls on a timer, and asserts on the resulting
+  // storage/office state -- proving expireEvaluations() genuinely revokes
+  // access on its own instead of only being reachable in theory.
+  test("expireEvaluations revokes Command Center access once evaluationEndsAt is in the past, and leaves active/converted evaluations untouched", async () => {
+    const now = new Date("2026-06-15T12:00:00.000Z");
+
+    offices.set(1, makeOffice({ id: 1, evaluationStatus: "active", commandCenterEntitled: true, currentEvaluationPurchaseId: 101 } as Partial<Office>));
+    offices.set(2, makeOffice({ id: 2, evaluationStatus: "active", commandCenterEntitled: true, currentEvaluationPurchaseId: 102 } as Partial<Office>));
+    offices.set(3, makeOffice({ id: 3, evaluationStatus: "converted", commandCenterEntitled: true, currentEvaluationPurchaseId: 103 } as Partial<Office>));
+
+    const purchases = new Map<number, EvaluationPurchase>();
+    const makePurchase = (overrides: Partial<EvaluationPurchase>): EvaluationPurchase => ({
+      id: 0,
+      officeId: 0,
+      stripeCustomerId: "cus_eval",
+      stripeCheckoutSessionId: "cs_eval",
+      stripePaymentIntentId: null,
+      baseAmountCents: 24_900,
+      additionalParticipantAmountCents: 0,
+      totalAmountCents: 24_900,
+      participantCount: 5,
+      evaluationStartedAt: "2026-06-01T00:00:00.000Z",
+      evaluationEndsAt: "2026-06-15T00:00:00.000Z",
+      conversionStatus: "not_converted",
+      convertedAt: null,
+      convertedStripeSubscriptionId: null,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      ...overrides,
+    });
+
+    // Office 1: evaluation ended 12 hours before "now" and was never converted.
+    // This is the one the sweep must catch and expire.
+    purchases.set(101, makePurchase({
+      id: 101,
+      officeId: 1,
+      evaluationEndsAt: "2026-06-15T00:00:00.000Z",
+      conversionStatus: "not_converted",
+    }));
+    // Office 2: evaluation does not end until 12 hours AFTER "now". Must be
+    // left completely untouched by this tick.
+    purchases.set(102, makePurchase({
+      id: 102,
+      officeId: 2,
+      evaluationEndsAt: "2026-06-16T00:00:00.000Z",
+      conversionStatus: "not_converted",
+    }));
+    // Office 3: evaluation window is in the past AND it already converted to
+    // a paid subscription. Must never be marked expired -- conversion status
+    // is a one-way transition into "converted", not something the sweep
+    // should ever overwrite.
+    purchases.set(103, makePurchase({
+      id: 103,
+      officeId: 3,
+      evaluationEndsAt: "2026-06-10T00:00:00.000Z",
+      conversionStatus: "converted",
+    }));
+
+    (storage as any).listExpiredUnconvertedEvaluations = async (nowIso: string) =>
+      [...purchases.values()].filter((p) => p.evaluationEndsAt <= nowIso && p.conversionStatus === "not_converted");
+    (storage as any).markEvaluationExpired = async (id: number, nowIso: string) => {
+      const p = purchases.get(id);
+      if (p) purchases.set(id, { ...p, conversionStatus: "expired_unconverted", updatedAt: nowIso });
+    };
+
+    const expiredCount = await expireEvaluations(now);
+
+    assert.equal(expiredCount, 1, "exactly one evaluation (office 1) should have crossed evaluationEndsAt unconverted");
+
+    // Office 1: access revoked, status flipped.
+    assert.equal(offices.get(1)!.commandCenterEntitled, false);
+    assert.equal(offices.get(1)!.evaluationStatus, "expired_unconverted");
+    assert.equal(purchases.get(101)!.conversionStatus, "expired_unconverted");
+
+    // Office 2: still within its window, must be completely untouched.
+    assert.equal(offices.get(2)!.commandCenterEntitled, true);
+    assert.equal(offices.get(2)!.evaluationStatus, "active");
+    assert.equal(purchases.get(102)!.conversionStatus, "not_converted");
+
+    // Office 3: already converted, must be completely untouched even though
+    // its evaluationEndsAt is also in the past.
+    assert.equal(offices.get(3)!.commandCenterEntitled, true);
+    assert.equal(offices.get(3)!.evaluationStatus, "converted");
+    assert.equal(purchases.get(103)!.conversionStatus, "converted");
+
+    // Running the sweep again at the same "now" must be a no-op (idempotent):
+    // office 1 is no longer "not_converted", so it must not be re-processed.
+    const secondRunCount = await expireEvaluations(now);
+    assert.equal(secondRunCount, 0, "a second sweep at the same time must find nothing left to expire");
   });
 });

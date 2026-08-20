@@ -119,47 +119,44 @@ describe("sales aggregation", () => {
     };
   }
 
-  test("calculateSeatMRR is flat-per-tier with the founder-confirmed totals", () => {
-    assert.equal(calculateSeatMRR(1), 49); // Team
-    assert.equal(calculateSeatMRR(5), 245); // Team, 5 × $49
-    assert.equal(calculateSeatMRR(6), 270); // Office, 6 × $45
-    assert.equal(calculateSeatMRR(20), 900); // Office, 20 × $45
-    assert.equal(calculateSeatMRR(21), 861); // Company, 21 × $41
-    assert.equal(calculateSeatMRR(35), 1435); // Company, 35 × $41
+  test("calculateSeatMRR is flat-per-tier with the locked catalog totals", () => {
+    assert.equal(calculateSeatMRR(1), 129); // Team
+    assert.equal(calculateSeatMRR(5), 645); // Team, 5 × $129
+    assert.equal(calculateSeatMRR(6), 690); // Office, 6 × $115
+    assert.equal(calculateSeatMRR(15), 1725); // Office, 15 × $115
+    assert.equal(calculateSeatMRR(16), 1584); // Company, 16 × $99
+    assert.equal(calculateSeatMRR(21), 2079); // Company, 21 × $99
   });
 
-  test("flat-per-tier cliff is intentional: 21 seats costs LESS than 20 (confirmed, not a bug)", () => {
-    // Crossing 20 (Office) → 21 (Company) drops every seat to $41, so the larger
-    // office is cheaper. Founder was told and chose to keep this. Asserting the
-    // property documents it rather than silently "fixing" it with graduated math.
-    assert.ok(calculateSeatMRR(21) < calculateSeatMRR(20));
+  test("flat-per-tier cliff is intentional: 16 seats costs LESS than 15 (confirmed, not a bug)", () => {
+    // Crossing 15 (Office) → 16 (Company) drops every seat to $99, so the larger
+    // office is cheaper. The product owner chose to keep this volume-pricing break.
+    assert.ok(calculateSeatMRR(16) < calculateSeatMRR(15));
   });
 
-  test("Enterprise (36+) has no self-serve seat MRR", () => {
-    assert.equal(calculateSeatMRR(36), 0);
+  test("Enterprise (22+) has no self-serve seat MRR", () => {
+    assert.equal(calculateSeatMRR(22), 0);
     assert.equal(calculateSeatMRR(100), 0);
   });
 
-  test("active office with NO dashboard add-on = seats only, $0 dashboard", () => {
+  test("active office with Command Center included has seat MRR only", () => {
     const row = computeSalesRow(office({ activeSeatCount: 3, managerItemId: null }));
     assert.equal(row.active, true);
     assert.equal(row.seatCount, 3);
-    assert.equal(row.seatsMrr, 147); // 3 × $49 (Team)
-    assert.equal(row.managerMrr, 0); // add-on not active
-    assert.equal(row.mrr, 147);
+    assert.equal(row.seatsMrr, 387); // 3 × $129 (Team)
+    assert.equal(row.managerMrr, 0); // Command Center has no separate fee
+    assert.equal(row.mrr, 387);
   });
 
-  test("dashboard MRR is billed at the office's CURRENT tier and moves with the tier", () => {
-    // Team tier (3 seats): dashboard is $249.
-    const team = computeSalesRow(office({ activeSeatCount: 3, managerItemId: "si_dash" }));
-    assert.equal(team.seatsMrr, 147); // 3 × $49
-    assert.equal(team.managerMrr, 249);
-    assert.equal(team.mrr, 396);
-    // Office tier (8 seats): the SAME add-on now bills at the $389 Office rate.
-    const officeTier = computeSalesRow(office({ activeSeatCount: 8, managerItemId: "si_dash" }));
-    assert.equal(officeTier.seatsMrr, 360); // 8 × $45
-    assert.equal(officeTier.managerMrr, 389);
-    assert.equal(officeTier.mrr, 749);
+  test("Command Center contributes no separate MRR at any tier", () => {
+    const team = computeSalesRow(office({ activeSeatCount: 3, managerItemId: "si_legacy" }));
+    assert.equal(team.seatsMrr, 387); // 3 × $129
+    assert.equal(team.managerMrr, 0);
+    assert.equal(team.mrr, 387);
+    const officeTier = computeSalesRow(office({ activeSeatCount: 8, managerItemId: "si_legacy" }));
+    assert.equal(officeTier.seatsMrr, 920); // 8 × $115
+    assert.equal(officeTier.managerMrr, 0);
+    assert.equal(officeTier.mrr, 920);
   });
 
   test("inactive office contributes zero MRR", () => {
@@ -178,14 +175,14 @@ describe("sales aggregation", () => {
 
   test("summarizeSales totals across offices and counts Enterprise separately", () => {
     const { rows, totalMrr, activeOffices, enterpriseOffices } = summarizeSales([
-      office({ id: 1, activeSeatCount: 1 }), // Team, seats only → $49
+      office({ id: 1, activeSeatCount: 1 }), // Team, seats only → $129
       office({ id: 2, subscriptionStatus: "canceled", activeSeatCount: 9 }), // inactive → $0
       office({ id: 3, activeSeatCount: 40 }), // Enterprise → excluded from MRR
     ]);
     assert.equal(rows.length, 3);
     assert.equal(activeOffices, 2); // office 3 is active but Enterprise
     assert.equal(enterpriseOffices, 1);
-    assert.equal(totalMrr, 49); // only office 1 contributes
+    assert.equal(totalMrr, 129); // only office 1 contributes
   });
 });
 

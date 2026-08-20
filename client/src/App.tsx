@@ -13,6 +13,7 @@ import ManagerResetPassword from "@/pages/manager-reset-password";
 import ManagerForgotUsername from "@/pages/manager-forgot-username";
 import Register from "@/pages/register";
 import Signup from "@/pages/signup";
+import Pricing from "@/pages/pricing";
 import Scenarios from "@/pages/scenarios";
 import RolePlay from "@/pages/roleplay";
 import Results from "@/pages/results";
@@ -68,6 +69,7 @@ function AppRouter() {
       {/* Self-serve manager signup: email capture, verify, office setup, then
           Stripe checkout. Payment is the sole activation trigger. Public, no auth. */}
       <Route path="/signup" component={Signup} />
+      <Route path="/pricing" component={Pricing} />
       {/* Public free voice demo: no auth. The email+code verification and a
           signed demo token gate it server-side, so it stays outside RequireAuth
           and never touches the trainee/admin login flows. The visitor picks an

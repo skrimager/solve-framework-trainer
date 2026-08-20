@@ -62,7 +62,6 @@ import { useAuth } from "@/lib/auth";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { verticalLabel } from "@/lib/verticals";
-import { planForSeatCount } from "@shared/pricing";
 import type { Office, Scenario } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
@@ -642,55 +641,19 @@ function EmptyState({ message, testId }: { message: string; testId?: string }) {
   );
 }
 
-// Shown when the office has not purchased the paid Manager Dashboard add-on
-// (the dashboard-stats endpoint returns 403). Never a discouraging error: a
-// friendly invitation showing what the dashboard unlocks, the monthly price at
-// the office's tier, and a one-click "Add Dashboard" for managers. Consultants
-// see the same invitation without the action.
-function AddOnLocked({ office, isManager }: { office?: Office; isManager?: boolean }) {
-  const { user } = useAuth();
-  const { toast } = useToast();
-  const [busy, setBusy] = useState(false);
-
-  const plan = planForSeatCount(office?.activeSeatCount ?? 1) ?? planForSeatCount(1);
-  const priceLine = plan ? `$${plan.dashboardRate}/month` : "a flat monthly rate";
-
-  async function addDashboard() {
-    setBusy(true);
-    try {
-      await apiRequest("POST", "/api/billing/add-dashboard", { userId: user?.id });
-      toast({
-        title: "Manager Dashboard added",
-        description: "Your team analytics are activating now.",
-      });
-      window.location.reload();
-    } catch (err: any) {
-      toast({ title: "Couldn't add the dashboard", description: humanError(err), variant: "destructive" });
-      setBusy(false);
-    }
-  }
-
+// Shown only when an office does not currently have Command Center access. It is
+// included with active subscriptions; this is an access-state message, not an upsell.
+function AddOnLocked({ isManager }: { office?: Office; isManager?: boolean }) {
   return (
     <Panel testId="panel-dashboard-locked">
       <div className="py-8 text-center space-y-3">
         <p className="text-sm font-semibold text-white" data-testid="text-dashboard-upsell-title">
-          See your whole team in one place
+          Command Center access is not active
         </p>
         <p className="mx-auto max-w-md text-xs text-white/60">
-          The Manager Dashboard brings every consultant's progress, scores, streaks, and rankings
-          together so you can coach with confidence. Add it to your office for {priceLine}.
+          Command Center is included with every active team tier. Ask your manager to review billing if your office should be active.
         </p>
-        {isManager && (
-          <Button
-            type="button"
-            onClick={addDashboard}
-            disabled={busy}
-            style={{ backgroundColor: BLUE, color: "white" }}
-            data-testid="button-add-dashboard"
-          >
-            {busy ? "Adding…" : "Add Dashboard"}
-          </Button>
-        )}
+        {isManager && <p className="text-xs text-white/45">Once billing is active, refresh this page to continue.</p>}
       </div>
     </Panel>
   );
