@@ -124,6 +124,9 @@ describe("Message Coach page wiring", () => {
       "text-message-coach-coaching",
       "text-message-coach-rewrite",
       "button-message-coach-copy",
+      "card-message-coach-follow-up",
+      "text-message-coach-follow-up",
+      "button-message-coach-copy-follow-up",
     ]) {
       assert.ok(pageSource.includes(marker), `missing ${marker}`);
     }

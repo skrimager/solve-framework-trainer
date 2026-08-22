@@ -12,7 +12,11 @@ export type MessageCoachResult = {
   score: number;
   stalledStep: string;
   coaching: string;
+  // First touch, rewritten from the original message.
   rewrite: string;
+  // Second touch, intended only when the first touch receives no reply.
+  followUp: string;
+  demoEntryPoint: "try_one_conversation" | "command_center";
   source: "free" | "paid" | "member";
 };
 

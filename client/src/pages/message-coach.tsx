@@ -94,6 +94,7 @@ export default function MessageCoach() {
   const [paywall, setPaywall] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [followUpCopied, setFollowUpCopied] = useState(false);
 
   // Anonymous visitors must verify their email with a 6-digit code before the
   // message/industry form unlocks. Members skip this entirely (see isMember
@@ -167,6 +168,8 @@ export default function MessageCoach() {
         return;
       }
       setResult(data);
+      setCopied(false);
+      setFollowUpCopied(false);
       setPaywall(false);
       setConfirming(false);
       setError(null);
@@ -576,6 +579,38 @@ export default function MessageCoach() {
                     </>
                   ) : (
                     RESULT_COPY.copyLabel
+                  )}
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card data-testid="card-message-coach-follow-up">
+              <CardHeader>
+                <CardTitle className="text-base">{RESULT_COPY.followUpLabel}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-muted-foreground">{RESULT_COPY.followUpNote}</p>
+                <p
+                  className="whitespace-pre-wrap text-sm leading-relaxed"
+                  data-testid="text-message-coach-follow-up"
+                >
+                  {result.followUp}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(result.followUp);
+                    setFollowUpCopied(true);
+                  }}
+                  data-testid="button-message-coach-copy-follow-up"
+                >
+                  {followUpCopied ? (
+                    <>
+                      <Check className="mr-2 h-4 w-4" /> {RESULT_COPY.followUpCopiedLabel}
+                    </>
+                  ) : (
+                    RESULT_COPY.followUpCopyLabel
                   )}
                 </Button>
               </CardContent>
