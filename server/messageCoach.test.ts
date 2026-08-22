@@ -9,6 +9,8 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type Stripe from "stripe";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { storage } from "./storage";
 import { __setStripeForTests, APP_URL } from "./stripe";
@@ -19,6 +21,11 @@ import {
   computeMessageCoachCacheHash,
   parseCoachResult,
   stripEmDashes,
+  isReflectionRequiringQuestion,
+  MESSAGE_COACH_DEMO_ENTRY_POINTS,
+  MESSAGE_COACH_DEMO_ORIGIN,
+  selectMessageCoachDemoEntryPoint,
+  buildMessageCoachFollowUp,
   scoreOutreachMessage,
   createMessageCoachCheckout,
   handleMessageCoachPaymentEvent,
@@ -108,7 +115,8 @@ const GOOD_REPLY = {
   score: 34,
   stalledStep: "asked for a decision before any discovery",
   coaching: 'You opened with "are you ready to sell", which asks a stranger to decide.',
-  rewrite: "Hi [their name], quick question about your place. Reply STOP to opt out.",
+  rewrite:
+    "Hi [their name], I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
 };
 
 // A responder for tests that are not about the rewrite verification loop
@@ -229,6 +237,139 @@ describe("cold outreach rubric prompt", () => {
     assert.ok(!MESSAGE_COACH_COLD_OUTREACH_SYSTEM.includes("—"), "prompt contains an em dash");
     assert.ok(!MESSAGE_COACH_COLD_OUTREACH_SYSTEM.includes("–"), "prompt contains an en dash");
   });
+
+  test("requires a context-grounded question that needs reflection, not just an open-ended acknowledgement", () => {
+    const p = MESSAGE_COACH_COLD_OUTREACH_SYSTEM;
+    assert.match(p, /do not select or lightly reword a stock question/);
+    assert.match(p, /interpret, diagnose, explain a cause, compare options, or consider an implication/);
+    assert.match(p, /require a sentence with some reasoning/);
+    assert.match(p, /"yes", "no", "maybe", "sure", "interested", "nothing", or "not really"/);
+    assert.match(p, /what changed, why it matters, which tradeoff/);
+    assert.doesNotMatch(p, /What has you thinking about it\?/);
+    assert.doesNotMatch(p, /What's on your mind with it\?/);
+  });
+
+  test("requests a separate low-pressure second-touch reconnect without allowing the model to invent a demo link", () => {
+    const p = MESSAGE_COACH_COLD_OUTREACH_SYSTEM;
+    assert.match(p, /"followUp"/);
+    assert.match(p, /second touch used only after the first message received no reply/);
+    assert.match(p, /Do not include a URL, a demo name, a product name/);
+    assert.match(p, /application adds the existing low-pressure demo option and canonical link itself/);
+  });
+});
+
+describe("reflection-requiring first-touch questions", () => {
+  test("accepts questions that require a recipient to diagnose, explain, compare, or consider an implication", () => {
+    for (const message of [
+      "I noticed you opened a second location. What has changed about coordinating the two locations that makes the handoff harder to see day to day?",
+      "You mentioned demo requests are slipping between marketing and sales. Where does that handoff break down, and why does it tend to happen there?",
+      "A few nearby homes sold recently. What would those sales change about the timing or plans you have for your own place?",
+    ]) {
+      assert.equal(isReflectionRequiringQuestion(message), true, message);
+    }
+  });
+
+  test("rejects binary, generic, and reflexive one-word-friendly questions", () => {
+    for (const message of [
+      "Are you interested?",
+      "Would you like to see it?",
+      "What is on your mind?",
+      "Have you thought about selling?",
+      "Curious?",
+      "What has you thinking about it?",
+    ]) {
+      assert.equal(isReflectionRequiringQuestion(message), false, message);
+    }
+  });
+});
+
+describe("Message Coach second-touch demo selection", () => {
+  test("uses only the two existing public demo routes, with the deployed training origin", () => {
+    assert.deepEqual(MESSAGE_COACH_DEMO_ENTRY_POINTS, {
+      try_one_conversation: { label: "Try One Conversation", path: "/demo" },
+      command_center: { label: "See the Command Center", path: "/dashboard-demo" },
+    });
+    assert.equal(MESSAGE_COACH_DEMO_ORIGIN, "https://training.solveframework.com");
+  });
+
+  test("selects the Command Center for team/performance context and one conversation for individual practice context", () => {
+    assert.equal(
+      selectMessageCoachDemoEntryPoint(
+        "Our managers cannot see where reps lose leads after a demo request, so coaching is inconsistent.",
+        "Other",
+      ),
+      "command_center",
+    );
+    assert.equal(
+      selectMessageCoachDemoEntryPoint(
+        "I help homeowners sort through what nearby sales could mean for their own timing.",
+        "Real Estate",
+      ),
+      "try_one_conversation",
+    );
+  });
+
+  test("assembles a contextual low-pressure second touch with the canonical existing gated link", () => {
+    const teamFollowUp = buildMessageCoachFollowUp(
+      "You mentioned that managers cannot see where lead handoffs break down.",
+      "Our team is comparing coaching tools because managers cannot see where reps lose demo requests.",
+      "Other",
+    );
+    assert.equal(teamFollowUp.demoEntryPoint, "command_center");
+    assert.match(teamFollowUp.followUp, /managers cannot see where lead handoffs break down/);
+    assert.match(
+      teamFollowUp.followUp,
+      /See the Command Center: https:\/\/training\.solveframework\.com\/#\/dashboard-demo/,
+    );
+    assert.match(teamFollowUp.followUp, /No need to talk to anyone unless you have questions\./);
+    assert.doesNotMatch(teamFollowUp.followUp, /\b(book|schedule|call us|reply yes)\b/i);
+
+    const practiceFollowUp = buildMessageCoachFollowUp(
+      "You mentioned weighing what nearby sales could mean for your timing.",
+      "I help homeowners understand what nearby sales might mean for their own timing.",
+      "Real Estate",
+    );
+    assert.equal(practiceFollowUp.demoEntryPoint, "try_one_conversation");
+    assert.match(practiceFollowUp.followUp, /Try One Conversation: https:\/\/training\.solveframework\.com\/#\/demo/);
+
+    const guardedLead = buildMessageCoachFollowUp(
+      "Could you schedule a call so I can show you the dashboard?",
+      "Our managers cannot see where demo requests fall through between marketing and sales.",
+      "Other",
+    );
+    assert.match(guardedLead.followUp, /I wanted to follow up on the situation you mentioned/);
+    assert.doesNotMatch(guardedLead.followUp, /Could you schedule a call/i);
+  });
+
+  test("does not add a demo route or weaken either existing email plus one-time-code gate", () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL("../client/src/App.tsx", import.meta.url)),
+      "utf8",
+    );
+    const routesSource = readFileSync(
+      fileURLToPath(new URL("./routes.ts", import.meta.url)),
+      "utf8",
+    );
+    const messageCoachRoutesSource = readFileSync(
+      fileURLToPath(new URL("./messageCoachRoutes.ts", import.meta.url)),
+      "utf8",
+    );
+
+    assert.match(appSource, /<Route path="\/demo" component=\{DemoV2\} \/>/);
+    assert.match(appSource, /<Route path="\/dashboard-demo" component=\{DemoDashboard\} \/>/);
+    assert.equal(
+      [...appSource.matchAll(/<Route path="\/(?:demo|dashboard-demo)"/g)].length,
+      2,
+      "the app exposes exactly the two existing demo entry points used by Message Coach",
+    );
+    assert.match(routesSource, /app\.post\("\/api\/demo\/request-code"/);
+    assert.match(routesSource, /app\.post\("\/api\/demo\/verify"/);
+    assert.match(routesSource, /app\.post\("\/api\/dashboard-demo\/request-code"/);
+    assert.match(routesSource, /app\.post\("\/api\/dashboard-demo\/verify"/);
+    assert.match(routesSource, /Email verification is required to view this demo/);
+    assert.match(messageCoachRoutesSource, /verifyMessageCoachToken\(parsed\.data\.verificationToken, email\)/);
+    assert.equal(Object.keys(MESSAGE_COACH_DEMO_ENTRY_POINTS).length, 2);
+  });
 });
 
 // ===========================================================================
@@ -287,6 +428,30 @@ describe("scoreOutreachMessage prompt construction", () => {
     });
     assert.equal(a.calls[0].cacheKey, b.calls[0].cacheKey);
     assert.match(a.calls[0].cacheKey, /^[0-9a-f]{32}$/);
+  });
+
+  test("returns the generated first touch together with its contextual second touch through the production scoring path", async () => {
+    const firstTouch = {
+      ...GOOD_REPLY,
+      rewrite:
+        "Hi, I know this is out of the blue, but where does the handoff from marketing to sales break down after a demo request, and why? Reply STOP to opt out.",
+      followUp: "You mentioned that demo requests disappear in the handoff between marketing and sales.",
+    };
+    const responder = scriptedResponder([
+      firstTouch,
+      { ...firstTouch, score: 93 },
+      { ...firstTouch, score: 91 },
+    ]);
+    const result = await scoreOutreachMessage(
+      "Our managers cannot see where demo requests fall through between marketing and sales.",
+      "Other",
+      { responder, cache: fakeCache() },
+    );
+
+    assert.equal(result.rewrite, firstTouch.rewrite);
+    assert.equal(result.demoEntryPoint, "command_center");
+    assert.match(result.followUp, /demo requests disappear in the handoff/);
+    assert.match(result.followUp, /See the Command Center: https:\/\/training\.solveframework\.com\/#\/dashboard-demo/);
   });
 });
 
@@ -388,6 +553,28 @@ describe("score cache", () => {
     assert.deepEqual(repeat, original);
   });
 
+  test("does not serve a legacy cached rewrite whose close fails the reflection guard", async () => {
+    const cache = fakeCache();
+    const first = passingRewriteResponder();
+    await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder: first,
+      cache,
+    });
+    cache.rows[0].rubric = JSON.stringify({
+      stalledStep: "asked for a decision before any discovery",
+      rewrite: "Hi, are you interested in selling?",
+    });
+
+    const refreshed = passingRewriteResponder();
+    const result = await scoreOutreachMessage("Are you ready to sell?", "Real Estate", {
+      responder: refreshed,
+      cache,
+    });
+
+    assert.equal(refreshed.calls.length, 3, "a stale weak close must be regenerated, not returned");
+    assert.equal(isReflectionRequiringQuestion(result.rewrite), true);
+  });
+
   test("a different message or a different industry is a different result", async () => {
     const cache = fakeCache();
     const r = passingRewriteResponder();
@@ -464,6 +651,20 @@ function scriptedResponder(
 }
 
 describe("rewrite self-verification loop", () => {
+  test("refuses to return a high-scoring rewrite when its closing question can still be answered reflexively", async () => {
+    const nonReflective = {
+      ...GOOD_REPLY,
+      rewrite: "Hi, are you interested in selling?",
+      score: 98,
+    };
+    const responder = spyResponder(nonReflective);
+
+    await assert.rejects(
+      () => scoreOutreachMessage("Are you ready to sell?", "Real Estate", { responder, cache: fakeCache() }),
+      /could not produce a reflection-requiring closing question/,
+    );
+  });
+
   test("initial score, rewrite generation, and rewrite verification all use the SAME model when no rewriteResponder override is given", async () => {
     // Locks in the fix for a real production bug: an earlier design scored
     // the ORIGINAL message with a fast/cheap model but generated and
@@ -477,7 +678,11 @@ describe("rewrite self-verification loop", () => {
     // (MESSAGE_COACH_MODEL); this test only asserts the deps-injection seam
     // preserves that invariant when a caller supplies just `responder`
     // (the common test/production pattern) without a separate override.
-    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const original = {
+      ...GOOD_REPLY,
+      rewrite:
+        "Hi, I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
+    };
     const passingCheckA = { ...original, score: 93 };
     const passingCheckB = { ...original, score: 90 };
     const responder = scriptedResponder([original, passingCheckA, passingCheckB]);
@@ -491,7 +696,11 @@ describe("rewrite self-verification loop", () => {
   });
 
   test("a rewrite that clears the floor on BOTH independent checks is used as is", async () => {
-    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const original = {
+      ...GOOD_REPLY,
+      rewrite:
+        "Hi, I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
+    };
     const passingCheckA = { ...original, score: 93 };
     const passingCheckB = { ...original, score: 90 };
     const responder = scriptedResponder([original, passingCheckA, passingCheckB]);
@@ -513,10 +722,18 @@ describe("rewrite self-verification loop", () => {
   test("a rewrite that passes one check but fails the other is NOT accepted, and triggers a retry", async () => {
     // This is exactly the real failure a customer hit: a single passing
     // check is not enough evidence the rewrite is safe to hand out.
-    const original = { ...GOOD_REPLY, rewrite: "Hi, quick one for you. Reply STOP to opt out." };
+    const original = {
+      ...GOOD_REPLY,
+      rewrite:
+        "Hi, I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
+    };
     const passingCheckA = { ...original, score: 93 };
     const failingCheckB = { ...original, score: 72, stalledStep: "still reads as a form letter" };
-    const corrected = { ...original, rewrite: "Hey, curious if you have thought about selling. Reply STOP to opt out." };
+    const corrected = {
+      ...original,
+      rewrite:
+        "Hey, I know this is out of the blue, but what would selling this year change about the plans you have for your place? Reply STOP to opt out.",
+    };
     const passingRetryA = { ...corrected, score: 91 };
     const passingRetryB = { ...corrected, score: 90 };
     const responder = scriptedResponder([
@@ -539,7 +756,11 @@ describe("rewrite self-verification loop", () => {
     const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
     const failingCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
     const failingCheckB = { ...original, score: 61, stalledStep: "still demands a yes or no" };
-    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
+    const corrected = {
+      ...original,
+      rewrite:
+        "I know this is out of the blue, but what would selling this year change about the plans you have for your place? Reply STOP to opt out.",
+    };
     const passingCheckA = { ...corrected, score: 91 };
     const passingCheckB = { ...corrected, score: 90 };
     const responder = scriptedResponder([
@@ -561,7 +782,7 @@ describe("rewrite self-verification loop", () => {
     // checks scored and why, not just ask again from scratch.
     const retryInput = responder.calls[3].input;
     assert.match(retryInput, /only scored 58/);
-    assert.match(retryInput, /still demands a yes or no/);
+    assert.match(retryInput, /closing question can be answered without reflection/);
     assert.match(retryInput, /Selling soon\? Let me know\./);
   });
 
@@ -569,10 +790,18 @@ describe("rewrite self-verification loop", () => {
     const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
     const firstCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
     const firstCheckB = { ...original, score: 55, stalledStep: "still demands a yes or no" };
-    const secondAttempt = { ...original, rewrite: "Any thoughts on selling this year? Reply STOP to opt out." };
+    const secondAttempt = {
+      ...original,
+      rewrite:
+        "I know this is out of the blue, but what would selling this year change about the plans you have for your place? Reply STOP to opt out.",
+    };
     const secondCheckA = { ...secondAttempt, score: 74, stalledStep: "reply threshold still asks for a plan, not a word" };
     const secondCheckB = { ...secondAttempt, score: 91, stalledStep: "reply threshold still asks for a plan, not a word" };
-    const thirdAttempt = { ...original, rewrite: "Wondering what your place might be worth these days? Reply STOP to opt out." };
+    const thirdAttempt = {
+      ...original,
+      rewrite:
+        "I know this is out of the blue, but what would nearby sales change about the timing or plans you have for your own place? Reply STOP to opt out.",
+    };
     const thirdCheckA = { ...thirdAttempt, score: 60, stalledStep: "outcome framing still centers the sender, not the reader" };
     const thirdCheckB = { ...thirdAttempt, score: 65, stalledStep: "outcome framing still centers the sender, not the reader" };
     const responder = scriptedResponder([
@@ -603,7 +832,11 @@ describe("rewrite self-verification loop", () => {
     const original = { ...GOOD_REPLY, rewrite: "Selling soon? Let me know." };
     const failingCheckA = { ...original, score: 58, stalledStep: "still demands a yes or no" };
     const failingCheckB = { ...original, score: 61, stalledStep: "still demands a yes or no" };
-    const corrected = { ...original, rewrite: "Curious what your place might be worth this year. Reply STOP to opt out." };
+    const corrected = {
+      ...original,
+      rewrite:
+        "I know this is out of the blue, but what would selling this year change about the plans you have for your place? Reply STOP to opt out.",
+    };
     const passingCheckA = { ...corrected, score: 91 };
     const passingCheckB = { ...corrected, score: 90 };
     const responder = scriptedResponder([

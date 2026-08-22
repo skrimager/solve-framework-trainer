@@ -33,7 +33,8 @@ const GOOD_REPLY_OBJECT = {
   score: 31,
   stalledStep: "asked for a decision before any discovery",
   coaching: 'You opened with "ready to sell", which asks a stranger to decide.',
-  rewrite: "Hi [their name], quick question about your place. Reply STOP to opt out.",
+  rewrite:
+    "Hi [their name], I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
 };
 const GOOD_REPLY = JSON.stringify(GOOD_REPLY_OBJECT);
 // scoreOutreachMessage's internal rewrite verification re-scores the rewrite

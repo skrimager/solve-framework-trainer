@@ -72,10 +72,14 @@ export const RESULT_COPY = {
   scoreSuffix: "out of 100",
   stalledLabel: "Where it stalled",
   coachingLabel: "What's happening",
-  rewriteLabel: "The rewrite",
-  rewriteNote: "Send this instead.",
-  copyLabel: "Copy the rewrite",
+  rewriteLabel: "First touch",
+  rewriteNote: "Send this first.",
+  copyLabel: "Copy the first touch",
   copiedLabel: "Copied",
+  followUpLabel: "Second touch, if they do not reply",
+  followUpNote: "A low-pressure next step using an existing gated demo.",
+  followUpCopyLabel: "Copy the second touch",
+  followUpCopiedLabel: "Second touch copied",
   againLabel: "Score another message",
 } as const;
 
