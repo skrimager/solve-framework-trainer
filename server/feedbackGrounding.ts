@@ -283,3 +283,150 @@ export function buildPriceGroundingBlock(transcript: TranscriptMessage[]): strin
     "If you discuss price discipline, cite this actual history. Do not claim the consultant was above a reference when the computed comparison says below, and do not call a worse (higher) later offer a concession merely because the customer accepted it.",
   ].join("\n");
 }
+
+// Stall coaching has a different factual failure mode from timing coaching. A
+// consultant can validate, ask the concern out, gather the requested evidence,
+// or set a respectful boundary around "just send me a quote," and a grader can
+// still suggest the same move as if it never happened. These phrase families
+// intentionally identify only observable trainee actions. They do not infer
+// whether the action was persuasive, complete, or well timed; those remain
+// legitimate coaching questions for the scoring model.
+export type StallActionCategory =
+  | "validationAcknowledgement"
+  | "stallClarification"
+  | "diagnosticQuestion"
+  | "collaborativeReviewDataGathering"
+  | "futureImpactQuestion"
+  | "prematureQuoteBoundary";
+
+export interface StallActionCoverage {
+  category: StallActionCategory;
+  label: string;
+  turn: number;
+  quote: string;
+}
+
+const STALL_ACTION_LABEL: Record<StallActionCategory, string> = {
+  validationAcknowledgement: "validation / acknowledgement",
+  stallClarification: "clarification of the stall",
+  diagnosticQuestion: "diagnostic question about the concern, reason, or decision process",
+  collaborativeReviewDataGathering: "collaborative review or data gathering",
+  futureImpactQuestion: "future-impact question",
+  prematureQuoteBoundary: "boundary-setting around premature quoting",
+};
+
+const VALIDATION_ACKNOWLEDGEMENT_PATTERNS: RegExp[] = [
+  /\b(?:i|we)\s+(?:completely |totally |really )?(?:understand|hear|appreciate)\b/i,
+  /\bthat(?:'s| is) (?:fair|understandable|reasonable|a good point)\b/i,
+  /\bthat makes (?:sense|perfect sense)\b/i,
+  /\bno problem at all\b/i,
+];
+
+const STALL_CLARIFICATION_PATTERNS: RegExp[] = [
+  /\b(?:think(?:ing)?|review|time|decid(?:e|ing|ision)|hesitat(?:e|ion)|hold(?:ing)? back|wait|comfortable)\b/i,
+  /\b(?:quote|estimate|proposal|numbers?|details?|savings)\b/i,
+];
+
+const DIAGNOSTIC_QUESTION_PATTERNS: RegExp[] = [
+  /\b(?:concern|worried|worry|uncomfortable|uncertain|uncertainty|confidence|confident|reason|why|finances?|budget|price|payment|deductible|savings|numbers?|details?)\b/i,
+  /\b(?:what|which|how)\b.{0,90}\b(?:need|help|make|figure|confirm|work|feel|decid|think)\b/i,
+  /\btell me\b.{0,90}\b(?:about|what|why|how)\b/i,
+];
+
+const COLLABORATIVE_REVIEW_DATA_PATTERNS: RegExp[] = [
+  /\b(?:let'?s|we can|i can|why don'?t we)\b.{0,120}\b(?:review|look|go over|walk through|compare|figure out|pull|gather|check|log on|collect|grab)\b/i,
+  /\b(?:review|look|go over|walk through|compare|pull|gather|check|collect|grab)\b.{0,80}\b(?:data|bills?|history|details?|numbers?|usage|information)\b/i,
+];
+
+const FUTURE_IMPACT_QUESTION_PATTERNS: RegExp[] = [
+  /\bwhat would happen\b/i,
+  /\bif (?:you|we)\b.{0,90}\b(?:wait|delay|don'?t|doesn'?t|not|happen|cost|damage)\b/i,
+  /\b(?:are you planning on|over the next|next (?:week|month|year)|more or less)\b/i,
+];
+
+const QUOTE_REQUEST_PATTERNS: RegExp[] = [
+  /\b(?:send|email|give|provide|share)\b.{0,45}\b(?:quote|estimate|proposal|pricing)\b/i,
+];
+
+const QUOTE_BOUNDARY_PATTERNS: RegExp[] = [
+  /\b(?:before|rather than|instead of|not just)\b.{0,55}\b(?:send|email|give|provide|share)\b/i,
+  /\b(?:don'?t|do not)\b.{0,25}\bjust\b.{0,35}\b(?:send|email|give|provide|share)\b/i,
+];
+
+function isSpokenQuestion(text: string): boolean {
+  return (
+    /\?/.test(text) ||
+    /(?:^|[.!]\s*)(?:what|which|how|why|where|who|do|does|did|is|are|can|could|would|will|should)\b/i.test(
+      text,
+    ) ||
+    /\b(?:tell|walk) me\b/i.test(text)
+  );
+}
+
+// Produces only affirmative, exact-text coverage. In particular, it never
+// guesses that an action happened merely because the customer had a stall; a
+// category is present only when the CONSULTANT's own turn matches an explicit
+// phrase family above. A turn can legitimately appear in more than one category
+// (for example, a validating diagnostic question).
+export function deriveStallActionCoverage(transcript: TranscriptMessage[]): StallActionCoverage[] {
+  const actions: StallActionCoverage[] = [];
+
+  for (const turn of numberedTurns(transcript)) {
+    if (turn.role !== "consultant") continue;
+
+    const question = isSpokenQuestion(turn.text);
+    const add = (category: StallActionCategory) =>
+      actions.push({
+        category,
+        label: STALL_ACTION_LABEL[category],
+        turn: turn.turn,
+        quote: turn.text,
+      });
+
+    if (matchesAny(turn.text, VALIDATION_ACKNOWLEDGEMENT_PATTERNS)) add("validationAcknowledgement");
+    if (question && matchesAny(turn.text, STALL_CLARIFICATION_PATTERNS)) add("stallClarification");
+    if (question && matchesAny(turn.text, DIAGNOSTIC_QUESTION_PATTERNS)) add("diagnosticQuestion");
+    if (matchesAny(turn.text, COLLABORATIVE_REVIEW_DATA_PATTERNS)) add("collaborativeReviewDataGathering");
+    if (question && matchesAny(turn.text, FUTURE_IMPACT_QUESTION_PATTERNS)) add("futureImpactQuestion");
+    if (
+      question &&
+      matchesAny(turn.text, QUOTE_REQUEST_PATTERNS) &&
+      matchesAny(turn.text, QUOTE_BOUNDARY_PATTERNS)
+    ) {
+      add("prematureQuoteBoundary");
+    }
+  }
+
+  return actions;
+}
+
+// A deterministic counterpart to STALL_DIAGNOSIS_RULES. The rubric still judges
+// quality, depth, and timing, but this block makes it impossible for feedback to
+// call an observable action absent or recommend the same action as a missing
+// move. It is deliberately positive-only: no unmatched category is described as
+// absent, so it cannot create new coaching obligations.
+export function buildStallActionGroundingBlock(
+  transcript: TranscriptMessage[],
+  speaker: string = "CONSULTANT",
+): string {
+  const coverage = deriveStallActionCoverage(transcript);
+  if (coverage.length === 0) return "";
+
+  // A single turn may validate and ask a diagnostic question. Grouping those
+  // categories preserves every grounded action while avoiding multiple copies
+  // of a long spoken turn in the scoring prompt.
+  const actionsByTurn = new Map<number, StallActionCoverage[]>();
+  for (const action of coverage) {
+    actionsByTurn.set(action.turn, [...(actionsByTurn.get(action.turn) ?? []), action]);
+  }
+  const lines = Array.from(actionsByTurn.values()).map((actions) => {
+    const [first] = actions;
+    return `- Turn ${first.turn}: ${actions.map((action) => action.label).join("; ")} — ALREADY COVERED by the ${speaker}: "${first.quote}"`;
+  });
+
+  return [
+    "STALL ACTION PRE-CHECK (deterministically read from the CONSULTANT turns above; these exact actions are already in this conversation and outrank any impression that they were absent):",
+    ...lines,
+    "Never say an action listed above was missing, never recommend a materially equivalent action as though the consultant did not take it, and never use a listed turn as evidence of a different action that its exact quote does not support (for example, do not call a diagnostic question a cost summary). You may coach a meaningfully deeper, better-timed, or different next action only if you first acknowledge the covered action, cite its turn, and explain the specific additional work that remains.",
+  ].join("\n");
+}

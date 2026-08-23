@@ -16,7 +16,15 @@ import {
   hasCustomerAcceptedProposal,
   repeatsClosedAnsweredQuestion,
 } from "./conversationState";
-import { buildPriceGroundingBlock, buildTimingGroundingBlock, numberedTurns } from "./feedbackGrounding";
+import {
+  buildPriceGroundingBlock,
+  buildStallActionGroundingBlock,
+  buildTimingGroundingBlock,
+  deriveStallActionCoverage,
+  numberedTurns,
+  type StallActionCategory,
+} from "./feedbackGrounding";
+import { splitSentences } from "./sentences";
 import { storage } from "./storage";
 import {
   countPriorVulgarStrikes,
@@ -1365,12 +1373,15 @@ export type ScoreResult = {
   feedback: string;
   overall: number;
   stallEvidence: StallEvidence | null;
+  // Returned for inspection/evidence on dedicated stall sessions only. It is
+  // intentionally not a scoring input and is not persisted in the score cache.
+  stallFeedbackAudit: StallFeedbackAuditBundle | null;
 };
 
-// The one API call scoreTranscript makes, factored out so tests can inject a
-// spy/stub without reaching OpenAI. Mirrors the WrittenGradeResponder seam:
-// production defaults to the shared client; tests pass their own. Takes the
-// fully-built input and the routing cache key, returns raw output_text.
+// The scoring and stall-feedback-adjudication calls are factored behind this
+// one seam so tests can inject each response without reaching OpenAI. Ordinary
+// sessions make one scoring call; dedicated Stall & Excuse Handling sessions
+// make a scoped second call that semantically audits/corrects coaching advice.
 export type ScoreResponder = (input: string, promptCacheKey: string) => Promise<string>;
 
 const defaultScoreResponder: ScoreResponder = async (input, promptCacheKey) => {
@@ -1381,6 +1392,287 @@ const defaultScoreResponder: ScoreResponder = async (input, promptCacheKey) => {
   });
   return response.output_text || "";
 };
+
+// Shared production model path for other transcript-grounded features (such as
+// Coach challenge adjudication). Keeping this adapter here ensures credential
+// proxies and OpenAI client configuration are identical to scoreTranscript.
+export const sharedModelResponder: ScoreResponder = defaultScoreResponder;
+
+export type StallFeedbackStrength = {
+  traineeTurn: number;
+  observation: string;
+};
+
+export type StallFeedbackImprovement = {
+  category: StallActionCategory;
+  acknowledgementCoveredTurns: number[];
+  narrowerGap: string;
+  laterCustomerEvidenceTurn: number;
+  evidenceTerms: string[];
+  advice: string;
+};
+
+// This is an AI semantic decision, not final prose. The application validates
+// every referenced turn/evidence term and renders the trainee-facing feedback
+// itself, so a blocked recommendation cannot leak through arbitrary model text.
+export type StallFeedbackDecision = {
+  disposition: "accepted" | "corrected" | "praise_only";
+  strengths: StallFeedbackStrength[];
+  improvement: StallFeedbackImprovement | null;
+};
+
+// Kept as the result field name for evidence consumers; it now carries the
+// structured decision rather than a model-authored prose audit.
+export type StallFeedbackAuditBundle = StallFeedbackDecision;
+
+const STALL_ACTION_CATEGORIES: StallActionCategory[] = [
+  "validationAcknowledgement",
+  "stallClarification",
+  "diagnosticQuestion",
+  "collaborativeReviewDataGathering",
+  "futureImpactQuestion",
+  "prematureQuoteBoundary",
+];
+
+export const STALL_FEEDBACK_ADJUDICATION_INSTRUCTION = `STALL FEEDBACK STRUCTURED FAIRNESS DECISION:
+Review the candidate feedback semantically against the numbered transcript and deterministic STALL ACTION PRE-CHECK. The pre-check is exact evidence. Decide fairness and equivalence yourself; do not use keyword matching.
+Return a structured decision, NOT final coaching prose. The application will render the final feedback from your fields.
+- strengths: give 1-3 concise, natural-language observations. Each must cite a real TRAINEE turn number and explain what that action accomplished in THIS conversation (for example, "This invited the customer to name the budget constraint in their own words"). Do not write a tautology such as "This was a grounded diagnostic action" or merely restate a category.
+- improvement is OPTIONAL. No criticism or recommendation is required. Prefer a defensible, genuinely narrower improvement when later customer evidence reveals a distinct unresolved dimension; otherwise choose disposition "praise_only" and improvement null. For example, after asking what "savings" means, later customer evidence about whether estimates match typical usage can support a narrower usage-pattern follow-up only when both turns are cited.
+- If you include an improvement, choose one action category exactly: validationAcknowledgement, stallClarification, diagnosticQuestion, collaborativeReviewDataGathering, futureImpactQuestion, or prematureQuoteBoundary. Give concise advice, a precise narrowerGap, a later CUSTOMER evidence turn, and 1-4 exact meaningful evidenceTerms from that customer turn.
+- When the chosen improvement category is ALREADY COVERED, acknowledgementCoveredTurns must list the exact covered trainee turn(s). The narrowerGap must name a DIFFERENT unresolved dimension grounded in the later customer evidence; generic "deeper", "more specific", or a paraphrase of the covered question is invalid.
+- A rewording about factors, details, data, uncertainty, savings, calculations, payment, or decision-making can still be materially equivalent to a covered action. If so, do not force an improvement; use praise_only or a truly different evidenced opportunity.
+Return ONLY valid JSON:
+{"disposition":"accepted"|"corrected"|"praise_only","strengths":[{"traineeTurn":number,"observation":string}],"improvement":null|{"category":string,"acknowledgementCoveredTurns":number[],"narrowerGap":string,"laterCustomerEvidenceTurn":number,"evidenceTerms":string[],"advice":string}}`;
+
+export function buildStallFeedbackAdjudicationPrompt(
+  transcript: TranscriptMessage[],
+  candidateFeedback: string,
+): string {
+  return [
+    STALL_FEEDBACK_ADJUDICATION_INSTRUCTION,
+    `${transcriptHeaderForScoring(transcript)}\n${renderTranscriptForScoring(transcript)}`,
+    buildStallActionGroundingBlock(transcript),
+    `CANDIDATE FEEDBACK (for semantic review only; do not return prose):\n${candidateFeedback}`,
+  ].filter(Boolean).join("\n\n");
+}
+
+function extractJsonObject(raw: string): Record<string, unknown> {
+  // Models sometimes wrap JSON in markdown, append a friendly sentence, or
+  // accidentally emit a duplicate object. Walk balanced braces while honoring
+  // quoted strings, parse the FIRST valid top-level object, and intentionally
+  // ignore harmless trailing material. We still reject an object whose
+  // structured decision semantics fail below.
+  const text = raw.replace(/```(?:json)?/gi, "");
+  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaping = false;
+    for (let i = start; i < text.length; i++) {
+      const char = text[i];
+      if (inString) {
+        if (escaping) escaping = false;
+        else if (char === "\\") escaping = true;
+        else if (char === "\"") inString = false;
+        continue;
+      }
+      if (char === "\"") {
+        inString = true;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(text.slice(start, i + 1));
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              return parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Keep scanning for the next valid top-level object.
+          }
+          break;
+        }
+      }
+    }
+  }
+  throw new Error("Stall feedback adjudicator did not return a valid top-level JSON object");
+}
+
+function parseStallFeedbackDecision(raw: string): StallFeedbackDecision {
+  const parsed = extractJsonObject(raw);
+  if (
+    (parsed.disposition !== "accepted" && parsed.disposition !== "corrected" && parsed.disposition !== "praise_only") ||
+    !Array.isArray(parsed.strengths) ||
+    !parsed.strengths.every(
+      (strength) =>
+        strength && typeof strength === "object" &&
+        Number.isInteger((strength as Record<string, unknown>).traineeTurn) &&
+        typeof (strength as Record<string, unknown>).observation === "string",
+    ) ||
+    !(parsed.improvement === null || (parsed.improvement && typeof parsed.improvement === "object"))
+  ) {
+    throw new Error("Stall feedback adjudicator returned an invalid decision shape");
+  }
+  return parsed as unknown as StallFeedbackDecision;
+}
+
+export type StallFeedbackDecisionFailure = { field: string; reason: string };
+
+const TAUTOLOGICAL_STRENGTH =
+  /\b(?:grounded|diagnostic|validation|clarification|collaborative|future-impact|stall)\b(?:\s+[\w/-]+){0,3}\s+action\b/i;
+const ACCOMPLISHMENT_LANGUAGE =
+  /\b(?:invited|gave|helped|allowed|clarified|surfaced|identified|created|kept|made|opened|showed|enabled|confirmed|connected|provided|communicated|offered|acknowledged|reviewed)\b/i;
+
+function meaningfulTerms(text: string): string[] {
+  const stop = new Set(["about", "after", "already", "also", "and", "asked", "been", "before", "customer", "does", "from", "have", "help", "into", "more", "that", "their", "them", "then", "they", "this", "turn", "what", "when", "where", "which", "with", "would", "your"]);
+  return Array.from(new Set((text.toLowerCase().match(/[a-z][a-z'-]{3,}/g) ?? []).filter((term) => !stop.has(term))));
+}
+
+export function validateStallFeedbackDecision(
+  decision: StallFeedbackDecision,
+  transcript: TranscriptMessage[],
+): StallFeedbackDecisionFailure[] {
+  const turns = numberedTurns(transcript);
+  const coverage = deriveStallActionCoverage(transcript);
+  const failures: StallFeedbackDecisionFailure[] = [];
+
+  if (decision.strengths.length < 1 || decision.strengths.length > 3) {
+    failures.push({ field: "strengths", reason: "must contain one to three strengths" });
+  }
+  const seenStrengthTurns = new Set<number>();
+  for (const strength of decision.strengths) {
+    const turn = turns.find((item) => item.turn === strength.traineeTurn);
+    if (!turn || turn.role !== "consultant") failures.push({ field: "strengths", reason: "traineeTurn must be a real consultant turn" });
+    if (seenStrengthTurns.has(strength.traineeTurn)) failures.push({ field: "strengths", reason: "trainee turns must be unique" });
+    seenStrengthTurns.add(strength.traineeTurn);
+    if (!strength.observation.trim() || strength.observation.length > 280) failures.push({ field: "strengths", reason: "observation must be concise" });
+    if (TAUTOLOGICAL_STRENGTH.test(strength.observation) || !ACCOMPLISHMENT_LANGUAGE.test(strength.observation)) {
+      failures.push({ field: "strengths", reason: "observation must explain what the action accomplished, not restate a category" });
+    }
+  }
+
+  const improvement = decision.improvement;
+  if (decision.disposition === "praise_only" && improvement !== null) {
+    failures.push({ field: "improvement", reason: "praise_only cannot contain an improvement" });
+  }
+  if (!improvement) return failures;
+
+  if (!STALL_ACTION_CATEGORIES.includes(improvement.category)) failures.push({ field: "improvement.category", reason: "must use the stall action taxonomy" });
+  if (!improvement.narrowerGap.trim() || /^(?:a )?(?:deeper|more specific|narrower|better|additional)(?: question| follow-?up| exploration)?\.?$/i.test(improvement.narrowerGap.trim())) {
+    failures.push({ field: "improvement.narrowerGap", reason: "must name a specific unresolved dimension" });
+  }
+  if (!improvement.advice.trim() || improvement.advice.length > 320) failures.push({ field: "improvement.advice", reason: "must be concise" });
+
+  const evidenceTurn = turns.find((turn) => turn.turn === improvement.laterCustomerEvidenceTurn);
+  if (!evidenceTurn || evidenceTurn.role !== "customer") {
+    failures.push({ field: "improvement.laterCustomerEvidenceTurn", reason: "must be a real customer turn" });
+    return failures;
+  }
+  if (!Array.isArray(improvement.evidenceTerms) || improvement.evidenceTerms.length < 1 || improvement.evidenceTerms.length > 4) {
+    failures.push({ field: "improvement.evidenceTerms", reason: "must contain one to four customer evidence terms" });
+  }
+  const evidenceText = evidenceTurn.text.toLowerCase();
+  const normalizedTerms = improvement.evidenceTerms.map((term) => term.toLowerCase().trim()).filter(Boolean);
+  if (!normalizedTerms.every((term) => evidenceText.includes(term))) {
+    failures.push({ field: "improvement.evidenceTerms", reason: "terms must appear in the cited customer turn" });
+  }
+  const gapTerms = meaningfulTerms(improvement.narrowerGap);
+  if (!gapTerms.some((term) => normalizedTerms.includes(term) || evidenceText.includes(term))) {
+    failures.push({ field: "improvement.narrowerGap", reason: "must be grounded in the cited customer evidence" });
+  }
+
+  const covered = coverage.filter((action) => action.category === improvement.category);
+  if (covered.length > 0) {
+    const acknowledged = covered.filter((action) => improvement.acknowledgementCoveredTurns.includes(action.turn));
+    if (acknowledged.length === 0) failures.push({ field: "improvement.acknowledgementCoveredTurns", reason: "must acknowledge an exact covered trainee turn" });
+    if (!acknowledged.some((action) => evidenceTurn.turn > action.turn)) failures.push({ field: "improvement.laterCustomerEvidenceTurn", reason: "must follow the acknowledged covered action" });
+  }
+  return failures;
+}
+
+export function renderStallFeedbackDecision(
+  decision: StallFeedbackDecision,
+  transcript: TranscriptMessage[],
+): string {
+  const turns = numberedTurns(transcript);
+  const coverage = deriveStallActionCoverage(transcript);
+  const strengths = decision.strengths.map((strength) => {
+    const turn = turns.find((item) => item.turn === strength.traineeTurn)!;
+    return `At turn ${turn.turn}, you said "${turn.text}". ${strength.observation.trim()}`;
+  });
+  if (!decision.improvement) return strengths.join(" ");
+
+  const improvement = decision.improvement;
+  const evidence = turns.find((turn) => turn.turn === improvement.laterCustomerEvidenceTurn)!;
+  const covered = coverage.filter((action) => action.category === improvement.category && improvement.acknowledgementCoveredTurns.includes(action.turn));
+  const acknowledgement = covered.length
+    ? `You already ${covered.map((action) => `${action.label} at turn ${action.turn} ("${action.quote}")`).join(" and ")}. `
+    : "";
+  return `${strengths.join(" ")} ${acknowledgement}A narrower focus is ${improvement.narrowerGap.trim()}, supported by the customer at turn ${evidence.turn}: "${evidence.text}". ${improvement.advice.trim()}`;
+}
+
+function buildSafeStallPraiseDecision(transcript: TranscriptMessage[]): StallFeedbackDecision {
+  const turns = numberedTurns(transcript);
+  const actionTurns = Array.from(new Map(deriveStallActionCoverage(transcript).map((action) => [action.turn, action])).values()).slice(0, 2);
+  const fallbackObservation: Record<StallActionCategory, string> = {
+    validationAcknowledgement: "This acknowledged the customer's concern before the conversation moved forward.",
+    stallClarification: "This gave the customer a clear invitation to explain what they needed to think through.",
+    diagnosticQuestion: "This invited the customer to name the concern in their own words instead of leaving it assumed.",
+    collaborativeReviewDataGathering: "This offered to review concrete information together rather than leaving the customer alone with the uncertainty.",
+    futureImpactQuestion: "This connected the decision to a future consequence the customer could consider.",
+    prematureQuoteBoundary: "This kept the quote request connected to understanding what the customer wanted to compare.",
+  };
+  const strengths = (actionTurns.length > 0 ? actionTurns : turns.filter((turn) => turn.role === "consultant").slice(0, 2)).map((item) => ({
+    traineeTurn: item.turn,
+    observation: actionTurns.length > 0 && "category" in item
+      ? fallbackObservation[item.category]
+      : "This gave the customer a clear point of engagement before the conversation moved on.",
+  }));
+  return {
+    disposition: "praise_only",
+    strengths: strengths.length > 0 ? strengths : [{ traineeTurn: 0, observation: "The conversation contains no consultant turn to summarize." }],
+    improvement: null,
+  };
+}
+
+export function buildStallFeedbackCorrectionPrompt(
+  transcript: TranscriptMessage[],
+  candidateFeedback: string,
+  failedDecision: StallFeedbackDecision,
+  failures: StallFeedbackDecisionFailure[],
+): string {
+  return [
+    STALL_FEEDBACK_ADJUDICATION_INSTRUCTION,
+    "Your prior structured decision failed deterministic validation. Return a new structured decision only. No criticism or recommendation is required; choose praise_only if the evidence does not prove a genuinely different improvement.",
+    `VALIDATION FAILURES:\n${JSON.stringify(failures)}`,
+    `CANDIDATE FEEDBACK:\n${candidateFeedback}`,
+    `PRIOR DECISION:\n${JSON.stringify(failedDecision)}`,
+    `${transcriptHeaderForScoring(transcript)}\n${renderTranscriptForScoring(transcript)}`,
+    buildStallActionGroundingBlock(transcript),
+  ].join("\n\n");
+}
+
+export function buildStallFeedbackRecoveryPrompt(
+  transcript: TranscriptMessage[],
+  candidateFeedback: string,
+  initialDecision: StallFeedbackDecision,
+  initialFailures: StallFeedbackDecisionFailure[],
+  failedCorrection: StallFeedbackDecision,
+  correctionFailures: StallFeedbackDecisionFailure[],
+): string {
+  return [
+    STALL_FEEDBACK_ADJUDICATION_INSTRUCTION,
+    "FINAL SAFE RECOVERY: The initial decision and correction both failed validation. Return a safe structured decision. Praise-only is preferred when no distinct evidence-backed improvement remains. Repeating a covered category without exact acknowledgement and later customer evidence will fail. Return JSON only.",
+    `INITIAL FAILURES:\n${JSON.stringify(initialFailures)}`,
+    `CORRECTION FAILURES:\n${JSON.stringify(correctionFailures)}`,
+    `CANDIDATE FEEDBACK:\n${candidateFeedback}`,
+    `INITIAL DECISION:\n${JSON.stringify(initialDecision)}`,
+    `FAILED CORRECTION:\n${JSON.stringify(failedCorrection)}`,
+    `${transcriptHeaderForScoring(transcript)}\n${renderTranscriptForScoring(transcript)}`,
+    buildStallActionGroundingBlock(transcript),
+  ].join("\n\n");
+}
 
 // The subset of storage scoreTranscript needs, injectable so tests can supply an
 // in-memory fake instead of hitting Postgres.
@@ -1458,6 +1750,7 @@ export async function scoreTranscript(
     cache?: ScoreCacheStore;
     noRecommendationHint?: boolean;
     stallType?: string | null;
+    stallFeedbackAdjudicator?: ScoreResponder;
   } = {}
 ): Promise<ScoreResult> {
   const responder = deps.responder ?? defaultScoreResponder;
@@ -1481,6 +1774,7 @@ export async function scoreTranscript(
       feedback: cached.feedback,
       overall: cached.overall,
       stallEvidence: null,
+      stallFeedbackAudit: null,
     };
   }
 
@@ -1521,6 +1815,13 @@ export async function scoreTranscript(
   // consulting scoring path. It is a small sibling of timingGrounding, not a
   // new rubric or scoring-weight mechanism.
   const priceGrounding = isLeadership ? "" : buildPriceGroundingBlock(transcript);
+  // Dedicated Stall & Excuse Handling sessions receive an additional
+  // transcript-derived inventory of actions already taken. Unlike
+  // stallEvidence, this is built before the model writes feedback, so it can
+  // prevent a redundant "you should have asked..." recommendation rather than
+  // merely record it after the fact. It is intentionally absent from every
+  // non-stall coaching path.
+  const stallActionGrounding = isStallSession ? buildStallActionGroundingBlock(transcript) : "";
 
   // Same volatile-tail treatment as timingGrounding: only present when the
   // caller (today, only the demo's always-scores /complete route) tells us
@@ -1537,6 +1838,7 @@ export async function scoreTranscript(
         `${transcriptHeaderForScoring(transcript)}\n${transcriptText}`,
         timingGrounding,
         priceGrounding,
+        stallActionGrounding,
         noRecommendationNote,
       ]
         .filter((part) => part.length > 0)
@@ -1544,11 +1846,17 @@ export async function scoreTranscript(
       cacheKeyForPrefix(stablePrefix)
     )
   ).trim();
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error("Scoring model did not return valid JSON");
-  }
-  const parsed = JSON.parse(jsonMatch[0]);
+  // Dedicated stall scoring uses the same resilient top-level extractor as its
+  // structured adjudicator. This accepts a usable score object followed by
+  // harmless wrapper text or a duplicate object, while non-stall behavior
+  // remains byte-for-byte unchanged.
+  const parsed = isStallSession
+    ? extractJsonObject(raw)
+    : (() => {
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("Scoring model did not return valid JSON");
+        return JSON.parse(jsonMatch[0]);
+      })();
 
   const rubric = Object.fromEntries(keys.map((k) => [k, parsed[k] ?? 0])) as unknown as
     | RubricScores
@@ -1567,7 +1875,86 @@ export async function scoreTranscript(
         closeExpectationForTransactionType(transactionType)
       );
 
-  const result: ScoreResult = { rubric, feedback: parsed.feedback ?? "", overall, stallEvidence };
+  // Dedicated stall sessions make a bounded structured-decision pass. AI owns
+  // semantic equivalence and fairness; deterministic code validates all turn
+  // references and renders the final prose from the validated fields.
+  const candidateFeedback = parsed.feedback ?? "";
+  const adjudicator = deps.stallFeedbackAdjudicator ?? defaultScoreResponder;
+  let stallDecision: StallFeedbackDecision | null = null;
+  if (isStallSession) {
+    const requestDecision = async (input: string, cacheKey: string) => {
+      try {
+        return {
+          decision: parseStallFeedbackDecision(await adjudicator(input, cacheKey)),
+          failures: [] as StallFeedbackDecisionFailure[],
+        };
+      } catch (error) {
+        return {
+          decision: null,
+          failures: [
+            {
+              field: "response",
+              reason: error instanceof Error ? error.message : String(error),
+            },
+          ],
+        };
+      }
+    };
+    const initialAttempt = await requestDecision(
+      buildStallFeedbackAdjudicationPrompt(transcript, candidateFeedback),
+      cacheKeyForPrefix(STALL_FEEDBACK_ADJUDICATION_INSTRUCTION),
+    );
+    const initial = initialAttempt.decision;
+    const initialFailures = initial
+      ? validateStallFeedbackDecision(initial, transcript)
+      : initialAttempt.failures;
+    if (initialFailures.length === 0) {
+      stallDecision = initial!;
+    } else {
+      const correctionAttempt = await requestDecision(
+        buildStallFeedbackCorrectionPrompt(
+          transcript,
+          candidateFeedback,
+          initial ?? buildSafeStallPraiseDecision(transcript),
+          initialFailures,
+        ),
+        cacheKeyForPrefix(`${STALL_FEEDBACK_ADJUDICATION_INSTRUCTION}:correction`),
+      );
+      const correction = correctionAttempt.decision;
+      const correctionFailures = correction
+        ? validateStallFeedbackDecision(correction, transcript)
+        : correctionAttempt.failures;
+      if (correctionFailures.length === 0) {
+        stallDecision = correction!;
+      } else {
+        const recoveryAttempt = await requestDecision(
+          buildStallFeedbackRecoveryPrompt(
+            transcript,
+            candidateFeedback,
+            initial ?? buildSafeStallPraiseDecision(transcript),
+            initialFailures,
+            correction ?? buildSafeStallPraiseDecision(transcript),
+            correctionFailures,
+          ),
+          cacheKeyForPrefix(`${STALL_FEEDBACK_ADJUDICATION_INSTRUCTION}:recovery`),
+        );
+        const recovery = recoveryAttempt.decision;
+        // A bad recovery never leaks model prose. Fall back to exact-turn,
+        // deterministic strengths so production still returns useful feedback.
+        stallDecision =
+          recovery && validateStallFeedbackDecision(recovery, transcript).length === 0
+            ? recovery
+            : buildSafeStallPraiseDecision(transcript);
+      }
+    }
+  }
+  const result: ScoreResult = {
+    rubric,
+    feedback: stallDecision ? renderStallFeedbackDecision(stallDecision, transcript) : candidateFeedback,
+    overall,
+    stallEvidence,
+    stallFeedbackAudit: stallDecision,
+  };
 
   // Persist under the content hash so the identical input returns this exact
   // result next time with no API call. The raw transcript + params are stored

@@ -1200,6 +1200,12 @@ describe("scoreTranscript - structured stallEvidence", () => {
       feedback: "Specific, grounded coaching feedback.",
       stallEvidence,
     });
+  const acceptedStallFeedback: ScoreResponder = async () =>
+    JSON.stringify({
+      disposition: "praise_only",
+      strengths: [{ traineeTurn: 2, observation: "This invited the customer to explain what they were comparing." }],
+      improvement: null,
+    });
 
   test("returns populated fixed-vocabulary evidence for a stall-type session", async () => {
     const cache = makeInMemoryCache();
@@ -1217,6 +1223,7 @@ describe("scoreTranscript - structured stallEvidence", () => {
       responder,
       cache,
       stallType: "think_it_over",
+      stallFeedbackAdjudicator: acceptedStallFeedback,
     });
 
     assert.deepEqual(result.rubric, {
@@ -1278,6 +1285,7 @@ describe("scoreTranscript - structured stallEvidence", () => {
       responder: async () => scoringResponse(malformedEvidence),
       cache: makeInMemoryCache(),
       stallType: "think_it_over",
+      stallFeedbackAdjudicator: acceptedStallFeedback,
     });
 
     assert.deepEqual(result.rubric, {
@@ -1287,7 +1295,8 @@ describe("scoreTranscript - structured stallEvidence", () => {
       naturalClose: 84,
       relationshipContinuity: 85,
     });
-    assert.equal(result.feedback, "Specific, grounded coaching feedback.");
+    assert.match(result.feedback, /At turn 2/);
+    assert.match(result.feedback, /What are you comparing us against/);
     assert.equal(result.stallEvidence, null);
   });
 });
