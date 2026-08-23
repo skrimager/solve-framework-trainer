@@ -2,6 +2,8 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import type { Server } from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { storage } from "./storage";
 import { registerCoachingRoutes } from "./routes";
@@ -9,7 +11,9 @@ import {
   COACHING_SYSTEM,
   buildCoachingPrompt,
   buildCoachingStablePrefix,
+  buildStallChallengeAdjudicationPrompt,
   getCoachingReply,
+  STALL_CHALLENGE_ADJUDICATION_INSTRUCTION,
   type CoachingResponder,
 } from "./coaching";
 import {
@@ -27,6 +31,17 @@ const TRANSCRIPT: TranscriptMessage[] = [
   { role: "consultant", content: "Great, what brought you in today?", timestamp: "t2" },
   { role: "customer", content: "We're outgrowing our current place.", timestamp: "t3" },
 ];
+
+type ProductionStallSession = { sessionId: number; transcript: string };
+const PRODUCTION_STALL_SESSIONS = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./fixtures/wade-stall-sessions-528-530.json", import.meta.url)), "utf8"),
+) as ProductionStallSession[];
+
+function productionStallTranscript(sessionId: number): TranscriptMessage[] {
+  const session = PRODUCTION_STALL_SESSIONS.find((candidate) => candidate.sessionId === sessionId);
+  assert.ok(session, `missing production stall session ${sessionId}`);
+  return JSON.parse(session.transcript) as TranscriptMessage[];
+}
 
 // ===========================================================================
 // Prompt-content tests (pure functions, no network) — mirror llm.test.ts
@@ -285,6 +300,193 @@ describe("getCoachingReply", () => {
   });
 });
 
+describe("stall coaching challenge adjudication", () => {
+  function stallParams(
+    transcript: TranscriptMessage[],
+    feedback: string,
+    question: string,
+    thread: Array<{ role: "trainee" | "coach"; content: string }> = [],
+  ) {
+    return {
+      track: "consulting",
+      feedback,
+      rubricScoresJson: null,
+      overallScore: 70,
+      transcript,
+      thread,
+      question,
+      stallType: "think_it_over",
+    };
+  }
+
+  test("accepts a true session-528 challenge and explicitly concedes with the confirming turn", async () => {
+    const params = stallParams(
+      productionStallTranscript(528),
+      "You should have asked what was making the customer uncertain about getting the roof fixed.",
+      "I already asked that in turn 24.",
+    );
+    let seen = "";
+    const responder: CoachingResponder = async (input) => {
+      seen = input;
+      return JSON.stringify({
+        outcome: "accepted",
+        coveredTraineeTurns: [24],
+        laterCustomerEvidenceTurn: null,
+        evidenceTerms: [],
+        narrowerGap: null,
+        ambiguity: null,
+        noLaterEvidenceSupportsNarrower: true,
+      });
+    };
+
+    const reply = await getCoachingReply(params, responder);
+    assert.match(reply, /You(?:'re| are) right/i);
+    assert.match(reply, /turn 24/i);
+    assert.match(seen, /STALL COACHING STRUCTURED CHALLENGE DECISION/);
+    assert.match(seen, /Turn 24: diagnostic question.*ALREADY COVERED by the TRAINEE/);
+  });
+
+  test("holds defensible session-529 advice only after acknowledging the covered question and narrower transcript gap", async () => {
+    const params = stallParams(
+      productionStallTranscript(529),
+      'You asked about savings at turn 10, then could have followed up on the customer’s typical usage at turn 11.',
+      "I already asked what savings he meant in turn 10, so why are you still recommending a question?",
+    );
+    let calls = 0;
+    const responder: CoachingResponder = async (input) => {
+      calls += 1;
+      if (input.includes("NEUTRAL STALL CHALLENGE VERIFICATION")) {
+        return JSON.stringify({
+          outcome: "defensible",
+          coveredTraineeTurns: [10],
+          laterCustomerEvidenceTurn: 11,
+          evidenceTerms: ["typical", "usage"],
+          narrowerGap: "whether the estimate reflects typical usage",
+          ambiguity: null,
+          noLaterEvidenceSupportsNarrower: false,
+        });
+      }
+      // The neutral verifier must override this overly-conceding first read
+      // because the customer later supplied the distinct typical-usage issue.
+      return JSON.stringify({
+        outcome: "accepted",
+        coveredTraineeTurns: [10],
+        laterCustomerEvidenceTurn: null,
+        evidenceTerms: [],
+        narrowerGap: null,
+        ambiguity: null,
+        noLaterEvidenceSupportsNarrower: null,
+      });
+    };
+
+    const reply = await getCoachingReply(params, responder);
+    assert.match(reply, /turn 10/i);
+    assert.match(reply, /turn 11/i);
+    assert.match(reply, /still hold the narrower focus/i);
+    assert.match(reply, /typical usage/i);
+    assert.equal(calls, 2);
+  });
+
+  test("normalizes a contradictory accepted session-529 verifier result into constrained usage-pattern coaching", async () => {
+    const params = stallParams(
+      productionStallTranscript(529),
+      "You asked about savings at turn 10, then could have followed up on the customer’s typical usage at turn 11.",
+      "I already asked what savings he meant in turn 10, so why are you still recommending a question?",
+    );
+    let calls = 0;
+    const responder: CoachingResponder = async (input) => {
+      calls += 1;
+      if (input.includes("NEUTRAL STALL CHALLENGE VERIFICATION")) {
+        return JSON.stringify({
+          outcome: "accepted",
+          coveredTraineeTurns: [10],
+          laterCustomerEvidenceTurn: 11,
+          evidenceTerms: ["typical usage", "estimates"],
+          narrowerGap: null,
+          ambiguity: null,
+          noLaterEvidenceSupportsNarrower: null,
+        });
+      }
+      if (input.includes("prior decision failed validation")) {
+        // The bounded correction repeats the contradictory shape. The
+        // application must conservatively render the evidence-backed focus.
+        return JSON.stringify({
+          outcome: "accepted",
+          coveredTraineeTurns: [10],
+          laterCustomerEvidenceTurn: 11,
+          evidenceTerms: ["typical usage", "estimates"],
+          narrowerGap: null,
+          ambiguity: null,
+          noLaterEvidenceSupportsNarrower: null,
+        });
+      }
+      return JSON.stringify({
+        outcome: "accepted",
+        coveredTraineeTurns: [10],
+        laterCustomerEvidenceTurn: null,
+        evidenceTerms: [],
+        narrowerGap: null,
+        ambiguity: null,
+        noLaterEvidenceSupportsNarrower: null,
+      });
+    };
+
+    const reply = await getCoachingReply(params, responder);
+    assert.equal(calls, 3);
+    assert.match(reply, /turn 10/i);
+    assert.match(reply, /turn 11/i);
+    assert.match(reply, /typical usage/i);
+    assert.match(reply, /still hold the narrower focus/i);
+  });
+
+  test("handles an ambiguous challenge without overclaiming and asks only for the needed clarification", async () => {
+    const ambiguousTranscript: TranscriptMessage[] = [
+      { role: "customer", content: "I need more time to look at this.", timestamp: "t1" },
+      { role: "consultant", content: "I can help with that.", timestamp: "t2" },
+    ];
+    const params = stallParams(
+      ambiguousTranscript,
+      "You may have moved past the request for more time too quickly.",
+      "I already addressed that concern, didn't I?",
+    );
+    const responder: CoachingResponder = async () =>
+      JSON.stringify({
+        outcome: "ambiguous",
+        coveredTraineeTurns: [2],
+        laterCustomerEvidenceTurn: null,
+        evidenceTerms: [],
+        narrowerGap: null,
+        ambiguity: "the transcript does not show what concern or information was explored",
+        noLaterEvidenceSupportsNarrower: null,
+      });
+
+    const reply = await getCoachingReply(params, responder);
+    assert.match(reply, /turn 2/i);
+    assert.match(reply, /does not show/i);
+    assert.match(reply, /avoid drawing a firmer conclusion/i);
+  });
+
+  test("keeps an accepted correction in the next stall-coaching prompt through the persisted thread context", () => {
+    const correction =
+      'You are right — turn 30 asked how to make the numbers solid, so I withdraw the generic data question.';
+    const prompt = buildStallChallengeAdjudicationPrompt(
+      stallParams(
+        productionStallTranscript(530),
+        "Ask what data would help alleviate the concern.",
+        "What should I improve next?",
+        [
+          { role: "trainee", content: "I already asked that in turn 30." },
+          { role: "coach", content: correction },
+        ],
+      ),
+    );
+
+    assert.ok(prompt.includes(correction));
+    assert.ok(prompt.includes(STALL_CHALLENGE_ADJUDICATION_INSTRUCTION));
+    assert.match(prompt, /Do NOT provide a narrower gap, later evidence, or a replacement critique/i);
+  });
+});
+
 // ===========================================================================
 // Route tests — bare express app, injected responder, stubbed storage
 // ===========================================================================
@@ -298,13 +500,40 @@ describe("coaching routes", () => {
   let sessionsById: Record<number, any>;
   let usersById: Record<number, any>;
   let officesById: Record<number, any>;
+  let scenarioForTest: any;
+  let responderInputs: string[];
 
   before(async () => {
     const app = express();
     app.use(express.json());
     // Deterministic responder so no network is hit and the reply is assertable.
     registerCoachingRoutes(app, {
-      responder: async () => "Try opening with a question about their goals.",
+      responder: async (input) => {
+        responderInputs.push(input);
+        if (input.includes("STALL COACHING STRUCTURED CHALLENGE DECISION")) {
+          if (input.includes("Trainee's new question:\nI already asked that in turn 30")) {
+            return JSON.stringify({
+              outcome: "accepted",
+              coveredTraineeTurns: [30],
+              laterCustomerEvidenceTurn: null,
+              evidenceTerms: [],
+              narrowerGap: null,
+              ambiguity: null,
+              noLaterEvidenceSupportsNarrower: true,
+            });
+          }
+          return JSON.stringify({
+            outcome: "not_a_challenge",
+            coveredTraineeTurns: [30],
+            laterCustomerEvidenceTurn: null,
+            evidenceTerms: [],
+            narrowerGap: null,
+            ambiguity: null,
+            noLaterEvidenceSupportsNarrower: null,
+          });
+        }
+        return "Try opening with a question about their goals.";
+      },
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, () => resolve());
@@ -320,6 +549,8 @@ describe("coaching routes", () => {
 
   beforeEach(() => {
     messages = [];
+    responderInputs = [];
+    scenarioForTest = { id: 5, track: "consulting", difficulty: "beginner", stallType: null };
     sessionsById = {
       10: {
         id: 10, userId: 1, scenarioId: 5, status: "completed",
@@ -338,7 +569,7 @@ describe("coaching routes", () => {
     (storage as any).getSession = async (id: number) => sessionsById[id];
     (storage as any).getUser = async (id: number) => usersById[id];
     (storage as any).getOffice = async (id: number) => officesById[id];
-    (storage as any).getScenario = async () => ({ id: 5, track: "consulting", difficulty: "beginner" });
+    (storage as any).getScenario = async () => scenarioForTest;
     (storage as any).createCoachingMessage = async (m: any) => {
       const row = { id: messages.length + 1, ...m };
       messages.push(row);
@@ -374,6 +605,32 @@ describe("coaching routes", () => {
     assert.equal(body.messages[0].content, "How could I have opened better?");
     assert.equal(body.messages[1].role, "coach");
     assert.equal(body.messages[1].content, "Try opening with a question about their goals.");
+  });
+
+  test("a true stall challenge is persisted as a correction and supplied to the next coaching turn", async () => {
+    scenarioForTest = { id: 5, track: "consulting", difficulty: "beginner", stallType: "email_me_a_quote" };
+    sessionsById[10].transcript = JSON.stringify(productionStallTranscript(530));
+    sessionsById[10].feedback = "Ask what data would help alleviate the concern.";
+
+    const first = await post("/api/sessions/10/coaching", {
+      userId: 1,
+      content: "I already asked that in turn 30.",
+    });
+    assert.equal(first.status, 200);
+    assert.match(first.body.messages[1].content, /You(?:'re| are) right/i);
+    assert.match(first.body.messages[1].content, /turn 30/i);
+
+    const second = await post("/api/sessions/10/coaching", {
+      userId: 1,
+      content: "What should I improve next?",
+    });
+    assert.equal(second.status, 200);
+    assert.equal(second.body.messages.length, 4);
+    assert.match(second.body.messages[3].content, /At turn 30/i);
+    assert.ok(
+      responderInputs.some((input) => input.includes("I withdraw that recommendation")),
+      "the persisted accepted correction must be part of the next model context",
+    );
   });
 
   test("a manager cannot post on behalf of the trainee (read-only)", async () => {

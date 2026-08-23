@@ -3229,6 +3229,7 @@ export function registerCoachingRoutes(
           transcript,
           thread,
           question,
+          stallType: scenario?.stallType ?? null,
         },
         responder,
       );
