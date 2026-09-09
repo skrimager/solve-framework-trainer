@@ -106,9 +106,9 @@ const cases = [
   {
     label: "Exact partnership and platform-demo email",
     industry: "Consulting",
-    original: `Good Morning.  
+    original: `Good Morning.
 
-I would love to share a platform I built that can dramatically help teams understand and practice exactly what you’re teaching.  I believe it is a great tool that could impact and empower your business and I can give you a quick demonstration of how it works and the amazing benefits and how it ties together your message.  
+I would love to share a platform I built that can dramatically help teams understand and practice exactly what you’re teaching.  I believe it is a great tool that could impact and empower your business and I can give you a quick demonstration of how it works and the amazing benefits and how it ties together your message.
 If you like it, I would be willing to advertise your services on the platform and pay a commission for any subscribers that use the platform.`,
   },
   {
