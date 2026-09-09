@@ -35,6 +35,28 @@ const GOOD_REPLY_OBJECT = {
   coaching: 'You opened with "ready to sell", which asks a stranger to decide.',
   rewrite:
     "Hi [their name], I know this is out of the blue, but what has changed about your place that makes selling worth considering now? Reply STOP to opt out.",
+  intent: {
+    channel: "sms",
+    messageType: "cold_outbound",
+    audienceRelationship: "salesperson contacting a homeowner",
+    primaryIntent: "start a conversation about the homeowner's selling plans",
+    secondaryIntents: [],
+    valueMechanisms: [],
+    mustKeep: ["selling the recipient's home"],
+    asks: ["share what changed"],
+    offers: [],
+    channelCues: ["short casual message"],
+    requiresReflectionQuestion: true,
+    requiresSmsOptOut: true,
+  },
+  intentVerification: {
+    passes: true,
+    preservedIntents: ["start a conversation about the homeowner's selling plans"],
+    missingOrChanged: [],
+    channelMatches: true,
+    smsOptOutCompliant: true,
+    explanation: "The objective and SMS channel are preserved.",
+  },
 };
 const GOOD_REPLY = JSON.stringify(GOOD_REPLY_OBJECT);
 // scoreOutreachMessage's internal rewrite verification re-scores the rewrite
